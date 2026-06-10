@@ -1,0 +1,86 @@
+[build-system]
+requires = ["uv_build>=0.9.11"]
+build-backend = "uv_build"
+
+[project]
+name = "tekmar-482"
+version = "0.1.0"
+description = "Async Python client for the tekmar 482 tN4 gateway"
+readme = "README.md"
+requires-python = ">=3.12"
+license = "MIT"
+authors = [
+  { name = "James Hilliard" },
+]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Framework :: AsyncIO",
+  "Intended Audience :: Developers",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Programming Language :: Python :: 3.14",
+  "Topic :: Home Automation",
+  "Topic :: Software Development :: Libraries",
+]
+dependencies = []
+
+[project.optional-dependencies]
+serial = [
+  "serialx>=1.8.1",
+]
+
+[project.scripts]
+tekmar-482 = "tekmar_482.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/jameshilliard/tekmar-482"
+Issues = "https://github.com/jameshilliard/tekmar-482/issues"
+
+[dependency-groups]
+dev = [
+  "mypy>=2.1.0",
+  "pre-commit>=4.2.0",
+  "ruff>=0.15.15",
+  "serialx>=1.8.1",
+]
+
+[tool.ruff]
+target-version = "py314"
+
+[tool.ruff.lint]
+select = ["ALL"]
+ignore = [
+  "ASYNC109",
+  "C901",
+  "D100",
+  "D101",
+  "D102",
+  "D103",
+  "D104",
+  "D105",
+  "D107",
+  "D203",
+  "D213",
+  "PLR0911",
+  "PLR0912",
+  "PLR0913",
+  "PT",
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = [
+  "PLR2004",
+  "S101",
+]
+
+[tool.ruff.lint.flake8-tidy-imports.banned-api]
+"typing.cast".msg = "Avoid typing.cast; prefer Protocols, overloads, or narrower helper APIs."
+"typing_extensions.cast".msg = "Avoid typing_extensions.cast; prefer Protocols, overloads, or narrower helper APIs."
+
+[tool.mypy]
+python_version = "3.14"
+strict = true
+warn_unreachable = true
+mypy_path = "src"
+packages = ["tekmar_482"]
