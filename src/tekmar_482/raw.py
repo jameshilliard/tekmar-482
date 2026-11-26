@@ -10,13 +10,14 @@ from enum import IntEnum
 from typing import TYPE_CHECKING, Protocol
 
 from .constants import TN4_PORTS
-from .exceptions import ConnectionClosedError, ProtocolError
+from .exceptions import ConnectionClosedError, ProtocolError, TekmarError
 from .native import NativeFrame, NativeMessage
 from .packet import TYPE_TN4
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 
+    from .native import NativeAddress, NativeBlockQuery
     from .packet import Packet
 
 _HEADER = 4
@@ -77,6 +78,16 @@ class TxResult:
     port: int
     status: TxStatus
     reason: RejectReason | FailureReason | int | None = None
+
+
+class NativeTransmitError(TekmarError):
+    """The gateway rejected or failed an application request on the tN4 link."""
+
+    def __init__(self, result: TxResult) -> None:
+        self.result = result
+        super().__init__(
+            f"port {result.port}: {result.status.name}, reason {result.reason!r}",
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -164,6 +175,13 @@ class BridgeStream(Protocol):
     @property
     def diagnostics(self) -> Mapping[int, PortDiagnostic]: ...
     async def send(self, port: int, body: bytes | NativeMessage) -> TxResult: ...
+    async def read_block(
+        self,
+        port: int,
+        query: NativeBlockQuery,
+        *,
+        source: NativeAddress,
+    ) -> NativeFrame: ...
     async def read(self) -> _Record | CaptureGap: ...
 
 
@@ -177,6 +195,10 @@ class RawDispatcher:
         self._write = write
         self.diagnostics: dict[int, PortDiagnostic] = {}
         self._pending: dict[int, asyncio.Future[TxResult]] = {}
+        self._blocks: dict[
+            int,
+            tuple[NativeBlockQuery, asyncio.Future[NativeFrame]],
+        ] = {}
         self._records: deque[_Record] = deque(maxlen=backlog)
         self._lost = 0
         self._ready = asyncio.Event()
@@ -217,6 +239,36 @@ class RawDispatcher:
             elif not future.cancelled():
                 future.exception()
 
+    async def read_block(
+        self,
+        port: int,
+        query: NativeBlockQuery,
+        *,
+        source: NativeAddress,
+    ) -> NativeFrame:
+        """Send once and wait for a matching new report without consuming captures."""
+        self._check_active()
+        if port in self._blocks:
+            msg = f"block read already in progress on port {port}"
+            raise ProtocolError(msg)
+        future: asyncio.Future[NativeFrame] = asyncio.get_running_loop().create_future()
+        self._blocks[port] = (query, future)
+        try:
+            result = await self.send(port, query.request(source))
+            # A peer can receive the request even if its link ACK was missed.
+            if result.status != TxStatus.ACK and not (
+                result.status == TxStatus.FAILED
+                and result.reason == FailureReason.NO_ACK
+            ):
+                raise NativeTransmitError(result)
+            return await future
+        finally:
+            del self._blocks[port]
+            if not future.done():
+                future.cancel()
+            elif not future.cancelled():
+                future.exception()
+
     def feed(self, packet: Packet) -> None:
         record = _decode(packet)
         if isinstance(record, TxResult):
@@ -227,6 +279,12 @@ class RawDispatcher:
             if not future.done():
                 future.set_result(record)
         else:
+            if isinstance(record, NativeFrame) and (
+                waiter := self._blocks.get(record.port)
+            ):
+                query, report = waiter
+                if not report.done() and query.matches(record.message):
+                    report.set_result(record)
             if len(self._records) == self._records.maxlen:
                 self._lost += 1
             self._records.append(record)
@@ -247,6 +305,11 @@ class RawDispatcher:
             self._ready.clear()
             await self._ready.wait()
 
+    def _fail_blocks(self, error: Exception) -> None:
+        for _, report in self._blocks.values():
+            if not report.done():
+                report.set_exception(error)
+
     def fail(self, error: Exception) -> None:
         if self._error is not None:
             return
@@ -254,6 +317,7 @@ class RawDispatcher:
         for future in self._pending.values():
             if not future.done():
                 future.set_exception(self._error)
+        self._fail_blocks(error)
         self._ready.set()
 
     @asynccontextmanager
@@ -277,6 +341,7 @@ class RawDispatcher:
         finally:
             self._active = False
             self._ready.set()
+            self._fail_blocks(ConnectionClosedError("raw session closed"))
             reader.cancel()
             await asyncio.gather(reader, return_exceptions=True)
 

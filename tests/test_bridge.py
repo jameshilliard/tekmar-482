@@ -293,6 +293,59 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
                 "tx_result": {"port": 1, "status": "ACK", "reason": None},
             }
 
+    async def test_cli_read_block_reports_the_selected_sensor_over_tcp(self) -> None:
+        request = bytes.fromhex("6d70000b c60012 04000000 05000000")
+        report = bytes.fromhex("6e7128c6 c60007 053412")
+
+        async def app(
+            reader: asyncio.StreamReader,
+            writer: asyncio.StreamWriter,
+        ) -> None:
+            if (first := await reader.readexactly(1)) == b"?":
+                assert await reader.readexactly(5) == b"\r\nJ\r\n"
+                assert not await reader.read()
+                return
+            caps = management(1, 1)
+            assert first + await reader.readexactly(len(caps) - 1) == caps
+            writer.write(management(1, 4, bytes([1, 0, 5, 3])))
+            for cmd, reply in (
+                (management(2, 0, b"\x01"), management(2, 3, b"\x01")),
+                (management(9, 0, b"\x04"), management(9, 3, b"\x04")),
+                (
+                    serialize(Packet(1, b"\x01\x02" + request)),
+                    serialize(Packet(1, b"\x02\x02\0"))
+                    + serialize(Packet(1, bytes.fromhex("000207000000") + report)),
+                ),
+                (management(2, 0, b"\0"), management(2, 3, b"\0")),
+            ):
+                assert await reader.readexactly(len(cmd)) == cmd
+                writer.write(reply)
+
+        async with listen(app) as endpoint, asyncio.timeout(3):
+            stdout = StringIO()
+            args = build_parser().parse_args(
+                [
+                    "read-block",
+                    "2",
+                    "0x12",
+                    "3",
+                    "0xc6",
+                    "--selector",
+                    "5",
+                    "--ack",
+                    "--tcp",
+                    f"{endpoint.address}:{endpoint.port}",
+                    "--json",
+                ],
+            )
+            assert args.timeout == 20
+            assert await run(args, stdout=stdout) == 0
+            result = json.loads(stdout.getvalue())
+            assert result["port"] == 2 and result["timestamp_ms"] == 7
+            assert result["body"] == report.hex()
+            assert result["fields"]["sensor_id"] == 5
+            assert result["fields"]["slab_high_raw"] == 0x1234
+
     async def test_vendor_opt_in_never_probes_rom(self) -> None:
         async def app(
             reader: asyncio.StreamReader,

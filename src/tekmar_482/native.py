@@ -7,8 +7,15 @@ from datetime import time
 from enum import IntEnum
 from typing import TYPE_CHECKING, Self
 
-from ._native_payloads import decode_payload
+from ._native_payloads import (
+    BLOCK_SELECTORS,
+    H_UNAVAILABLE,
+    SNOW_SLAB_TARGETS,
+    SnowmeltBlock,
+    decode_payload,
+)
 from .constants import SETPOINT_GROUP_IDS, TN4_PORTS
+from .units import celsius_to_degh, degh_to_celsius
 
 if TYPE_CHECKING:
     from calendar import Day
@@ -19,6 +26,8 @@ _MAX_PAYLOAD = 63
 _REQUEST = 0x2D7
 _UPDATE = 0x2DF
 _REPORT = 0x2E7
+_BLOCK_HEADER = 3
+_WORD_MASK = 0b11
 _SINGLE = 0x10
 _MULTI = 0x38
 _DAYS = 7
@@ -214,6 +223,122 @@ class NativeFrame:
     @property
     def decoded(self) -> dict[str, str | int | float]:
         return self.message.decoded
+
+
+@dataclass(frozen=True, slots=True)
+class NativeBlockQuery:
+    """An addressed read with a known selector layout, independent of the host port."""
+
+    target: NativeAddress
+    block_id: int
+    selector: int | None = None
+
+    def __post_init__(self) -> None:
+        self.target.request_mask()
+        _uint(self.block_id, 16)
+        spec = BLOCK_SELECTORS.get(self.block_id)
+        if spec is None:
+            if self.selector is not None:
+                msg = f"block {self.block_id:#x} has no known selector"
+                raise ValueError(msg)
+        elif self.selector is None or not 0 <= self.selector <= spec[1]:
+            msg = f"block {self.block_id:#x} requires {spec[0]} in 0..{spec[1]}"
+            raise ValueError(msg)
+
+    def request(self, source: NativeAddress) -> NativeMessage:
+        return NativeMessage.request_block(
+            self.block_id,
+            source=source,
+            target=self.target,
+            argument=self.selector or 0,
+        )
+
+    def matches(self, message: NativeMessage) -> bool:
+        """Match the reporting node and payload; the stream checks the physical port."""
+        data = message.payload
+        if (
+            message.message_id != _REPORT
+            or message.source.subnet != self.target.subnet
+            or message.source.node & 31 != self.target.node & 31
+            or len(data) < _BLOCK_HEADER
+            or int.from_bytes(data[:2], "little") != self.block_id
+        ):
+            return False
+        decoded = message.decoded
+        if "truncated" in decoded or decoded.get("block_layout") == "ambiguous":
+            return False
+        if self.selector is None:
+            return True
+        return bool(data[2] & 1) and (
+            data[_BLOCK_HEADER] & BLOCK_SELECTORS[self.block_id][1] == self.selector
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class SnowmeltSetpoint:
+    """One complete native slab target report; changing it does not enable a group."""
+
+    port: int
+    target: NativeAddress
+    block: SnowmeltBlock
+    raw: int
+
+    def __post_init__(self) -> None:
+        if self.block not in SNOW_SLAB_TARGETS or self.port not in TN4_PORTS:
+            msg = "expected a melt, idle or storm target on a physical port"
+            raise ValueError(msg)
+        self.target.request_mask()
+        _uint(self.raw, 16)
+
+    @classmethod
+    def from_frame(cls, frame: NativeFrame) -> Self:
+        data = frame.message.payload
+        if (
+            frame.message_id != _REPORT
+            or len(data) != _BLOCK_HEADER + 2
+            or data[2] != _WORD_MASK
+        ):
+            msg = "expected a complete, unextended snowmelt setpoint block report"
+            raise ValueError(msg)
+        return cls(
+            frame.port,
+            frame.message.source,
+            SnowmeltBlock(int.from_bytes(data[:2], "little")),
+            int.from_bytes(data[_BLOCK_HEADER:], "little"),
+        )
+
+    @property
+    def is_off(self) -> bool:
+        return self.raw == 0 and self.block != SnowmeltBlock.MELT_SETPOINT
+
+    @property
+    def celsius(self) -> float | None:
+        if not self.raw or self.raw in H_UNAVAILABLE:
+            return None
+        return degh_to_celsius(self.raw)
+
+    def update_celsius(
+        self,
+        value: float | None,
+        *,
+        source: NativeAddress,
+    ) -> NativeMessage:
+        if value is None:
+            if self.block == SnowmeltBlock.MELT_SETPOINT:
+                msg = "the melt slab target has no Off setting"
+                raise ValueError(msg)
+            raw = 0
+        else:
+            raw = celsius_to_degh(value)
+            if not raw or raw in H_UNAVAILABLE:
+                msg = "temperature encodes a reserved wire value"
+                raise ValueError(msg)
+        return NativeMessage.update_block(
+            self.block,
+            raw.to_bytes(2, "little"),
+            source=source,
+            target=self.target,
+        )
 
 
 class ScheduleEvent(IntEnum):

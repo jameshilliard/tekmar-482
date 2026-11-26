@@ -1,5 +1,6 @@
 """Async Python client for the tekmar 482 gateway."""
 
+from ._native_payloads import SnowmeltBlock
 from ._wire import GatewayEndpoint
 from .bridge import BridgeClient, PanelState
 from .client import Tekmar482Client
@@ -81,9 +82,11 @@ from .models import (
 )
 from .native import (
     NativeAddress,
+    NativeBlockQuery,
     NativeFrame,
     NativeMessage,
     ScheduleEvent,
+    SnowmeltSetpoint,
     WeeklyEvent,
 )
 from .packet import (
@@ -102,6 +105,7 @@ from .raw import (
     FailureReason,
     InvalidCapture,
     InvalidReason,
+    NativeTransmitError,
     PortDiagnostic,
     PortError,
     PortErrorReason,
@@ -252,8 +256,10 @@ __all__ = [
     "MethodSpec",
     "ModeSettingFields",
     "NativeAddress",
+    "NativeBlockQuery",
     "NativeFrame",
     "NativeMessage",
+    "NativeTransmitError",
     "NullTransport",
     "Packet",
     "PacketTransport",
@@ -276,8 +282,10 @@ __all__ = [
     "SetpointDeviceRuntime",
     "SetpointGroupFields",
     "SetpointValues",
+    "SnowmeltBlock",
     "SnowmeltData",
     "SnowmeltRuntime",
+    "SnowmeltSetpoint",
     "Tekmar482Client",
     "Tekmar482Controller",
     "Tekmar482DeviceHandle",

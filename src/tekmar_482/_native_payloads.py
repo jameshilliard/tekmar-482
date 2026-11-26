@@ -1,9 +1,11 @@
 """Native tN4 payloads, independent of the 482's host-side tRPC methods."""
 
 from collections.abc import Callable
+from enum import IntEnum
 
 Fields = dict[str, str | int | float]
 SETBACK = ("wake", "unoccupied_4", "occupied_4", "sleep", "occupied_2", "unoccupied_2", "away", "unknown")
+H_UNAVAILABLE = (0x4000, 0x8000, 0xc000, 0xffff)
 
 
 class ShortPayload(ValueError):
@@ -37,7 +39,7 @@ class Reader:
 def temp(name: str, raw: int, *, deg_e: bool = False) -> Fields:
     fields: Fields = {name + "_raw": raw}
     # Preserve the special value rather than turning a missing sensor into a reading.
-    if raw in ((0xff,) if deg_e else (0x4000, 0x8000, 0xc000, 0xffff)):
+    if raw in ((0xff,) if deg_e else H_UNAVAILABLE):
         fields[name] = "unavailable"
     elif raw != 0:
         fields[name + "_f"] = round(raw * 0.9 + 32 if deg_e else (raw - 850) / 10, 1)
@@ -55,9 +57,14 @@ SNOW_WORDS = {
     0x20: "zone_id", 0x21: "sensor_flags", 0x25: "melt_group_id", 0x26: "storm_group_id",
     0x27: "boiler_output_raw", 0x28: "mix_output_raw", 0x29: "pwm_output_raw",
     0x2a: "system_pump_contacts", 0x2b: "alert_relay_contacts",
-    0x2c: "return_temperature_raw", 0x2d: "supply_temperature_raw",
-    0x2e: "supply_target_raw", 0x2f: "keep_alive", 0x30: "melting_time_minutes",
+    0x2f: "keep_alive", 0x30: "melting_time_minutes",
 }
+SNOW_TEMPERATURES = {
+    0x22: "slab_temperature", 0x23: "slab_setpoint", 0x24: "edge_temperature",
+    0x2c: "return_temperature", 0x2d: "supply_temperature", 0x2e: "supply_target",
+}
+SNOW_OPERATING_STATES = {1: "off", 2: "idle", 3: "storm", 4: "melting"}
+SNOW_APPLICATION_MODES = ("pwm", "boiler", "mixing", "electric", "sensor_only")
 
 
 def snowmelt(r: Reader) -> Fields:
@@ -67,12 +74,13 @@ def snowmelt(r: Reader) -> Fields:
         key, value = r.byte(), r.word()
         prefix = f"pair{index}_"
         fields[prefix + "key"] = f"0x{key:02x}"
-        if key in (34, 35, 36):
-            name = {34: "slab_temperature", 35: "slab_setpoint", 36: "edge_temperature"}[key]
-            fields.update(temp(prefix + name, value))
+        if key in SNOW_TEMPERATURES:
+            fields.update(temp(prefix + SNOW_TEMPERATURES[key], value))
         elif key == 0x1b:
             fields[prefix + "operating_state"] = value >> 8
             fields[prefix + "operating_substate"] = value & 0xff
+            if (state := SNOW_OPERATING_STATES.get(value >> 8)) is not None:
+                fields[prefix + "operating_state_name"] = state
         elif 1 <= key <= 24:
             fields[prefix + "command_status"] = value
         else:
@@ -214,7 +222,10 @@ def block_request(r: Reader) -> Fields:
     fields: Fields = {"block_id": block, "target_subnet": destination,
                       "target_nodes_mask": f"0x{mask:08x}"}
     if len(r.remaining) >= 4:  # Optional arguments in the 483 layout, absent in the 482 request.
-        fields["arguments"] = int.from_bytes(r.take(4), "little")
+        argument = int.from_bytes(r.take(4), "little")
+        fields["arguments"] = argument
+        if (selector := BLOCK_SELECTORS.get(block)) is not None:
+            fields[selector[0]] = argument
     return fields
 
 
@@ -231,6 +242,127 @@ CONTROL_APPS = ("setpoint", "hot_tub", "dhw", "floor", "pool")
 CONTROL_SETUP = ("application_mode", "mode_configuration", "run_mode_configuration",
                  "relay_two_sampling", "relay_two_start_time", "relay_two_duration",
                  "setpoint_enable_address", "outdoor_temp_enable")
+
+class SnowmeltBlock(IntEnum):
+    """Addressed native blocks, not zone-status keys or tRPC methods."""
+
+    MELT_SETPOINT = 0x71
+    IDLE_SETPOINT = 0x72
+    WATER_SENSITIVITY = 0x73
+    MELT_RUN_TIME = 0x74
+    ADDITIONAL_MELT_TIME = 0x75
+    COLD_WEATHER_CUTOFF = 0x76
+    WARM_WEATHER_SHUTDOWN = 0x77
+    STORM_SETPOINT = 0x78
+    STORM_TIME = 0x79
+    SNOW_ICE_SENSOR_TYPE = 0x7a
+    SLAB_SENSOR_SELECTION = 0x7b
+    SLAB_PROTECTION = 0x7c
+    MAXIMUM_MELT_TIME = 0x7d
+    ZONE_ID = 0xc0
+    SENSOR_ID = 0xc1
+    MELT_GROUP = 0xc2
+    STORM_GROUP = 0xc3
+    TRACKED_ZONE = 0xc4
+    MELT_START_TYPE = 0xc5
+    SLAB_HIGH = 0xc6
+    SLAB_LOW = 0xc7
+    SUPPLY_HIGH = 0xc8
+    SUPPLY_LOW = 0xc9
+    RETURN_HIGH = 0xca
+    RETURN_LOW = 0xcb
+    HEAT_RELAY_HOURS = 0xcc
+    HEAT_RELAY_CYCLES = 0xcd
+    WET_LEVEL = 0xce
+    DRY_LEVEL = 0xcf
+    APPLICATION_MODE = 0xd0
+    BOILER_MINIMUM = 0xd1
+    BOILER_MAXIMUM = 0xd2
+
+    @property
+    def selector_field(self) -> str | None:
+        selector = BLOCK_SELECTORS.get(self)
+        return selector[0] if selector else None
+
+
+SNOW_SLAB_TARGETS = (SnowmeltBlock.MELT_SETPOINT, SnowmeltBlock.IDLE_SETPOINT, SnowmeltBlock.STORM_SETPOINT)
+
+# (name, width) in logical byte order. Words are little-endian, including
+# those starting at an odd offset after a sensor, relay or control ID.
+FixedLayout = tuple[tuple[str, int], ...]
+FIXED_BLOCKS: dict[int, FixedLayout] = {
+    SnowmeltBlock.MELT_SETPOINT: (("melt_setpoint", 2),),
+    SnowmeltBlock.IDLE_SETPOINT: (("idle_setpoint", 2),),
+    SnowmeltBlock.WATER_SENSITIVITY: (("water_sensitivity", 1),),
+    SnowmeltBlock.MELT_RUN_TIME: (("melt_run_time_minutes", 2),),
+    SnowmeltBlock.ADDITIONAL_MELT_TIME: (("additional_melt_time_minutes", 2),),
+    SnowmeltBlock.COLD_WEATHER_CUTOFF: (("cold_weather_cutoff_raw", 2),),
+    SnowmeltBlock.WARM_WEATHER_SHUTDOWN: (("warm_weather_shutdown_raw", 2),),
+    SnowmeltBlock.STORM_SETPOINT: (("storm_setpoint", 2),),
+    SnowmeltBlock.STORM_TIME: (("storm_time_minutes", 2),),
+    SnowmeltBlock.SNOW_ICE_SENSOR_TYPE: (("sensor_id", 1), ("snow_ice_sensor_configuration", 1)),
+    SnowmeltBlock.SLAB_SENSOR_SELECTION: (("sensor_id", 1), ("slab_sensor_configuration", 1)),
+    SnowmeltBlock.SLAB_PROTECTION: (("slab_protection", 1),),
+    SnowmeltBlock.MAXIMUM_MELT_TIME: (("maximum_melt_time_hours", 2),),
+    SnowmeltBlock.ZONE_ID: (("zone_id", 1),),
+    SnowmeltBlock.SENSOR_ID: (("sensor_id", 1),),
+    SnowmeltBlock.MELT_GROUP: (("melt_group_id", 1),),
+    SnowmeltBlock.STORM_GROUP: (("storm_group_id", 1),),
+    SnowmeltBlock.TRACKED_ZONE: (("tracked_zone_id", 1),),
+    SnowmeltBlock.MELT_START_TYPE: (("sensor_id", 1), ("melt_start_type", 1)),
+    SnowmeltBlock.SLAB_HIGH: (("sensor_id", 1), ("slab_high_raw", 2)),
+    SnowmeltBlock.SLAB_LOW: (("sensor_id", 1), ("slab_low_raw", 2)),
+    SnowmeltBlock.SUPPLY_HIGH: (("sensor_id", 1), ("supply_high_raw", 2)),
+    SnowmeltBlock.SUPPLY_LOW: (("sensor_id", 1), ("supply_low_raw", 2)),
+    SnowmeltBlock.RETURN_HIGH: (("sensor_id", 1), ("return_high_raw", 2)),
+    SnowmeltBlock.RETURN_LOW: (("sensor_id", 1), ("return_low_raw", 2)),
+    SnowmeltBlock.HEAT_RELAY_HOURS: (("relay_id", 1), ("heat_relay_hours", 2)),
+    SnowmeltBlock.HEAT_RELAY_CYCLES: (("relay_id", 1), ("heat_relay_cycles", 2)),
+    SnowmeltBlock.WET_LEVEL: (("sensor_id", 1), ("wet_level_raw", 2)),
+    SnowmeltBlock.DRY_LEVEL: (("sensor_id", 1), ("dry_level_raw", 2)),
+    SnowmeltBlock.APPLICATION_MODE: (("application_mode", 1), ("application_type", 1)),
+    SnowmeltBlock.BOILER_MINIMUM: (("control_id", 1), ("boiler_minimum_raw", 2)),
+    SnowmeltBlock.BOILER_MAXIMUM: (("control_id", 1), ("boiler_maximum_raw", 2)),
+}
+
+
+# All secondary IDs in the 483 registry occupy logical report byte 1.
+# Schedule headers share it with other flags; other selectors use all bits.
+BLOCK_SELECTORS: dict[int, tuple[str, int]] = {
+    **dict.fromkeys(MULTI_WEEK, ("schedule_id", 7)),
+    **dict.fromkeys((0x3c, 0x3d, 0x43, 0x45), ("boiler_number", 255)),
+    0x44: ("pump_number", 255), 0x46: ("heating_source_id", 255),
+    0x47: ("cooling_source_id", 255), 0x48: ("port_id", 255), 0x49: ("port_id", 255),
+    0x4d: ("mix_pump_id", 255), 0x5a: ("tank_id", 255),
+    **dict.fromkeys(range(0x8b, 0x93), ("heat_pump_source_id", 255)),
+    0x98: ("heat_pump_number", 255),
+    **{b: (FIXED_BLOCKS[b][0][0], 255)
+       for b in (0x7a, 0x7b, *range(0xc5, 0xd0), 0xd1, 0xd2)},
+}
+
+
+def fixed_fields(block: int, layout: FixedLayout, values: dict[int, int]) -> Fields:
+    remaining = dict(values)
+    fields: Fields = {}
+    start = 0
+    for name, width in layout:
+        slots = range(start, start + width)
+        start += width
+        if not all(i in values for i in slots):
+            continue
+        value = int.from_bytes(bytes(remaining.pop(i) for i in slots), "little")
+        if block in SNOW_SLAB_TARGETS:
+            fields.update(temp(name, value))
+            if value == 0 and block != SnowmeltBlock.MELT_SETPOINT:
+                fields[name] = "off"
+        else:
+            fields[name] = value
+            if (block == SnowmeltBlock.APPLICATION_MODE and name == "application_mode"
+                    and value < len(SNOW_APPLICATION_MODES)):
+                fields["application_mode_name"] = SNOW_APPLICATION_MODES[value]
+    # Preserve partial words and future supported slots without assigning units.
+    fields.update({f"byte{i + 1}_raw": value for i, value in remaining.items()})
+    return fields
 
 
 def control_words(block: int) -> tuple[str, ...]:
@@ -297,13 +429,17 @@ def block_report(r: Reader) -> Fields:
     positional = count < span <= length
     if positional:
         fields["block_layout"] = "positional"
+    layout = FIXED_BLOCKS.get(block)
     values: dict[int, int] = {}
     for index in range(span):
         if support & (1 << index):
             values[index] = value = r.byte()
-            fields.update(block_fields(block, index, value))
+            if layout is None:
+                fields.update(block_fields(block, index, value))
         elif positional:
             fields[f"byte{index + 1}_unsupported_raw"] = r.byte()
+    if layout is not None:
+        return fields | fixed_fields(block, layout, values)
     if block == 0:
         for name, start, size in (("product_number", 0, 3), ("j_number", 3, 2),
                                   ("z_number", 5, 1), ("max_tn4_version", 6, 1)):
@@ -323,6 +459,9 @@ def block_update(r: Reader) -> Fields:
     fields: Fields = {"target_subnet": dest, "target_node": node & 31,
                       "target_node_flags": node >> 5, "block_id": block}
     # Updates have no support mask. Decode only layouts with known ordering.
+    if (layout := FIXED_BLOCKS.get(block)) is not None:
+        data = r.take(sum(width for _, width in layout))
+        return fields | fixed_fields(block, layout, dict(enumerate(data)))
     words = control_words(block)
     if words:
         if block == 0x2e and len(r.remaining) == 6:

@@ -4,14 +4,101 @@ from datetime import UTC, datetime, time
 
 from tekmar_482 import (
     NativeAddress,
+    NativeBlockQuery,
     NativeFrame,
     NativeMessage,
     ScheduleEvent,
+    SnowmeltBlock,
+    SnowmeltSetpoint,
     WeeklyEvent,
 )
 
 
 class NativeTests(unittest.TestCase):
+    def test_addressed_block_query_checks_report_and_selector(self) -> None:
+        peer = NativeAddress(0x12, 3)
+        locked = NativeAddress(0x12, 35)
+        src = NativeAddress(0, 0)
+        single = NativeBlockQuery(peer, SnowmeltBlock.ZONE_ID)
+        indexed = NativeBlockQuery(peer, SnowmeltBlock.SNOW_ICE_SENSOR_TYPE, 0)
+        self.assertEqual(
+            single.request(src).payload,
+            bytes.fromhex("c000120400000000000000"),
+        )
+        self.assertEqual(
+            indexed.request(src).payload,
+            bytes.fromhex("7a00120400000000000000"),
+        )
+        assert single.matches(NativeMessage(0x2E7, locked, bytes.fromhex("c00000")))
+        assert indexed.matches(
+            NativeMessage(0x2E7, locked, bytes.fromhex("7a00030004")),
+        )
+        for mid, source, data in (
+            (0x2DF, locked, "7a00030004"),
+            (0x2E7, NativeAddress(0x13, 3), "7a00030004"),
+            (0x2E7, NativeAddress(0x12, 4), "7a00030004"),
+            (0x2E7, locked, "7b00030004"),
+            (0x2E7, locked, "7a00030104"),  # Different sensor.
+            (0x2E7, locked, "7a00020000"),  # Unsupported ID, positional zero.
+            (0x2E7, locked, "7a0011000400"),  # Ambiguous.
+            (0x2E7, locked, "7a000300"),  # Truncated.
+        ):
+            assert not indexed.matches(NativeMessage(mid, source, bytes.fromhex(data)))
+        week = NativeBlockQuery(peer, 0x38, 3)
+        assert week.matches(NativeMessage(0x2E7, locked, bytes.fromhex("380001fb")))
+        assert not week.matches(NativeMessage(0x2E7, locked, bytes.fromhex("380001fc")))
+        for block, value in ((0x38, 8), (0xC5, None), (0xCC, 256), (0xC1, 0)):
+            with self.assertRaises(ValueError):
+                NativeBlockQuery(peer, block, value)
+        with self.assertRaises(ValueError):
+            NativeBlockQuery(src, 0)
+
+    def test_snowmelt_edits_target_the_reported_node_and_only_one_word(self) -> None:
+        peer, host = NativeAddress(0x12, 0x23), NativeAddress(0, 0)
+        for block in (
+            SnowmeltBlock.MELT_SETPOINT,
+            SnowmeltBlock.IDLE_SETPOINT,
+            SnowmeltBlock.STORM_SETPOINT,
+        ):
+            msg = NativeMessage(0x2E7, peer, bytes([block, 0, 3, 0x92, 4]))
+            target = SnowmeltSetpoint.from_frame(NativeFrame(2, 7, msg.to_bytes()))
+            assert target.port == 2 and target.target == peer and target.block is block
+            assert not target.is_off and target.celsius == 0.0
+            # 5 C = 41 F = 1260 degH; update data has no support mask.
+            update = target.update_celsius(5, source=host)
+            assert update.to_bytes() == bytes.fromhex(
+                f"6df00006 1223 {block:02x}00 ec04",
+            )
+            disabled = SnowmeltSetpoint(2, peer, block, 0)
+            assert disabled.celsius is None
+            if block is SnowmeltBlock.MELT_SETPOINT:
+                assert not disabled.is_off
+                with self.assertRaises(ValueError):
+                    target.update_celsius(None, source=host)
+            else:
+                assert disabled.is_off
+                assert target.update_celsius(None, source=host).payload[-2:] == b"\0\0"
+            for raw in (0x4000, 0x8000, 0xC000, 0xFFFF):
+                unreadable = SnowmeltSetpoint(2, peer, block, raw)
+                assert unreadable.celsius is None and not unreadable.is_off
+            for celsius in (-65, (0x4000 - 1170) / 18):
+                with self.assertRaises(ValueError):
+                    target.update_celsius(celsius, source=host)
+        for mid, data in (
+            (0x2DF, "7200030000"),
+            (0x2E7, "720001ff"),
+            (0x2E7, "710003123456"),
+            (0x2E7, "7400030000"),
+        ):
+            with self.assertRaises(ValueError):
+                SnowmeltSetpoint.from_frame(
+                    NativeFrame(
+                        1,
+                        0,
+                        NativeMessage(mid, peer, bytes.fromhex(data)).to_bytes(),
+                    ),
+                )
+
     def test_native_clock_vectors_and_optional_dst_mode(self) -> None:
         source = NativeAddress(0, 0)
         assert NativeMessage.request_clock(source=source).to_bytes() == bytes.fromhex(

@@ -22,6 +22,7 @@ from .decoding import (
 from .exceptions import TekmarError
 from .firmware import install_firmware
 from .gateway import open_gateway
+from .native import NativeAddress, NativeBlockQuery
 from .raw import CaptureGap, InvalidCapture, PortError, TxStatus
 from .trpc import (
     ResponseMatch,
@@ -44,6 +45,7 @@ if TYPE_CHECKING:
         GatewayInfo,
         GatewaySnapshot,
     )
+    from .native import NativeFrame
 
 
 class CliError(Exception):
@@ -191,6 +193,27 @@ def build_parser() -> argparse.ArgumentParser:
         help="wait for a matching response; default is true for Request service",
     )
 
+    block = subparsers.add_parser(
+        "read-block",
+        parents=[_common_parent(default_timeout=20.0)],
+        help="read an addressed native tN4 block from a physical port",
+    )
+    block.add_argument("port", type=int, choices=range(5))
+    block.add_argument("subnet", type=_int_value)
+    block.add_argument("node", type=_int_value)
+    block.add_argument("block", type=_int_value, help="numeric native block ID")
+    block.add_argument(
+        "--selector",
+        type=_int_value,
+        help="secondary ID, including zero",
+    )
+    block.add_argument("--source-subnet", type=_int_value, default=0)
+    block.add_argument("--source-node", type=_int_value, default=0)
+    block.add_argument(
+        "--ack",
+        action="store_true",
+        help="link-ACK valid incoming frames on this port",
+    )
     for name in (
         "panel",
         "led-test",
@@ -225,7 +248,7 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def _common_parent() -> argparse.ArgumentParser:
+def _common_parent(*, default_timeout: float = 5.0) -> argparse.ArgumentParser:
     parent = argparse.ArgumentParser(add_help=False)
     parent.add_argument("--vendor", action="store_true", default=argparse.SUPPRESS)
     parent.add_argument(
@@ -253,7 +276,7 @@ def _common_parent() -> argparse.ArgumentParser:
     parent.add_argument(
         "--timeout",
         type=float,
-        default=5.0,
+        default=default_timeout,
         help="request timeout in seconds",
     )
     parent.add_argument(
@@ -351,6 +374,30 @@ async def _native(args: argparse.Namespace, stdout: TextIO) -> int:
         elif args.command == "request":
             async with bridge.normal() as client:
                 await _request(client, args, stdout)
+        elif args.command == "read-block":
+            query = NativeBlockQuery(
+                NativeAddress(args.subnet, args.node),
+                args.block,
+                args.selector,
+            )
+            source = NativeAddress(args.source_subnet, args.source_node)
+            async with bridge.stream(
+                ack_port=args.port if args.ack else None,
+                diagnostics=False,
+            ) as stream:
+                try:
+                    async with asyncio.timeout(args.timeout):
+                        report = await stream.read_block(
+                            args.port,
+                            query,
+                            source=source,
+                        )
+                except TimeoutError as err:
+                    msg = (
+                        f"no matching block {args.block:#x} report before the deadline"
+                    )
+                    raise CliError(msg) from err
+            emit(_frame_fields(report))
         elif args.command == "send":
             async with bridge.stream(diagnostics=False) as stream:
                 try:
@@ -422,20 +469,7 @@ async def _native_capture(
                     frames += 1
                     nodes.add((frame.port, frame.subnet, frame.node))
                     if args.command != "discover":
-                        emit(
-                            {
-                                "port": frame.port,
-                                "timestamp_ms": frame.timestamp_ms,
-                                "id": frame.message_id,
-                                "subnet": frame.subnet,
-                                "node": frame.node,
-                                "tha_address": frame.message.source.tha_address(
-                                    frame.port,
-                                ),
-                                "body": frame.body.hex(),
-                                "fields": frame.decoded,
-                            },
-                        )
+                        emit(_frame_fields(frame))
         except TimeoutError:
             if not window.expired():
                 raise
@@ -444,6 +478,19 @@ async def _native_capture(
     if args.command in {"diagnostics", "dump"}:
         for summary in stream.diagnostics.values():
             emit(asdict(summary))
+
+
+def _frame_fields(frame: NativeFrame) -> dict[str, object]:
+    return {
+        "port": frame.port,
+        "timestamp_ms": frame.timestamp_ms,
+        "id": frame.message_id,
+        "subnet": frame.subnet,
+        "node": frame.node,
+        "tha_address": frame.message.source.tha_address(frame.port),
+        "body": frame.body.hex(),
+        "fields": frame.decoded,
+    }
 
 
 def client_from_args(args: argparse.Namespace) -> Tekmar482Client:

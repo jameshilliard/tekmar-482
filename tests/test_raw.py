@@ -6,12 +6,17 @@ from tekmar_482 import (
     ConnectionClosedError,
     FailureReason,
     InvalidCapture,
+    NativeAddress,
+    NativeBlockQuery,
     NativeFrame,
+    NativeMessage,
+    NativeTransmitError,
     Packet,
     PortError,
     PortErrorReason,
     ProtocolError,
     RejectReason,
+    SnowmeltBlock,
     TxResult,
     TxStatus,
 )
@@ -28,6 +33,67 @@ class RawTests(unittest.IsolatedAsyncioTestCase):
 
     def deliver(self, *data: int) -> None:
         self.rx.put_nowait(Packet(1, bytes(data)))
+
+    async def test_block_reports_are_copied_not_consumed_or_taken_from_backlog(
+        self,
+    ) -> None:
+        peer, host = NativeAddress(0x12, 3), NativeAddress(0, 0)
+        query = NativeBlockQuery(peer, SnowmeltBlock.SNOW_ICE_SENSOR_TYPE, 0)
+        body = NativeMessage(0x2E7, peer, bytes.fromhex("7a00030003")).to_bytes()
+        async with self.stream.receiving(self.rx.get), asyncio.timeout(2):
+            self.stream.feed(Packet(1, bytes((0, 1, 0, 0, 0, 0)) + body))
+            first = asyncio.create_task(self.stream.read_block(1, query, source=host))
+            assert await self.tx.get() == bytes((1, 1)) + query.request(host).to_bytes()
+            with self.assertRaisesRegex(ProtocolError, "block read already"):
+                await self.stream.read_block(1, query, source=host)
+            other = asyncio.create_task(self.stream.read_block(2, query, source=host))
+            await self.tx.get()
+            self.deliver(2, 1, 0)
+            self.deliver(0, 2, 1, 0, 0, 0, *body)
+            # No link ACK; an actual matching report still counts.
+            self.deliver(2, 2, 2, 1)
+            assert await other == NativeFrame(2, 1, body)
+            assert not first.done()
+            self.deliver(0, 1, 2, 0, 0, 0, *body[:-2], 1, 4)  # Different sensor.
+            self.deliver(0, 1, 3, 0, 0, 0, *body)
+            assert await first == NativeFrame(1, 3, body)
+            assert await self.stream.read() == CaptureGap(2)
+            wrong = await self.stream.read()
+            assert isinstance(wrong, NativeFrame) and wrong.decoded["sensor_id"] == 1
+            assert await self.stream.read() == NativeFrame(1, 3, body)
+
+    async def test_block_timeout_and_rejection_leave_no_report_waiter(self) -> None:
+        host = NativeAddress(0, 0)
+        query = NativeBlockQuery(NativeAddress(0, 4), SnowmeltBlock.MELT_SETPOINT)
+        async with self.stream.receiving(self.rx.get), asyncio.timeout(2):
+            task = asyncio.create_task(self.stream.read_block(0, query, source=host))
+            await self.tx.get()
+            self.deliver(2, 0, 0)
+            self.deliver(3, 255, 2)
+            await self.stream.read()  # TxResult has already been delivered.
+            assert not task.done()  # ACK alone is not a block report.
+            task.cancel()
+            with self.assertRaises(asyncio.CancelledError):
+                await task
+            for status, reason in (
+                (TxStatus.REJECTED, RejectReason.INVALID_BODY),
+                (TxStatus.FAILED, FailureReason.ARBITRATION_LOST),
+            ):
+                task = asyncio.create_task(
+                    self.stream.read_block(0, query, source=host),
+                )
+                await self.tx.get()
+                self.deliver(2, 0, status, reason)
+                with self.assertRaises(NativeTransmitError) as ctx:
+                    await task
+                assert ctx.exception.result == TxResult(0, status, reason)
+            hanging = asyncio.create_task(self.stream.read_block(0, query, source=host))
+            await self.tx.get()
+            self.deliver(2, 0, 0)
+            self.deliver(3, 255, 2)
+            await self.stream.read()
+        with self.assertRaises(ConnectionClosedError):
+            await hanging
 
     async def test_independent_completions_and_nonterminal_diagnostics(self) -> None:
         async with self.stream.receiving(self.rx.get), asyncio.timeout(2):

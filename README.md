@@ -111,22 +111,44 @@ For an addressed native read, use the physical port and wire address
 from a frame observed on that line. These are not tRPC decimal addresses:
 
 ```python
-from tekmar_482 import NativeAddress, NativeMessage, TxStatus
+import asyncio
+
+from tekmar_482 import NativeAddress, NativeBlockQuery
 
 source = NativeAddress(0, 0)  # Host-supplied gateway address.
-request = NativeMessage.request_block(
-    0x10, source=source, target=frame.message.source,
-)
-result = await stream.send(frame.port, request)
-if result.status is not TxStatus.ACK:
-    print(result.status.name, result.reason)
+query = NativeBlockQuery(frame.message.source, 0x10)
+async with asyncio.timeout(20):
+    report = await stream.read_block(frame.port, query, source=source)
+print(report.decoded)
 ```
+
+`read_block()` waits for a new report from that port, subnet and node for
+the requested block. Indexed blocks require a selector, including zero;
+for example, `NativeBlockQuery(peer, SnowmeltBlock.SLAB_HIGH, selector=0)`.
+No records are taken from the normal capture stream. One block read can
+be pending per port. Choose an application deadline: some physical
+controllers take over ten seconds to report. There is no request ID, so
+a matching report is a device observation, not proof that a particular
+request caused it. A zero support mask conveys no value. An indexed
+report without a supported selector remains in the capture stream, but
+cannot complete a read for a particular selector.
+
+The CLI uses the same reader. For example, with an **observed** native node
+on a dedicated single-peer line (addresses below are examples):
+
+```bash
+tekmar-482 read-block 2 0x12 3 0x71 --ack --tcp 192.0.2.10:3001 --json
+```
+
+`--ack` supplies a link ACK to valid incoming frames on that port. It is
+off by default. Use `--selector` for indexed blocks and `--timeout` to
+change the CLI's 20-second deadline.
 
 `send()` transmits once and waits for that port's terminal link result:
 `ACK`, `REJECTED` before transmission, or `FAILED` during transmission.
-A link ACK does not confirm an application change. For a block read, look
-for the target's BlockReport on the requested port with the requested block
-ID (and secondary ID for an indexed request).
+A link ACK does not confirm an application change. A block read can still
+succeed on a real report if the link ACK was missed; other send failures
+raise `NativeTransmitError` with the underlying `TxResult`.
 
 Different ports can send concurrently, without a capture consumer. A second
 send on the same port raises `ProtocolError` until its previous result
@@ -159,6 +181,25 @@ through `frame.decoded` but cannot be used to construct a whole-week edit.
 After an intentional write, read the same block back and compare it with
 the intended change. Neither the local transmit echo nor a link ACK
 confirms the setting.
+
+On an identified snowmelt controller, use `SnowmeltBlock` for addressed
+configuration, including melt/storm group IDs, runtimes and slab targets.
+A complete target report can construct a native setpoint update:
+
+```python
+from tekmar_482 import SnowmeltBlock, SnowmeltSetpoint
+
+query = NativeBlockQuery(peer, SnowmeltBlock.IDLE_SETPOINT)
+async with asyncio.timeout(20):
+    report = await stream.read_block(port, query, source=source)
+slab = SnowmeltSetpoint.from_frame(report)
+print(slab.celsius, slab.is_off)
+update = slab.update_celsius(2.0, source=source)  # Constructs only.
+```
+
+`None` requests Off for Idle or Storm; Melt has no Off setting.
+A temperature update does not start a melt cycle. After an intentional
+send, read the same block again and check the device's reported value.
 
 ### Installation and updates
 
