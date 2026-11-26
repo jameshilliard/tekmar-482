@@ -1,9 +1,14 @@
 """Native line announcements from the 483 SW 11 gateway, not addressed writes."""
 
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta
 from enum import IntEnum
+
+from .codec import Fields, Reader, ShortPayload, fahrenheit, temp
+from .layouts import SETPOINT_FIELDS
+from .scenes import SCENE_REPORT, SceneReport
+from .thermostat import TargetSlot
 
 ZONE_ADJUSTMENT = 0x010
 ACCESS_STATUS = 0x200
@@ -23,6 +28,11 @@ class ClockReport:
     def __post_init__(self) -> None:
         if not isinstance(self.payload, bytes) or not 5 <= len(self.payload) <= 63:
             raise ValueError("expected a native clock payload of at least five bytes")
+
+    @classmethod
+    def read(cls, reader: Reader) -> "ClockReport":
+        head = reader.take(5)
+        return cls(head + reader.take(len(reader.remaining)))
 
     @classmethod
     def from_wall_time(cls, value: datetime, *, dst: bool | None = None,
@@ -80,6 +90,24 @@ class ClockReport:
             return None
         return datetime.combine(day, clock) + (_HOUR if self.daylight else timedelta())
 
+    def fields(self) -> Fields:
+        minute, hour, month, day, year = self.payload[:5]
+        fields: Fields = {"minute": minute, "weekday": self.weekday, "hour": hour >> 3,
+                          "date_supported": int(self.date_supported), "month_raw": month & 15,
+                          "dst_bit_raw": (month >> 4) & 1, "reserved": month >> 5,
+                          "day_raw": day, "year_from_2000": year}
+        if self.daylight is not None:
+            fields["dst"] = int(self.daylight)
+        if (d := self.standard_date) is not None:
+            fields.update(year=d.year, month=d.month, day=d.day, weekday_matches=int(d.isoweekday() == self.weekday))
+        if (wall := self.wall_datetime) is not None:
+            fields["local_datetime"] = wall.isoformat(timespec="minutes")
+        if len(self.payload) > 5:
+            fields["dst_mode"] = self.payload[5]
+        if len(self.payload) > 6:
+            fields["extension_hex"] = self.payload[6:].hex()
+        return fields
+
 
 class SetpointApplication(IntEnum):
     SETPOINT_ON_OFF = 0
@@ -129,6 +157,10 @@ class GroupReport:
     group: int
     flags: int
 
+    @classmethod
+    def read(cls, reader: Reader) -> "GroupReport":
+        return cls(*reader.take(2))
+
     @property
     def requested(self) -> bool:
         return bool(self.flags & 1)
@@ -136,6 +168,10 @@ class GroupReport:
     @property
     def actual(self) -> bool:
         return bool(self.flags & 0x10)
+
+    def fields(self) -> Fields:
+        return {"group_id": self.group, "flags_raw": self.flags, "requested_enable": int(self.requested),
+                "actual_enable": int(self.actual)}
 
 
 class ZoneTargetMode(IntEnum):
@@ -157,3 +193,121 @@ class ZoneSyncAdjustment:
     @property
     def payload(self) -> bytes:
         return bytes([self.cycle, int(self.purging), self.target])
+
+
+@dataclass(frozen=True, slots=True)
+class ZoneSyncReport:
+    """Receive selectors unchanged, even when the 483 writer would not send them."""
+    cycle: int
+    purging: int
+    target_raw: int
+
+    @property
+    def target(self) -> ZoneTargetMode | None:
+        return ZoneTargetMode(self.target_raw) if self.target_raw in range(len(ZoneTargetMode)) else None
+
+    def fields(self) -> Fields:
+        return {"synch_cycle": self.cycle, "purging": self.purging, "target_mode": self.target_raw}
+
+
+@dataclass(frozen=True, slots=True)
+class GatewayAccess:
+    flags: int
+
+    @property
+    def request(self) -> bool:
+        return bool(self.flags & 1)
+
+    @property
+    def access_open(self) -> bool:
+        return bool(self.flags & 2)
+
+    def fields(self) -> Fields:
+        return {"request": int(self.request), "access_open": int(self.access_open)}
+
+
+@dataclass(frozen=True, slots=True)
+class NetworkLock:
+    flags: int
+
+    @property
+    def access_lock(self) -> bool:
+        return bool(self.flags & 1)
+
+    @property
+    def address_lock(self) -> bool:
+        return bool(self.flags & 2)
+
+    def fields(self) -> Fields:
+        return {"access_lock": int(self.access_lock), "address_lock": int(self.address_lock)}
+
+
+@dataclass(frozen=True, slots=True)
+class WarmWeatherShutdown:
+    flags: int
+
+    @property
+    def active_slots(self) -> tuple[TargetSlot, ...]:
+        return tuple(slot for slot in TargetSlot if self.flags & (1 << slot))
+
+    def fields(self) -> Fields:
+        return {name: (self.flags >> i) & 1 for i, name in enumerate(SETPOINT_FIELDS)}
+
+
+@dataclass(frozen=True, slots=True)
+class OutdoorTemperature:
+    raw: int
+    second_word: int | None
+
+    @classmethod
+    def read(cls, reader: Reader) -> "OutdoorTemperature":
+        # J1196J 0x3dd8 sends the word twice; 0x3e38 consumes the first.
+        raw = reader.word()
+        return cls(raw, reader.word() if reader.remaining else None)
+
+    @property
+    def fahrenheit(self) -> float | None:
+        return fahrenheit(self.raw)
+
+    def fields(self) -> Fields:
+        fields = temp("outdoor_temp", self.raw)
+        if self.second_word is not None:
+            fields.update(second_word_raw=self.second_word, matches_first=int(self.raw == self.second_word))
+        return fields
+
+
+class LineReportKind(IntEnum):
+    ZONE_SYNC = ZONE_ADJUSTMENT
+    GATEWAY_ACCESS = ACCESS_STATUS
+    SETPOINT_GROUP = GROUP_REPORT
+    NETWORK_LOCK = 0x2ef
+    SCENE = SCENE_REPORT
+    WWSD = 0x30f
+    CLOCK = CLOCK_REPORT
+    OUTDOOR = 0x32f
+
+
+LineValue = ZoneSyncReport | GatewayAccess | GroupReport | NetworkLock | SceneReport | WarmWeatherShutdown | ClockReport | OutdoorTemperature
+
+LINE_MESSAGES: dict[int, tuple[str, Callable[[Reader], LineValue]]] = {
+    LineReportKind.ZONE_SYNC: ("ZoneSynchAdjustment", lambda r: ZoneSyncReport(*r.take(3))),
+    LineReportKind.GATEWAY_ACCESS: ("SecureGatewayAccess", lambda r: GatewayAccess(r.byte())),
+    LineReportKind.SETPOINT_GROUP: ("SetpointEnableReport", GroupReport.read),
+    LineReportKind.NETWORK_LOCK: ("NetworkLock", lambda r: NetworkLock(r.byte())),
+    LineReportKind.SCENE: ("SceneReport", SceneReport.read),
+    LineReportKind.WWSD: ("WWSDStatus", lambda r: WarmWeatherShutdown(r.byte())),
+    LineReportKind.CLOCK: ("RealTimeClockReport", ClockReport.read),
+    LineReportKind.OUTDOOR: ("OutdoorTemperatureReport", OutdoorTemperature.read),
+}
+
+
+def line_report(message: int, payload: bytes) -> LineValue | None:
+    """Only complete announcements. The gateway-access request shares its reply ID."""
+    entry = LINE_MESSAGES.get(message)
+    if entry is None:
+        return None
+    try:
+        value = entry[1](Reader(payload))
+    except ShortPayload:
+        return None
+    return None if isinstance(value, GatewayAccess) and value.request else value

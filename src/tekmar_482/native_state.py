@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections import defaultdict
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Self
 
@@ -18,6 +19,7 @@ from ._native_payloads.climate import (
 from ._native_payloads.codec import Reader, ShortPayload
 from ._native_payloads.io import IoEndpoint
 from ._native_payloads.layouts import MULTI_WEEK
+from ._native_payloads.line import GroupReport, LineReportKind
 from ._native_payloads.queries import StatusRequest
 from ._native_payloads.schedules import SCHEDULE_STATUS
 from ._native_payloads.sensors import SENSOR_BLOCKS, ThermostatSensors
@@ -51,6 +53,7 @@ if TYPE_CHECKING:
     from collections.abc import Iterable
 
     from ._native_payloads.faults import NetworkFault
+    from ._native_payloads.line import LineValue
     from ._water_monitor import WaterSource
     from .native_snowmelt import SnowmeltChannel
     from .native_status import NativeStatusBatch
@@ -98,6 +101,25 @@ class NativeFaultReport:
 
 
 @dataclass(frozen=True, slots=True)
+class NativeLineReport:
+    """Last announcement from this source, not a consensus or a device setting."""
+
+    path: NativePath
+    kind: LineReportKind
+    value: LineValue
+    frame: NativeFrame = field(compare=False, repr=False)
+    payload: bytes = field(init=False, repr=False)
+
+    def __post_init__(self) -> None:
+        # Compare every payload byte, including unknown extensions, but not time.
+        object.__setattr__(self, "payload", self.frame.message.payload)
+
+    @property
+    def group(self) -> int | None:
+        return self.value.group if isinstance(self.value, GroupReport) else None
+
+
+@dataclass(frozen=True, slots=True)
 class NativeClimate:
     path: NativePath
     identity: NativeIdentity
@@ -113,6 +135,9 @@ class NativeClimate:
 class _Peer:
     identity: NativeIdentity | None = None
     fault: NativeFaultReport | None = None
+    line: dict[tuple[LineReportKind, int | None], NativeLineReport] = field(
+        default_factory=dict,
+    )
     blocks: dict[BlockKey, NativeFrame] = field(default_factory=dict)
     air: AirStatus | None = None
     active_air_target: AirTarget | None = None
@@ -155,7 +180,7 @@ class NativeState:
 
     def __init__(self, paths: Iterable[NativePath] | None = None) -> None:
         self._selected = None if paths is None else frozenset(paths)
-        self._peers: dict[NativePath, _Peer] = {}
+        self._peers: defaultdict[NativePath, _Peer] = defaultdict(_Peer)
         self._moves: dict[NativePath, NativePath] = {}
         self._reidentify: set[NativePath] = set()
         self._water = WaterMonitor()
@@ -208,7 +233,7 @@ class NativeState:
         if before is not None and before.endpoint != endpoint:
             msg = "I/O discovery baseline belongs to a different endpoint"
             raise ValueError(msg)
-        books = self._peers.setdefault(path, _Peer()).io
+        books = self._peers[path].io
         book = books.setdefault(endpoint, IoBook(endpoint))
         old = book.snapshot()
         book.reconcile(batch, before)
@@ -361,6 +386,25 @@ class NativeState:
     def fault_reports(self) -> tuple[NativeFaultReport, ...]:
         return tuple(f for p in sorted(self._peers) if (f := self._peers[p].fault))
 
+    def line_report(
+        self,
+        path: NativePath,
+        kind: LineReportKind,
+        *,
+        group: int | None = None,
+    ) -> NativeLineReport | None:
+        """Return the last observed report. SETPOINT_GROUP requires its wire group."""
+        return peer.line.get((kind, group)) if (peer := self._peers.get(path)) else None
+
+    def line_reports_for(self, path: NativePath) -> tuple[NativeLineReport, ...]:
+        if peer := self._peers.get(path):
+            return tuple(peer.line[key] for key in sorted(peer.line))
+        return ()
+
+    @property
+    def line_reports(self) -> tuple[NativeLineReport, ...]:
+        return tuple(r for p in sorted(self._peers) for r in self.line_reports_for(p))
+
     def _move(self, path: NativePath, data: bytes) -> tuple[NativePath, ...]:
         if len(data) < _OLD_ADDRESS:
             return ()
@@ -393,7 +437,7 @@ class NativeState:
             if not data[2] & 1 or len(data) <= _BLOCK_HEADER:
                 return False
             selector = data[_BLOCK_HEADER] & spec[1]
-        peer = self._peers.setdefault(path, _Peer())
+        peer = self._peers[path]
         if not block:
             old = peer.identity
             identity = NativeIdentity.from_report(fields, old)
@@ -474,6 +518,35 @@ class NativeState:
         peer.calendar.invalidate_update((block, selector))
         return (target,)
 
+    def _source_report(self, path: NativePath, record: NativeFrame) -> bool | None:
+        if (value := record.line_value) is not None:
+            peer = self._peers[path]
+            report = NativeLineReport(
+                path,
+                LineReportKind(record.message_id),
+                value,
+                record,
+            )
+            key = report.kind, report.group
+            previous = peer.line.get(key)
+            peer.line[key] = report
+            return previous != report
+        if (fault := record.network_fault) is not None:
+            peer = self._peers[path]
+            before = peer.fault
+            peer.fault = NativeFaultReport(
+                path,
+                fault,
+                record.message.payload[_FAULT_WORD_BYTES:],
+                record,
+            )
+            return before != peer.fault
+        if (sample := record.io_report) is not None:
+            peer = self._peers[path]
+            book = peer.io.setdefault(sample.endpoint, IoBook(sample.endpoint))
+            return book.observe(sample, record)
+        return None
+
     def observe(self, record: CaptureRecord) -> tuple[NativePath, ...]:
         """Return changed paths. Equal samples refresh timestamps without notifying."""
         if isinstance(record, CaptureGap):
@@ -500,40 +573,28 @@ class NativeState:
         if self._selected is not None and path not in self._selected:
             return ()
         changed_water = self._water.observe(record)
-        if (fault := record.network_fault) is not None:
-            peer = self._peers.setdefault(path, _Peer())
-            previous = peer.fault
-            peer.fault = NativeFaultReport(
-                path,
-                fault,
-                data[_FAULT_WORD_BYTES:],
-                record,
-            )
-            return (path,) if previous != peer.fault else ()
-        if (sample := record.io_report) is not None:
-            peer = self._peers.setdefault(path, _Peer())
-            book = peer.io.setdefault(sample.endpoint, IoBook(sample.endpoint))
-            return (path,) if book.observe(sample, record) else ()
+        if (source_changed := self._source_report(path, record)) is not None:
+            return (path,) if source_changed or changed_water else ()
         if record.message_id == BLOCK_REPORT:
             return (path,) if self._block(path, record) or changed_water else ()
         if record.message_id == SETPOINT_STATUS:
             setpoint = record.setpoint_status
             if setpoint is None:
                 return ()
-            peer = self._peers.setdefault(path, _Peer())
+            peer = self._peers[path]
             product = peer.identity.product if peer.identity else None
             return (path,) if peer.setpoint.observe(setpoint, record, product) else ()
         if record.message_id in (FAN_STATUS, SLAB_STATUS, HUMIDITY_STATUS):
             output = record.thermostat_output
             if output is None:
                 return ()
-            peer = self._peers.setdefault(path, _Peer())
+            peer = self._peers[path]
             return (path,) if peer.outputs.observe(output, record, peer.blocks) else ()
         if record.message_id == SCHEDULE_STATUS:
             status = record.schedule_status
             if status is None:
                 return ()
-            peer = self._peers.setdefault(path, _Peer())
+            peer = self._peers[path]
             return (
                 (path,)
                 if peer.calendar.announce(
@@ -547,7 +608,7 @@ class NativeState:
             report = record.snowmelt_report
             if report is None or (address := report.address) is None:
                 return ()
-            snow = self._peers.setdefault(path, _Peer()).snow
+            snow = self._peers[path].snow
             return (path,) if snow.update(record, address, report) else ()
         return (path,) if changed_water else ()
 
@@ -567,7 +628,7 @@ class NativeState:
         # Unselected masters still supply the group code, not a public peer.
         if self._selected is not None and path not in self._selected:
             return ()
-        peer = self._peers.setdefault(path, _Peer())
+        peer = self._peers[path]
         if target is not None:
             peer.outputs.air(target, peer.blocks)
         changed_air = peer.air != air or peer.active_air_target != target

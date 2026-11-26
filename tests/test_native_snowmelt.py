@@ -142,9 +142,11 @@ class SnowmeltStateTests(unittest.TestCase):
         assert not state.paths
         for item in setup_frames():
             state.observe(item)
+        before = state.snowmelt(SITE)
+        assert state.observe(frame(0x20F, b"\x04\x11")) == (SITE,)
+        assert state.snowmelt(SITE) == before  # Group status is not a zone report.
         for mid, data in (
             (0x17F, "110122"),
-            (0x20F, "0411"),
             (0x21F, "0401"),
             (0x2DF, f"{SITE.subnet:02x}{SITE.node:02x}d00004"),
         ):

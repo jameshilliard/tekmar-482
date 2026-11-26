@@ -30,6 +30,7 @@ from .cli_native_watch import (
     calendar_fields,
     fault_fields,
     io_fields,
+    line_fields,
     setpoint_fields,
     snow_fields,
     snow_group_from_args,
@@ -1112,6 +1113,8 @@ def _emit_capture_summary(
         emit({"water_sources": [water_fields(s) for s in sources]})
     if reports := observed.fault_reports:
         emit({"network_fault_reports": [fault_fields(report) for report in reports]})
+    if lines := observed.line_reports:
+        emit({"line_reports": [line_fields(report) for report in lines]})
     _emit_io(observed, emit, passive=True)
     for control in observed.setpoint_controls:
         emit({"setpoint_control": setpoint_fields(control)})

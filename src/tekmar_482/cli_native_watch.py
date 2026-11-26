@@ -17,12 +17,13 @@ if TYPE_CHECKING:
     import argparse
     from collections.abc import Callable
 
+    from ._native_payloads.line import LineReportKind
     from .native_calendar import NativeCalendar
     from .native_io import IoDirectory
     from .native_plant_registers import PlantRegisters
     from .native_setpoint import NativeSetpointControl
     from .native_snowmelt import NativeSnowmelt, SnowmeltChannel
-    from .native_state import NativeFaultReport, NativeState
+    from .native_state import NativeFaultReport, NativeLineReport, NativeState
     from .native_watch import NativeWatchResult
     from .raw import BridgeStream
 
@@ -63,6 +64,42 @@ def fault_fields(report: NativeFaultReport) -> dict[str, object]:
         "body": report.frame.body.hex(),
         "extension_hex": report.extension.hex(),
     }
+
+
+def line_fields(report: NativeLineReport) -> dict[str, object]:
+    return {
+        **asdict(report.path),
+        "kind": report.kind.name.lower(),
+        "message_id": report.kind.value,
+        **report.frame.decoded,
+        "received_ms": report.frame.timestamp_ms,
+        "body": report.frame.body.hex(),
+    }
+
+
+class _LineChanges:
+    def __init__(self) -> None:
+        self._previous: dict[
+            NativePath,
+            dict[tuple[LineReportKind, int | None], NativeLineReport],
+        ] = {}
+
+    def emit(
+        self,
+        path: NativePath,
+        state: NativeState,
+        emit: Callable[[object], None],
+    ) -> None:
+        if not (reports := state.line_reports_for(path)):
+            if self._previous.pop(path, None) is not None:
+                emit({"line_reports_unknown": asdict(path)})
+            return
+        previous = self._previous.setdefault(path, {})
+        for report in reports:
+            key = report.kind, report.group
+            if previous.get(key) != report:
+                previous[key] = report
+                emit({"line_report": line_fields(report)})
 
 
 def io_fields(directory: IoDirectory, model: str | None = None) -> dict[str, object]:
@@ -189,8 +226,10 @@ async def watch_all_from_args(
     previous_setpoints: dict[NativePath, NativeSetpointControl] = {}
     previous_io: dict[NativePath, tuple[str | None, tuple[IoDirectory, ...]]] = {}
     previous_faults: dict[NativePath, NativeFaultReport] = {}
+    lines = _LineChanges()
 
     def changed(path: NativePath, state: NativeState) -> None:
+        lines.emit(path, state, emit)
         _emit_fault(path, state.fault_report(path), previous_faults, emit)
         identity = state.identity(path)
         model = identity.product.model if identity and identity.product else None

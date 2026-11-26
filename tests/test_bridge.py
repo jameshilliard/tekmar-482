@@ -656,10 +656,15 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
             + (101901).to_bytes(3, "little")
             + (1145).to_bytes(2, "little")
         )
-        observed = bytes.fromhex("6e7161c4 770001 13")
-        rx_identity = serialize(Packet(1, prefix + identity))
-        rx_other = serialize(Packet(1, prefix + observed))
-        rx_fault = serialize(Packet(1, prefix + bytes.fromhex("7d7161c2 8fe1")))
+        rx_identity, rx_other, rx_fault, rx_group = (
+            serialize(Packet(1, prefix + body))
+            for body in (
+                identity,
+                bytes.fromhex("6e7161c4 770001 13"),
+                bytes.fromhex("7d7161c2 8fe1"),
+                bytes.fromhex("60f161c3 0410ca"),
+            )
+        )
         result = serialize(Packet(1, bytes([2, 3, 0])))
         mode = management(2, 0, b"\x01"), management(2, 3, b"\x01")
         stop = management(2, 0, b"\0"), management(2, 3, b"\0")
@@ -694,7 +699,7 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
                     (management(7, 1), management(7, 4, bytes(28))),
                     (management(4, 1), management(4, 4, b"1" * 40)),
                     mode,
-                    (ack[0], ack[1] + rx_identity + rx_other + rx_fault),
+                    (ack[0], ack[1] + rx_identity + rx_other + rx_fault + rx_group),
                 ]
                 if not passive:
                     steps.append((request(0, (1 << 31) - 1), result))
@@ -758,6 +763,26 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
                 assert [(f["port"], f["node"], f["raw"]) for f in faults] == [
                     (3, 7, 0xE18F),
                 ]
+                windows = [
+                    row["line_reports"]
+                    for row in map(json.loads, out.getvalue().splitlines())
+                    if "line_reports" in row
+                ]
+                assert len(windows) == (1 if passive else 2)
+                (group,) = windows[0]
+                assert (
+                    group["group_id"],
+                    group["actual_enable"],
+                    group["extension_hex"],
+                ) == (4, 1, "ca")
+                if not passive:
+                    assert {r["kind"] for r in windows[1]} == {
+                        "outdoor",
+                        "wwsd",
+                        "zone_sync",
+                        "clock",
+                        "gateway_access",
+                    }
                 telemetry = [
                     json.loads(line)["status_read"]
                     for line in out.getvalue().splitlines()

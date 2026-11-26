@@ -16,10 +16,10 @@ from .layouts import (
     FixedLayout,
     SnowmeltBlock as SnowmeltBlock,
 )
-from .line import ACCESS_STATUS, CLOCK_REPORT, GROUP_REPORT, GROUP_UPDATE, NETWORK_INIT_REQUEST, ZONE_ADJUSTMENT, ClockReport, GroupReport
+from .line import GROUP_UPDATE, LINE_MESSAGES, NETWORK_INIT_REQUEST, LineValue
 from .plant import MIXING_PRESENT, MIXING_REPORT, MIXING_UPDATE, PLANT_OUTPUT, MixingPresent, MixingReport, MixingUpdate, PlantOutput
 from .products import identify_product
-from .scenes import SCENE_REPORT, SCENE_RESPONSE_FIELDS, SceneReport, SceneResponse
+from .scenes import SCENE_RESPONSE_FIELDS, SceneResponse
 from .schedules import DAY_NAMES, SCHEDULE_STATUS, SINGLE_WEEK, DailyEvents, ScheduleBinding, ScheduleCycle, ScheduleEvent, ScheduleStatus
 from .setpoint import SETPOINT_STATUS, SetpointStatus
 from .snowmelt import SNOW_REPORT, SNOW_REQUEST, SnowmeltApplication, SnowmeltReport
@@ -31,41 +31,8 @@ from .water import (
 )
 
 
-def outdoor(r: Reader) -> Fields:
-    current = r.word()
-    fields = temp("outdoor_temp", current)
-    if r.remaining:
-        # J1196J 0x3dd8 emits the word twice; 0x3e38 reads the first word only.
-        second = r.word()
-        fields.update(second_word_raw=second, matches_first=int(second == current))
-    return fields
-
-
-def clock_report(r: Reader) -> Fields:
-    head = r.take(5)
-    report = ClockReport(head)
-    minute, time, date, day, year = head
-    month = date & 15
-    fields: Fields = {"minute": minute, "weekday": time & 7, "hour": time >> 3,
-                      "date_supported": int(date != 0xff), "month_raw": month,
-                      "dst_bit_raw": (date >> 4) & 1, "reserved": date >> 5,
-                      "day_raw": day, "year_from_2000": year}
-    if report.daylight is not None:
-        fields["dst"] = int(report.daylight)
-    if (calendar := report.standard_date) is not None:
-        fields.update(year=calendar.year, month=calendar.month, day=calendar.day,
-                      weekday_matches=int(calendar.isoweekday() == report.weekday))
-    if (wall := report.wall_datetime) is not None:
-        fields["local_datetime"] = wall.isoformat(timespec="minutes")
-    if r.remaining:
-        fields["dst_mode"] = r.byte()
-    return fields
-
-
-def group_report(r: Reader) -> Fields:
-    group = GroupReport(*r.take(2))
-    return {"group_id": group.group, "flags_raw": group.flags, "requested_enable": int(group.requested),
-            "actual_enable": int(group.actual)}
+def _line_fields(read: Callable[[Reader], LineValue]) -> Callable[[Reader], Fields]:
+    return lambda r: read(r).fields()
 
 
 def block_request(r: Reader) -> Fields:
@@ -141,15 +108,6 @@ def fixed_fields(block: int, layout: FixedLayout, values: dict[int, int]) -> Fie
         fields.update(fixed_value(block, name, value))
     # Preserve partial words and future supported slots without assigning units.
     fields.update({f"byte{i + 1}_raw": value for i, value in remaining.items()})
-    return fields
-
-
-def scene_report(r: Reader) -> Fields:
-    report = SceneReport.from_payload(r.take(3))
-    fields: Fields = {"scene": report.wire_id, "duration": report.duration_minutes,
-                      "duration_minutes": report.duration_minutes}
-    if report.scene is not None:
-        fields.update(scene_number=report.scene.value, scene_name=report.scene.name.lower())
     return fields
 
 
@@ -313,7 +271,7 @@ def master_present(r: Reader) -> Fields:
 
 
 DECODERS: dict[int, tuple[str, Callable[[Reader], Fields]]] = {
-    ZONE_ADJUSTMENT: ("ZoneSynchAdjustment", octets("synch_cycle", "purging", "target_mode")),
+    **{mid: (name, _line_fields(read)) for mid, (name, read) in LINE_MESSAGES.items()},
     0x011: ("ZoneSynchQuery", octets()),
     TANK_STATUS: ("TankStatus", lambda r: TankStatus.read(r).fields()),
     SNOW_REQUEST: ("SnowmeltZoneStatusRequest", snow_request),
@@ -321,17 +279,12 @@ DECODERS: dict[int, tuple[str, Callable[[Reader], Fields]]] = {
     IO_REQUEST: ("IORequest", octets("subnet_id", "node_id", "channel_id")),
     IO_DISCOVERY: ("IODiscoverReport", lambda r: IoReport.read_discovery(r).fields()),
     IO_DISCOVER: ("IODiscoverRequest", octets("subnet_id", "node_id")),
-    ACCESS_STATUS: ("SecureGatewayAccess", lambda r: bits(r.byte(), ("request", 0, 1), ("access_open", 1, 1))),
-    GROUP_REPORT: ("SetpointEnableReport", group_report),
     GROUP_UPDATE: ("SetpointRemoteEnable", octets("group_id", "enable")),
     FAN_STATUS: ("FanDuctStatus", lambda r: FanDuctStatus.read(r).fields()),
     SLAB_STATUS: ("SlabStatus", lambda r: SlabStatus.read(r).fields()),
     0x287: ("CalibrationMode", octets("mode")),
-    0x2ef: ("NetworkLock", lambda r: bits(r.byte(), ("access_lock", 0, 1), ("address_lock", 1, 1))),
     SCHEDULE_STATUS: ("ScheduleStatus", lambda r: ScheduleStatus.read(r).fields()),
-    SCENE_REPORT: ("SceneReport", scene_report),
     0x307: ("WWSDRequest", octets()),
-    0x30f: ("WWSDStatus", lambda r: bits(r.byte(), *((name, i, 1) for i, name in enumerate(SETPOINT_FIELDS)))),
     0x317: ("RealTimeClockRequest", octets()),
     0x322: ("RHQuery", lambda r: {"target_subnet": r.byte(), "node_selector": int.from_bytes(r.take(4), "little")}),
     HUMIDITY_STATUS: ("RHReport", lambda r: HumidityStatus.read(r).fields()),
@@ -366,8 +319,6 @@ DECODERS: dict[int, tuple[str, Callable[[Reader], Fields]]] = {
     0x2d7: ("BlockRequest", block_request),
     0x2df: ("BlockUpdate", block_update),
     0x2e7: ("BlockReport", block_report),
-    CLOCK_REPORT: ("RealTimeClockReport", clock_report),
-    0x32f: ("OutdoorTemperatureReport", outdoor),
     BOILER_MAXIMUM: ("MaximumBoilerPercent", lambda r: BoilerMaximum(r.byte()).fields()),
     0x33f: ("CycleLengthRequest", lambda r: {"air_group_id": r.byte(), "requested_length": r.byte()}),
     STAGE_DEMAND: ("StageHeatDemand", lambda r: StageDemand.read(r).fields()),

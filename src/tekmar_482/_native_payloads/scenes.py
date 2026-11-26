@@ -3,6 +3,8 @@
 from dataclasses import dataclass
 from enum import IntEnum
 
+from .codec import Fields, Reader
+
 SCENE_REPORT = 0x2ff
 
 
@@ -77,3 +79,17 @@ class SceneReport:
         if len(payload) < 3:
             raise ValueError("scene report requires an ID and a 16-bit duration")
         return cls(payload[0], int.from_bytes(payload[1:3], "little"), payload[3:])
+
+    @classmethod
+    def read(cls, reader: Reader) -> "SceneReport":
+        head = reader.take(3)
+        return cls.from_payload(head + reader.take(len(reader.remaining)))
+
+    def fields(self) -> Fields:
+        fields: Fields = {"scene": self.wire_id, "duration": self.duration_minutes,
+                          "duration_minutes": self.duration_minutes}
+        if self.scene is not None:
+            fields.update(scene_number=self.scene.value, scene_name=self.scene.name.lower())
+        if self.extension:
+            fields["extension_hex"] = self.extension.hex()
+        return fields

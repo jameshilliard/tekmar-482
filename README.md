@@ -700,6 +700,20 @@ triggers an operating-state read, not an optimistic mode change.
 
 ### Line announcements
 
+`watch-native --passive` emits a `line_report` when an observed clock, scene,
+setpoint group, outdoor temperature, warm-weather shutdown, network lock,
+gateway-access status or zone-sync announcement changes. `dump` includes the
+latest `line_reports` per capture window. Each includes the port, source
+address, gateway capture time and exact native body. No query is needed.
+
+Use `state.line_reports_for(path)` to enumerate a sender's observations, or
+`state.line_report(path, LineReportKind.SETPOINT_GROUP, group=4)` to select
+one. Requested and actual group enables are separate. A source can be a line
+master or the gateway itself: a scene announcement is not proof that every
+device changed setback. Repeats refresh the timestamp; use the frame stream
+to see each repetition. An observed capture gap, source replacement or address
+change discards the affected state rather than reporting a fabricated value.
+
 **Network faults.** `watch-native --passive` reports native `3D7` alarms and
 explicit clears without sending a query. `dump` includes the last report
 per source for each continuous capture window. In Python,

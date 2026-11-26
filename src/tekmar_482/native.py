@@ -25,6 +25,7 @@ from ._native_payloads.line import (
     GroupReport,
     ZoneSyncAdjustment,
     group_command,
+    line_report,
 )
 from ._native_payloads.plant import (
     MIXING_UPDATE,
@@ -59,15 +60,14 @@ if TYPE_CHECKING:
     from datetime import datetime
     from enum import Enum
 
+    from ._native_payloads.line import LineValue
+
 _HEADER = 4
 _MAX_PAYLOAD = 63
 _REQUEST = 0x2D7
 _UPDATE = 0x2DF
 _REPORT = 0x2E7
 _BLOCK_HEADER = 3
-_SCENE_HEADER = 3
-_CLOCK_SIZE = 5
-_GROUP_SIZE = 2
 _WORD_MASK = 0b11
 _SINGLE = 0x10
 _MULTI = 0x38
@@ -312,15 +312,16 @@ class NativeFrame:
 
     @property
     def clock(self) -> ClockReport | None:
-        if self.message_id == CLOCK_REPORT and len(self.message.payload) >= _CLOCK_SIZE:
-            return ClockReport(self.message.payload)
-        return None
+        return self._read_payload(CLOCK_REPORT, ClockReport.read)
 
     @property
     def group_report(self) -> GroupReport | None:
-        if self.message_id == GROUP_REPORT and len(self.message.payload) >= _GROUP_SIZE:
-            return GroupReport(self.message.payload[0], self.message.payload[1])
-        return None
+        return self._read_payload(GROUP_REPORT, GroupReport.read)
+
+    @property
+    def line_value(self) -> LineValue | None:
+        """A line announcement, including possible self echoes, not peer acceptance."""
+        return line_report(self.message_id, self.message.payload)
 
     def _read_payload[T](
         self,
@@ -387,12 +388,7 @@ class NativeFrame:
     @property
     def scene_report(self) -> SceneReport | None:
         """An observed announcement, possibly our own echo, not device state."""
-        if (
-            self.message_id == SCENE_REPORT
-            and len(self.message.payload) >= _SCENE_HEADER
-        ):
-            return SceneReport.from_payload(self.message.payload)
-        return None
+        return self._read_payload(SCENE_REPORT, SceneReport.read)
 
 
 type BlockKey = tuple[int, int | None]

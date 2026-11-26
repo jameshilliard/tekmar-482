@@ -12,10 +12,16 @@ from ._native_payloads.faults import NetworkFault, SensorCircuit
 from ._native_payloads.io import IoEndpoint, IoReport, IoType, io_terminal
 from ._native_payloads.line import (
     ClockReport,
+    GatewayAccess,
     GroupReport,
+    LineReportKind,
+    NetworkLock,
+    OutdoorTemperature,
     SetpointApplication,
     SetpointAssignment,
+    WarmWeatherShutdown,
     ZoneSyncAdjustment,
+    ZoneSyncReport,
     ZoneTargetMode,
 )
 from ._native_payloads.plant import (
@@ -241,7 +247,13 @@ from .native_snowmelt import (
     SnowmeltConfiguration,
     SnowmeltSample,
 )
-from .native_state import NativeClimate, NativeFaultReport, NativePath, NativeState
+from .native_state import (
+    NativeClimate,
+    NativeFaultReport,
+    NativeLineReport,
+    NativePath,
+    NativeState,
+)
 from .native_status import NativeStatusBatch, read_snowmelt_status
 from .native_target_edit import ThermostatTargetChange
 from .native_targets import (
@@ -446,6 +458,7 @@ __all__ = [
     "FanSetup",
     "FieldSpec",
     "FirmwareBundle",
+    "GatewayAccess",
     "GatewayEndpoint",
     "GatewayInfo",
     "GatewayRuntime",
@@ -465,6 +478,7 @@ __all__ = [
     "IoReport",
     "IoType",
     "LineBroadcast",
+    "LineReportKind",
     "LoopAssignment",
     "LoopKind",
     "LoopSetupSlot",
@@ -490,6 +504,7 @@ __all__ = [
     "NativeFrame",
     "NativeIdentity",
     "NativeInventory",
+    "NativeLineReport",
     "NativeMessage",
     "NativePath",
     "NativePortBusyError",
@@ -509,9 +524,11 @@ __all__ = [
     "NativeWriteResult",
     "NativeWriteStatus",
     "NetworkFault",
+    "NetworkLock",
     "NormalTrace",
     "NormalTraceState",
     "NullTransport",
+    "OutdoorTemperature",
     "OutputSample",
     "Packet",
     "PacketTransport",
@@ -639,6 +656,7 @@ __all__ = [
     "UnknownFieldError",
     "UnknownMethodError",
     "UnknownServiceError",
+    "WarmWeatherShutdown",
     "WaterCycle",
     "WaterDetection",
     "WaterMonitor",
@@ -648,6 +666,7 @@ __all__ = [
     "WeeklyEvent",
     "WritableBlock",
     "ZoneSyncAdjustment",
+    "ZoneSyncReport",
     "ZoneTargetMode",
     "apply_message",
     "celsius_to_dege",

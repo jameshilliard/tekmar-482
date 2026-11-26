@@ -5,7 +5,7 @@ from enum import IntEnum
 
 from . import decode_payload
 from .io import IO_DISCOVER, IO_DISCOVERY, IO_REPLY, IO_REQUEST
-from .line import ACCESS_STATUS
+from .line import ACCESS_STATUS, GatewayAccess, LineReportKind
 from .snowmelt import SNOW_REPORT, SNOW_REQUEST, SnowmeltAddress, SnowmeltApplication, SnowmeltKey as SnowmeltKey, SnowmeltRole as SnowmeltRole
 
 
@@ -27,10 +27,10 @@ class StatusRequest(IntEnum):
 
 
 _REPLIES = {
-    StatusRequest.ZONE_SYNC: 0x010, StatusRequest.SNOWMELT: SNOW_REPORT,
+    StatusRequest.ZONE_SYNC: LineReportKind.ZONE_SYNC, StatusRequest.SNOWMELT: SNOW_REPORT,
     StatusRequest.IO_CHANNEL: IO_REPLY, StatusRequest.IO_DISCOVERY: IO_DISCOVERY,
-    StatusRequest.WWSD: 0x30f, StatusRequest.CLOCK: 0x31f,
-    StatusRequest.HUMIDITY: 0x323, StatusRequest.OUTDOOR: 0x32f,
+    StatusRequest.WWSD: LineReportKind.WWSD, StatusRequest.CLOCK: LineReportKind.CLOCK,
+    StatusRequest.HUMIDITY: 0x323, StatusRequest.OUTDOOR: LineReportKind.OUTDOOR,
     StatusRequest.MASTER: 0x3ff,
     StatusRequest.GATEWAY_ACCESS: ACCESS_STATUS,
 }
@@ -100,7 +100,7 @@ class NativeStatusQuery:
     def match(self, message_id: int, source_subnet: int, data: bytes) -> ReplyPart | None:
         if message_id != self.kind.reply_id or "truncated" in decode_payload(message_id, data):
             return None
-        if self.kind is StatusRequest.GATEWAY_ACCESS and data[0] & 1:
+        if self.kind is StatusRequest.GATEWAY_ACCESS and GatewayAccess(data[0]).request:
             return None  # The query uses the same ID as the status; an echo is not a reply.
         if self.kind is StatusRequest.SNOWMELT:
             # Requests use (configured number - 1), reports use the configured number.
