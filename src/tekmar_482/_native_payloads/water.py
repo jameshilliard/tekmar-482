@@ -80,10 +80,20 @@ class BoilerMaximum:
 
 @dataclass(frozen=True, slots=True)
 class WaterCycle:
+    """WaterCycleStart plant fields; neither one is a host read deadline."""
+
     flags: int
 
+    @property
+    def cycle_length(self) -> int:
+        return self.flags & 0x7F
+
+    @property
+    def hold_override(self) -> bool:
+        return bool(self.flags & 0x80)
+
     def fields(self) -> Fields:
-        return {"cycle_length": self.flags & 127, "hold_override": self.flags >> 7}
+        return {"cycle_length": self.cycle_length, "hold_override": int(self.hold_override)}
 
 
 @dataclass(frozen=True, slots=True)

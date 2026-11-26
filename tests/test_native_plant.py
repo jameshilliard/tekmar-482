@@ -291,6 +291,20 @@ class PlantSessionTests(unittest.IsolatedAsyncioTestCase):
             "little",
         )
 
+    async def test_passive_water_cycles_are_per_source_not_a_host_hold(self) -> None:
+        self.rx(frame(0x37F, bytes.fromhex("80"), TEST_PATH, stamp=100))
+        self.rx(frame(0x37F, bytes.fromhex("7f"), _OTHER, stamp=101))
+        self.rx(frame(0x24F, _MODULATING, _OTHER, stamp=102))
+        result = await watch_native(self.stream, source=None, duration=0.02)
+        first = result.state.water_source(TEST_PATH)
+        other = result.state.water_source(_OTHER)
+        assert first and (held := first.equipment.cycle)
+        assert held.timestamp_ms == 100 and held.value.hold_override
+        assert held.value.cycle_length == 0
+        assert other and (ordinary := other.equipment.cycle) and other.equipment.outputs
+        assert ordinary.value.cycle_length == 127 and not ordinary.value.hold_override
+        assert not result.reads and self.tx.empty()
+
     async def serve_reconfiguration(self) -> set[tuple[int, int]]:
         assert await self.query() == (0, 0)
         self.rx(identity(_274))

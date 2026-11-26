@@ -146,6 +146,13 @@ tekmar-482 request CurrentTemperature address=1001 --tcp 192.0.2.10:3001 --json
 Use `client.reports()` inside `bridge.normal()` for unsolicited temperature
 and demand updates; enable them with `await client.set_reporting_state(enabled=True)`.
 
+Custom Normal mode obtains missing fields from the device on its own port.
+A changed demand, setback or active room target can trigger a targeted
+ModeSetting read; demand is not interpreted as configured mode. The gateway
+does not poll the inventory on a quiet bus or pause all ports after
+`WaterCycleStart`. In Raw mode the frame is available as native plant
+telemetry. A passive Python watch (`source=None`) sends nothing.
+
 In custom Normal mode the mode, heat/cool/slab setpoint, fan and humidity
 limit setters wait for device readback. Inspect the returned `mode`,
 `setpoint` or `percent`: the device can
