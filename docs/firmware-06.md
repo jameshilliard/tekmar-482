@@ -17,6 +17,9 @@ byte followed by a little-endian 32-bit method ID (`0xbd94`).
 
 The table covers the input dispatcher at `0xae8c` and calls to the tRPC
 output routine at `0xbe80`. Byte counts exclude the five-byte header.
+There are 26 input cases. TakingAddress is output-only: a host Request or
+Update for it takes the unknown-method branch at `0xae3c`, returning an
+empty NullMethod on the matching response service.
 "Readback" means Update returns the cached value without changing it.
 These are firmware behaviors, not a list of recommended commands.
 
@@ -35,7 +38,7 @@ These are firmware behaviors, not a list of recommended commands.
 | 13F HeatSetpoint, 147 CoolSetpoint, 14F SlabSetpoint, 157 FanPercent | 4 | Read / update; capability-gated |
 | 150 RelativeHumidity | 3 | Read only |
 | 151 HumiditySetMax, 152 HumiditySetMin | 3 | Read / update; separate capability bits |
-| 15F TakingAddress | 4 | Unsolicited report: old and new addresses |
+| 15F TakingAddress | 4 | Unsolicited report: old and new addresses; not an input handler |
 | 167 DeviceInventory | 2 | Walk or single lookup; Update is not a read |
 | 177 SetbackState, 17F SetbackEvents | 3 | Read / readback |
 | 187 FirmwareRevision, 18F ProtocolVersion | 2 | Read only |

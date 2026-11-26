@@ -124,6 +124,12 @@ its inventory is not the same as the list of all native frame sources. See
 [Normal method coverage](https://github.com/jameshilliard/tekmar-482-firmware/blob/master/docs/normal-mode.md)
 before using other vendor client methods on custom firmware.
 
+Custom Normal mode implements all 26 input method IDs in stock J1196J
+and acknowledges valid incoming tN4 frames, including on a single-peer
+line. Raw receive ACK remains opt-in. The firmware does not reproduce
+all stock discovery, retry or cache timing; see the
+[bus compatibility notes](https://github.com/jameshilliard/tekmar-482-firmware/blob/master/docs/normal-mode.md#bus-compatibility).
+
 The CLI `request` command uses Normal mode on custom firmware by default.
 For example, with a previously discovered tHA address:
 
