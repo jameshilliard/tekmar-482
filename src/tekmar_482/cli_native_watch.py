@@ -141,11 +141,21 @@ async def watch_all_from_args(
         duration=args.duration,
         timeout=args.timeout,
         schedules=not args.no_schedules,
+        thermostat_targets=not args.no_thermostat_targets,
         on_change=changed,
     )
     state = result.state
     unidentified = [asdict(p) for p in paths or () if state.identity(p) is None]
     no_mode = [asdict(t.path) for t in state.thermostats if t.setup.mode_raw is None]
+    no_targets = (
+        []
+        if args.no_thermostat_targets
+        else [
+            {**asdict(t.path), "missing_blocks": t.adjustments.missing_blocks}
+            for t in state.thermostats
+            if t.adjustments.missing_blocks
+        ]
+    )
     no_snow = [
         {
             **asdict(d.path),
@@ -170,6 +180,7 @@ async def watch_all_from_args(
             "observed_paths": [asdict(p) for p in state.paths],
             "missing_identities": unidentified,
             "missing_mode_reports": no_mode,
+            "incomplete_thermostat_targets": no_targets,
             "incomplete_snowmelt": no_snow,
             "incomplete_schedules": no_schedule,
             "status_reads": [
@@ -205,7 +216,8 @@ async def watch_all_from_args(
     return int(
         not state.paths
         or (
-            not args.passive and bool(unidentified or no_mode or no_snow or no_schedule)
+            not args.passive
+            and bool(unidentified or no_mode or no_targets or no_snow or no_schedule)
         ),
     )
 

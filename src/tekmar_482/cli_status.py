@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING
 
 from ._native_payloads.climate import ThermostatMode
 from ._native_payloads.queries import NativeStatusQuery, StatusRequest
+from ._native_payloads.thermostat import TargetSlot, ThermostatTarget
 from .constants import TN4_PORTS
 from .native import NativeAddress
 from .native_state import NativePath
@@ -21,6 +22,7 @@ if TYPE_CHECKING:
     from .native_sensors import SensorObservation
     from .native_state import NativeClimate
     from .native_status import NativeStatusBatch
+    from .native_targets import ThermostatAdjustments
     from .native_watch import ClimateChange
     from .native_water import WaterSample, WaterSource
     from .raw import BridgeStream
@@ -130,6 +132,51 @@ def climate_fields(device: NativeClimate) -> dict[str, object]:
         "enabled_heat_pumps": setup.enabled_heat_pumps,
         "air_timestamp_ms": device.air_timestamp_ms,
         "air": device.air.fields() if device.air is not None else None,
+        "adjustments": adjustment_fields(device.adjustments),
+    }
+
+
+def adjustment_fields(settings: ThermostatAdjustments) -> dict[str, object]:
+    fan, rh = settings.fan_setup, settings.humidity_setup
+    return {
+        "floor_configured": settings.floor_configured,
+        "fan_adjustment_enabled": fan.enabled if fan is not None else None,
+        "humidify_enabled": rh.enabled(ThermostatTarget.HUMIDIFY)
+        if rh is not None
+        else None,
+        "dehumidify_enabled": rh.enabled(ThermostatTarget.DEHUMIDIFY)
+        if rh is not None
+        else None,
+        "tables": {
+            t.target.name.lower(): {
+                "block": t.target.value,
+                "unit": "celsius" if t.target.temperature else "percent",
+                "slots": {
+                    s.name.lower(): {"raw": t.raw(s), "value": t.value(s)}
+                    for s in TargetSlot
+                },
+                **(
+                    {"maximum_raw": t.maximum_raw}
+                    if t.target is ThermostatTarget.FLOOR
+                    else {}
+                ),
+            }
+            for t in settings.tables
+        },
+        "room_limits": {
+            t.limit.name.lower(): {s.name.lower(): t.raw(s) for s in TargetSlot}
+            for t in settings.limits
+        },
+        "operating_reports": {
+            k: {"received_ms": f.timestamp_ms, **f.decoded}
+            for k, f in (
+                ("fan", settings.fan.frame if settings.fan else None),
+                ("slab", settings.slab.frame if settings.slab else None),
+                ("humidity", settings.humidity.frame if settings.humidity else None),
+            )
+            if f is not None
+        },
+        "missing_blocks": settings.missing_blocks,
     }
 
 
@@ -192,6 +239,11 @@ def _add_watch(
         help=description,
     )
     if name == "watch-native":
+        watch.add_argument(
+            "--no-thermostat-targets",
+            action="store_true",
+            help="skip additional thermostat adjustment reads",
+        )
         watch.add_argument(
             "--no-schedules",
             action="store_true",

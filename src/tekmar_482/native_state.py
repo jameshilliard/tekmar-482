@@ -18,8 +18,9 @@ from ._native_payloads.layouts import MULTI_WEEK
 from ._native_payloads.schedules import SCHEDULE_STATUS
 from ._native_payloads.sensors import SENSOR_BLOCKS, ThermostatSensors
 from ._native_payloads.snowmelt import SNOW_REPORT
+from ._native_payloads.thermostat import FAN_STATUS, HUMIDITY_STATUS, SLAB_STATUS
 from .constants import TN4_PORTS
-from .native import NativeAddress, NativeFrame
+from .native import BlockKey, NativeAddress, NativeFrame
 from .native_calendar import (
     SCHEDULE_BLOCKS,
     NativeCalendar,
@@ -29,13 +30,13 @@ from .native_calendar import (
 from .native_identity import NativeIdentity
 from .native_schedule import ScheduleDirectory
 from .native_snowmelt import NativeSnowmelt, SnowmeltChannels, SnowmeltConfiguration
+from .native_targets import ADJUSTMENT_BLOCKS, AdjustmentState, ThermostatAdjustments
 from .native_water import WaterMonitor
 from .raw import CaptureGap
 
 if TYPE_CHECKING:
     from collections.abc import Iterable
 
-    from .native_schedule import ScheduleKey
     from .native_snowmelt import SnowmeltChannel
     from .native_water import WaterSource
     from .raw import CaptureRecord
@@ -47,8 +48,7 @@ _BLOCK_HEADER = 3
 _UPDATE_HEADER = 4
 _OLD_ADDRESS = 2
 _NODE = 31
-type _BlockKey = tuple[int, int | None]
-_CLIMATE_BLOCKS = frozenset((*MODE_BLOCKS, *SENSOR_BLOCKS))
+_CLIMATE_BLOCKS = frozenset((*MODE_BLOCKS, *SENSOR_BLOCKS, *ADJUSTMENT_BLOCKS))
 
 
 @dataclass(frozen=True, order=True, slots=True)
@@ -80,17 +80,19 @@ class NativeClimate:
     setup: ThermostatConfiguration
     air: AirStatus | None
     sensors: ThermostatSensors
+    adjustments: ThermostatAdjustments
     air_timestamp_ms: int | None = field(compare=False)
 
 
 @dataclass(slots=True)
 class _Peer:
     identity: NativeIdentity | None = None
-    blocks: dict[_BlockKey, NativeFrame] = field(default_factory=dict)
+    blocks: dict[BlockKey, NativeFrame] = field(default_factory=dict)
     air: AirStatus | None = None
     air_frame: NativeFrame | None = None
     snow: SnowmeltChannels = field(default_factory=SnowmeltChannels)
     calendar: ScheduleBook = field(default_factory=ScheduleBook)
+    outputs: AdjustmentState = field(default_factory=AdjustmentState)
 
     def climate(self, path: NativePath) -> NativeClimate | None:
         identity = self.identity
@@ -105,12 +107,14 @@ class _Peer:
             for (b, s), f in self.blocks.items()
             if s is None and b in _CLIMATE_BLOCKS
         }
+        sensors = ThermostatSensors.from_blocks(product, identity.z_number, fields)
         return NativeClimate(
             path,
             identity,
             ThermostatConfiguration.from_blocks(product, identity.z_number, fields),
             self.air,
-            ThermostatSensors.from_blocks(product, identity.z_number, fields),
+            sensors,
+            self.outputs.snapshot(product, sensors, fields),
             self.air_frame.timestamp_ms if self.air_frame else None,
         )
 
@@ -190,7 +194,7 @@ class NativeState:
             ),
         )
 
-    def missing_schedule_reads(self, path: NativePath) -> dict[ScheduleKey, int]:
+    def missing_schedule_reads(self, path: NativePath) -> dict[BlockKey, int]:
         peer = self._peers.get(path)
         if peer is None or not path.node:
             return {}
@@ -199,9 +203,13 @@ class NativeState:
             for k in peer.calendar.missing(schedule_profile(peer.identity))
         }
 
-    def schedule_revision(self, path: NativePath, key: ScheduleKey) -> int:
+    def block_revision(self, path: NativePath, key: BlockKey) -> int:
         peer = self._peers.get(path)
-        return peer.calendar.revisions.get(key, 0) if peer else 0
+        if peer is None:
+            return 0
+        if key[0] in ADJUSTMENT_BLOCKS:
+            return peer.outputs.revisions.get(key[0], 0)
+        return peer.calendar.revisions.get(key, 0)
 
     def block(
         self,
@@ -275,19 +283,40 @@ class NativeState:
         peer.blocks[key] = frame
         if before is not None:
             peer.snow.invalidate(block, before, frame)
+            if before.message.payload != data and block in ADJUSTMENT_BLOCKS:
+                identity = peer.identity
+                peer.outputs.reconfigured(
+                    block,
+                    before,
+                    frame,
+                    peer.blocks,
+                    identity.product if identity else None,
+                    identity.z_number if identity else None,
+                )
         return before is None or before.message.payload != data
 
-    def _schedule_update(self, frame: NativeFrame) -> tuple[NativePath, ...]:
+    def _configuration_update(self, frame: NativeFrame) -> tuple[NativePath, ...]:
         data = frame.message.payload
         if len(data) <= _UPDATE_HEADER:
             return ()
         block = int.from_bytes(data[2:4], "little")
-        if block not in SCHEDULE_BLOCKS or "truncated" in frame.decoded:
+        if (
+            block not in SCHEDULE_BLOCKS and block not in ADJUSTMENT_BLOCKS
+        ) or "truncated" in frame.decoded:
             return ()
         target = NativePath(frame.port, data[0], data[1] & _NODE)
         peer = self._peers.get(target)
         if peer is None or not target.node:
             return ()
+        if block in ADJUSTMENT_BLOCKS:
+            if (
+                not peer.identity
+                or not peer.identity.product
+                or peer.identity.product.family != "thermostat"
+            ):
+                return ()
+            peer.outputs.update(block, peer.blocks)
+            return (target,)
         selector = (
             (data[_UPDATE_HEADER] & BLOCK_SELECTORS[block][1])
             if block in MULTI_WEEK
@@ -308,7 +337,7 @@ class NativeState:
         if not isinstance(record, NativeFrame):
             return ()
         if record.message_id == BLOCK_UPDATE:
-            return self._schedule_update(record)
+            return self._configuration_update(record)
         path = NativePath.from_frame(record)
         data = record.message.payload
         if record.message_id == TAKING_ADDRESS:
@@ -321,6 +350,12 @@ class NativeState:
         changed_water = self._water.observe(record)
         if record.message_id == BLOCK_REPORT:
             return (path,) if self._block(path, record) or changed_water else ()
+        if record.message_id in (FAN_STATUS, SLAB_STATUS, HUMIDITY_STATUS):
+            output = record.thermostat_output
+            if output is None:
+                return ()
+            peer = self._peers.setdefault(path, _Peer())
+            return (path,) if peer.outputs.observe(output, record, peer.blocks) else ()
         if record.message_id == SCHEDULE_STATUS:
             status = record.schedule_status
             if status is None:
@@ -348,6 +383,7 @@ class NativeState:
         except ShortPayload:
             return ()
         peer = self._peers.setdefault(path, _Peer())
+        peer.outputs.air(air, peer.blocks)
         changed_air = peer.air != air
         peer.air, peer.air_frame = air, record
         return (path,) if changed_air else ()

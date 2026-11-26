@@ -46,6 +46,16 @@ from ._native_payloads.snowmelt import (
     SnowmeltReport,
     WaterDetection,
 )
+from ._native_payloads.thermostat import (
+    FanDuctStatus,
+    FanSetup,
+    HumiditySetup,
+    HumidityStatus,
+    SlabStatus,
+    TargetSlot,
+    TargetTable,
+    ThermostatTarget,
+)
 from ._native_payloads.water import (
     DhwStatus,
     HeatSource,
@@ -198,6 +208,13 @@ from .native_snowmelt import (
 )
 from .native_state import NativeClimate, NativePath, NativeState
 from .native_status import NativeStatusBatch, read_snowmelt_status
+from .native_target_edit import ThermostatTargetChange
+from .native_targets import (
+    OutputSample,
+    RoomLimit,
+    RoomLimitTable,
+    ThermostatAdjustments,
+)
 from .native_watch import (
     ClimateChange,
     ClimateWatchResult,
@@ -375,6 +392,8 @@ __all__ = [
     "DiscoveryResult",
     "EnableFields",
     "FailureReason",
+    "FanDuctStatus",
+    "FanSetup",
     "FieldSpec",
     "FirmwareBundle",
     "GatewayEndpoint",
@@ -383,6 +402,8 @@ __all__ = [
     "GatewaySnapshot",
     "GroupReport",
     "HeatSource",
+    "HumiditySetup",
+    "HumidityStatus",
     "InvalidCapture",
     "InvalidReason",
     "InventoryDrainTimeoutError",
@@ -424,6 +445,7 @@ __all__ = [
     "NativeWriteResult",
     "NativeWriteStatus",
     "NullTransport",
+    "OutputSample",
     "Packet",
     "PacketTransport",
     "PanelState",
@@ -436,6 +458,8 @@ __all__ = [
     "ReportSubscription",
     "ReportingStateFields",
     "ResponseMatch",
+    "RoomLimit",
+    "RoomLimitTable",
     "RoomTemperatures",
     "ScenePortResult",
     "SceneReport",
@@ -470,6 +494,7 @@ __all__ = [
     "SetpointDeviceRuntime",
     "SetpointGroupFields",
     "SetpointValues",
+    "SlabStatus",
     "SnowmeltAddress",
     "SnowmeltApplication",
     "SnowmeltBlock",
@@ -490,6 +515,8 @@ __all__ = [
     "StatusRequest",
     "SystemSchedule",
     "TankStatus",
+    "TargetSlot",
+    "TargetTable",
     "Tekmar482Client",
     "Tekmar482Controller",
     "Tekmar482DeviceHandle",
@@ -498,12 +525,15 @@ __all__ = [
     "TekmarError",
     "ThaSetback",
     "ThaValue",
+    "ThermostatAdjustments",
     "ThermostatConfiguration",
     "ThermostatData",
     "ThermostatMode",
     "ThermostatRuntime",
     "ThermostatSensorMonitor",
     "ThermostatSensors",
+    "ThermostatTarget",
+    "ThermostatTargetChange",
     "TraceReplayTransport",
     "TraceStep",
     "TransportError",

@@ -19,6 +19,7 @@ from .products import identify_product
 from .scenes import SCENE_REPORT, SCENE_RESPONSE_FIELDS, SceneReport, SceneResponse
 from .schedules import DAY_NAMES, SCHEDULE_STATUS, SINGLE_WEEK, DailyEvents, ScheduleBinding, ScheduleCycle, ScheduleEvent, ScheduleStatus
 from .snowmelt import SNOW_REPORT, SNOW_REQUEST, SnowmeltApplication, SnowmeltReport
+from .thermostat import FAN_STATUS, HUMIDITY_STATUS, SLAB_STATUS, FanDuctStatus, HumidityStatus, SlabStatus
 from .water import DHW_STATUS, MASTER_PRESENT, MASTER_STATUS, PLANT_LOOP_STATUS, TANK_STATUS, DhwStatus, HeatSource, LoopStatus, TankStatus
 
 
@@ -423,19 +424,6 @@ def mix_update(r: Reader) -> Fields:
             "target_raw": (b >> 6) << 8 | target, "target_pump_output": pump}
 
 
-def rh_report(r: Reader) -> Fields:
-    count, flags, control = r.take(3)
-    fields: Fields = {"count": count, "flags": flags, "control": control, "dewpoint_raw": r.word(),
-                      "internal_sensor_raw": r.byte()}
-    # Both layouts place the optional targets at 6+count and 7+count.
-    # Only the declarative one consistently consumes the intervening bytes.
-    fields["sensor_bytes_hex"] = r.take(count).hex()
-    for name in ("humidity_current_target", "dehumidity_current_target"):
-        if r.remaining:
-            fields[name] = r.byte()
-    return fields
-
-
 def bits(value: int, *fields: tuple[str, int, int]) -> Fields:
     return {name: (value >> shift) & mask for name, shift, mask in fields}
 
@@ -459,10 +447,8 @@ DECODERS: dict[int, tuple[str, Callable[[Reader], Fields]]] = {
     ACCESS_STATUS: ("SecureGatewayAccess", lambda r: bits(r.byte(), ("request", 0, 1), ("access_open", 1, 1))),
     GROUP_REPORT: ("SetpointEnableReport", group_report),
     GROUP_UPDATE: ("SetpointRemoteEnable", octets("group_id", "enable")),
-    0x25f: ("FanDuctStatus", lambda r: bits(r.byte(), ("fan1", 0, 3), ("fan2", 2, 3),
-        ("optimum_start", 4, 3), ("freeze_protect", 6, 1)) |
-        {"duct_temp_raw": r.word(), "coil_temp_raw": r.word()}),
-    0x26f: ("SlabStatus", lambda r: {"slab_status": r.byte() & 7, "target_raw": r.byte(), "current_raw": r.word()}),
+    FAN_STATUS: ("FanDuctStatus", lambda r: FanDuctStatus.read(r).fields()),
+    SLAB_STATUS: ("SlabStatus", lambda r: SlabStatus.read(r).fields()),
     0x287: ("CalibrationMode", octets("mode")),
     0x2ef: ("NetworkLock", lambda r: bits(r.byte(), ("access_lock", 0, 1), ("address_lock", 1, 1))),
     SCHEDULE_STATUS: ("ScheduleStatus", lambda r: ScheduleStatus.read(r).fields()),
@@ -471,7 +457,7 @@ DECODERS: dict[int, tuple[str, Callable[[Reader], Fields]]] = {
     0x30f: ("WWSDStatus", lambda r: bits(r.byte(), *((name, i, 1) for i, name in enumerate(SETPOINT_FIELDS)))),
     0x317: ("RealTimeClockRequest", octets()),
     0x322: ("RHQuery", lambda r: {"target_subnet": r.byte(), "node_selector": int.from_bytes(r.take(4), "little")}),
-    0x323: ("RHReport", rh_report),
+    HUMIDITY_STATUS: ("RHReport", lambda r: HumidityStatus.read(r).fields()),
     0x327: ("OutdoorTemperatureRequest", octets()),
     0x347: ("MixingModulePresent", lambda r: bits(r.byte(), ("actuator_type", 0, 15),
         ("adjustable_speed", 6, 1), ("system_pump_controllable", 7, 1)) | {"motor_speed": r.byte()}),

@@ -24,6 +24,7 @@ if TYPE_CHECKING:
     from .native_discovery import NativeDevice
     from .native_sensors import SensorObservation
     from .native_snowmelt import NativeSnowmelt
+    from .native_state import NativeClimate
     from .native_status import NativeStatusBatch
     from .raw import BridgeStream, NativeBlockBatch
 
@@ -47,7 +48,14 @@ class NativeSnapshot:
 
     @property
     def snowmelt_devices(self) -> tuple[NativeSnowmelt, ...]:
-        """Merge fresh block and keyed replies without reordering a source's samples."""
+        return self.observed_state().snowmelt_devices
+
+    @property
+    def thermostats(self) -> tuple[NativeClimate, ...]:
+        return self.observed_state().thermostats
+
+    def observed_state(self) -> NativeState:
+        """Project the reports from the scan without issuing further requests."""
         state = NativeState()
         for batch in self.blocks:
             for frame in batch.reports:
@@ -55,7 +63,7 @@ class NativeSnapshot:
         for status in self.statuses:
             for frame in status.reports:
                 state.observe(frame)
-        return state.snowmelt_devices
+        return state
 
 
 @dataclass(slots=True)

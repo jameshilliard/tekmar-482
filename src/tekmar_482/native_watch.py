@@ -8,28 +8,29 @@ from dataclasses import dataclass
 from math import isfinite
 from typing import TYPE_CHECKING
 
-from ._calendar_watch import CalendarWatch
+from ._configuration_watch import ConfigurationWatch
 from ._native_payloads.climate import AIR_MASTER, AIR_MEMBER, HEATING_SETUP, MODE_BLOCKS
 from ._native_payloads.layouts import MULTI_WEEK
 from ._native_payloads.schedules import SCHEDULE_STATUS, SETUP_BLOCK
 from ._snow_watch import SnowRead, SnowWatch
 from .native import NativeAddress, NativeBlockQuery, NativeFrame
 from .native_state import BLOCK_UPDATE, TAKING_ADDRESS, NativePath, NativeState
+from .native_targets import ADJUSTMENT_BLOCKS
 from .raw import CaptureGap
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterable
 
     from ._native_payloads.climate import AirReading, AirStatus
+    from .native import BlockKey
     from .native_identity import NativeIdentity
-    from .native_schedule import ScheduleKey
     from .native_state import NativeClimate
     from .native_status import NativeStatusBatch
     from .raw import BridgeStream, CaptureRecord, NativeBlockBatch
 
 _HOST = NativeAddress(0, 0)
 _UPDATE_HEADER = 4
-type _Job = tuple[NativePath, int | SnowRead | ScheduleKey]
+type _Job = tuple[NativePath, int | SnowRead | BlockKey]
 type _ChannelHint = tuple[int, int] | None
 type _ModeHint = tuple[int, _ChannelHint, _ChannelHint]
 
@@ -75,7 +76,7 @@ class _PortQueue:
     def add(
         self,
         path: NativePath,
-        block: int | SnowRead | ScheduleKey,
+        block: int | SnowRead | BlockKey,
         *,
         urgent: bool,
     ) -> None:
@@ -103,6 +104,7 @@ class _Watch:
         on_change: Callable[[ClimateChange], None] | None,
         include_snow: bool = False,
         schedules: bool = False,
+        thermostat_targets: bool = False,
         on_native: Callable[[NativePath, NativeState], None] | None = None,
     ) -> None:
         self.state = NativeState(paths)
@@ -112,8 +114,15 @@ class _Watch:
         self.statuses: dict[tuple[NativePath, SnowRead], NativeStatusBatch] = {}
         self.reading_status: set[NativePath] = set()
         self.snow = SnowWatch(self.state, self._queue) if include_snow else None
-        self.calendar = (
-            CalendarWatch(self.state, self._queue) if schedules and active else None
+        self.configuration = (
+            ConfigurationWatch(
+                self.state,
+                self._queue,
+                schedules=schedules,
+                targets=thermostat_targets,
+            )
+            if (schedules or thermostat_targets) and active
+            else None
         )
         self.on_native = on_native
         self.count = 0
@@ -125,19 +134,22 @@ class _Watch:
         for p in sorted(paths or ()):
             self._queue(p, 0)
 
-    def _queue(self, path: NativePath, block: int | SnowRead | ScheduleKey) -> None:
+    def _queue(self, path: NativePath, block: int | SnowRead | BlockKey) -> None:
         if (q := self.queues.get(path.port)) is not None:
             urgent = isinstance(block, SnowRead) or (
                 isinstance(block, tuple)
-                and block[0] in (SETUP_BLOCK, MULTI_WEEK.start)
-                and self.state.schedule_revision(path, block) > 0
+                and (
+                    block[0] in (SETUP_BLOCK, MULTI_WEEK.start)
+                    or block[0] in ADJUSTMENT_BLOCKS
+                )
+                and self.state.block_revision(path, block) > 0
             )
             q.add(path, block, urgent=urgent)
 
     def _invalidate(self, path: NativePath) -> None:
         self.identities.pop(path, None)
-        if self.calendar is not None:
-            self.calendar.discard(path)
+        if self.configuration is not None:
+            self.configuration.discard(path)
         if self.snow is not None:
             self.snow.discard(path)
         if queue := self.queues.get(path.port):
@@ -184,16 +196,16 @@ class _Watch:
         if self.snow is not None and self.snow.changed(path):
             for read in SnowRead:
                 self.statuses.pop((path, read), None)
-        if self.calendar is not None:
-            self.calendar.reconcile(path)
+        if self.configuration is not None:
+            self.configuration.reconcile(path, current)
         if self.on_native is not None:
             self.on_native(path, self.state)
 
     def observe(self, record: CaptureRecord) -> None:
         if (
             isinstance(record, NativeFrame)
-            and self.calendar is not None
-            and not self.calendar.accept(record)
+            and self.configuration is not None
+            and not self.configuration.accept(record)
         ):
             return
         changed = self.state.observe(record)
@@ -234,14 +246,19 @@ class _Watch:
         for path in changed:
             self._updated(path)
         if (
-            self.calendar is not None
+            self.configuration is not None
+            and self.configuration.schedules
             and isinstance(record, NativeFrame)
             and record.message_id == SCHEDULE_STATUS
             and self.paths
             and (path := NativePath.from_frame(record)) in self.paths
             and (status := record.schedule_status) is not None
         ):
-            self.calendar.announced(path, status, self.latest.get((path, 0)))
+            self.configuration.schedule_announced(
+                path,
+                status,
+                self.latest.get((path, 0)),
+            )
         if isinstance(record, NativeFrame) and record.message_id in (
             AIR_MEMBER,
             AIR_MASTER,
@@ -285,18 +302,18 @@ class _Watch:
             path, block = await queue.take()
             epoch = self.epochs.get(path, 0)
             if isinstance(block, tuple):
-                if self.calendar is None:
+                if self.configuration is None:
                     continue
-                calendar_batch = await self.calendar.read(
+                observation = await self.configuration.read(
                     stream,
                     path,
                     block,
                     source=source,
                     timeout=timeout,
                 )
-                if calendar_batch is None:
+                if observation is None:
                     continue
-                result = calendar_batch.tx_result
+                result = observation.tx_result
             elif isinstance(block, SnowRead):
                 if self.snow is None or (query := self.snow.query(path, block)) is None:
                     continue
@@ -396,6 +413,7 @@ async def watch_native(
     duration: float | None = None,
     timeout: float = 20,
     schedules: bool = True,
+    thermostat_targets: bool = True,
     on_change: Callable[[NativePath, NativeState], None] | None = None,
     on_record: Callable[[CaptureRecord], None] | None = None,
 ) -> NativeWatchResult:
@@ -411,6 +429,7 @@ async def watch_native(
         on_change=None,
         include_snow=True,
         schedules=schedules,
+        thermostat_targets=thermostat_targets,
         on_native=on_change,
     )
     await _run_watch(
@@ -426,7 +445,7 @@ async def watch_native(
         watch.count,
         (
             *watch.latest.values(),
-            *(watch.calendar.latest.values() if watch.calendar else ()),
+            *(watch.configuration.latest.values() if watch.configuration else ()),
         ),
         tuple(watch.statuses.values()),
     )

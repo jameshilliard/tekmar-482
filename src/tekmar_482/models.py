@@ -8,6 +8,7 @@ from types import MappingProxyType
 from typing import TYPE_CHECKING, Self, assert_never
 
 from ._native_payloads.products import identify_product
+from ._native_payloads.thermostat import fan_step
 from .constants import (
     DEVICE_FEATURES,
     MAX_PERCENT,
@@ -148,7 +149,7 @@ class DiscoveredDevice:
     @property
     def fan_percent_step(self) -> int:
         """Physical percentage represented by one tHA FanPercent unit."""
-        return 10 if self.model in {"544", "545", "546"} else 1
+        return fan_step(self.model)
 
     def encode_fan_percent(self, percent: int) -> int:
         """Convert a representable physical percentage to its device wire value."""

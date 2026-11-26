@@ -33,6 +33,14 @@ from ._native_payloads.schedules import (
     ScheduleStatus,
 )
 from ._native_payloads.snowmelt import SNOW_REPORT, SnowmeltReport
+from ._native_payloads.thermostat import (
+    FAN_STATUS,
+    HUMIDITY_STATUS,
+    SLAB_STATUS,
+    FanDuctStatus,
+    HumidityStatus,
+    SlabStatus,
+)
 from .constants import TN4_PORTS
 from .units import celsius_to_degh, degh_to_celsius
 
@@ -312,6 +320,20 @@ class NativeFrame:
             return None
 
     @property
+    def thermostat_output(self) -> FanDuctStatus | SlabStatus | HumidityStatus | None:
+        r = Reader(self.message.payload)
+        try:
+            if self.message_id == FAN_STATUS:
+                return FanDuctStatus.read(r)
+            if self.message_id == SLAB_STATUS:
+                return SlabStatus.read(r)
+            if self.message_id == HUMIDITY_STATUS:
+                return HumidityStatus.read(r)
+        except ShortPayload:
+            return None
+        return None
+
+    @property
     def snowmelt_report(self) -> SnowmeltReport | None:
         """Return all declared pairs in wire order; leave extensions in the frame."""
         if self.message_id != SNOW_REPORT:
@@ -330,6 +352,9 @@ class NativeFrame:
         ):
             return SceneReport.from_payload(self.message.payload)
         return None
+
+
+type BlockKey = tuple[int, int | None]
 
 
 @dataclass(frozen=True, slots=True)

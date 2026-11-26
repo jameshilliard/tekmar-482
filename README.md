@@ -234,6 +234,23 @@ tekmar-482 write-fields 0x05
 tekmar-482 write-block 2 0x12 3 0x05 wake=40 --tcp 192.0.2.10:3001 --json
 ```
 
+For a thermostat, use `set-thermostat-target` or
+`stream.write_thermostat_target(port, peer, change, source=source)` to edit a
+stored slot in physical units. Both default to preview. For example:
+
+```bash
+tekmar-482 set-thermostat-target 2 0x12 3 heat wake 21.5 --tcp 192.0.2.10:3001
+```
+
+`ThermostatTargetChange(ThermostatTarget.HEAT, TargetSlot.WAKE, 21.5)`
+uses Celsius. Fan and humidity use percentages; fan 0 means Auto, humidity
+0 means Off. Fan targets on 544/545/546 use ten-percent steps. The client
+reads the destination's identity and complete target block. Floor, fan and
+humidity edits also require the corresponding setup or sensor assignment.
+An edit does not enable an output, change the operating mode or select a
+different setback. A confirmed edit reads the target back; a missing support
+bit, compact pre-write block or unrepresentable value cannot be written.
+
 The CLI uses the same reader. For example, with an **observed** native node
 on a dedicated single-peer line (addresses below are examples):
 
@@ -486,13 +503,25 @@ but is never treated as a readback. After a missing setup reply, a new
 role announcement can prompt one retry. Use `--no-schedules` to omit calendar
 reads and output.
 
+`state.climate(path).adjustments` separates stored heat, cool, floor, fan,
+humidify and dehumidify tables from live air, fan/duct, slab and RH reports.
+Read a stored slot with `adjustments.table(ThermostatTarget.HEAT)`, then
+`table.value(TargetSlot.WAKE)` (Celsius or percent) or `table.raw(...)`.
+A missing table is not a table of zeros. The floor table can report a maximum;
+the three separate room limit tables expose supported raw bytes by slot.
+An addressed update or a changed active target triggers a targeted read;
+sensor fluctuations and fan cycling do not. Select `--no-thermostat-targets`
+to skip these extra reads. Passive mode still decodes any observed table.
+An RH reading does not establish that humidification or dehumidification is
+installed, and fan output states are not ventilation percentages.
+
 The library equivalent is `await watch_native(stream, paths, on_change=callback)`.
 The synchronous callback receives `(path, state)`. Use
 `state.snowmelt(path)`, `state.climate(path)`, `state.schedule(path)` or `state.water_source(path)` to
 obtain an immutable snapshot. `source=None` (CLI: `--passive`) sends no
 requests; link ACKs remain off unless explicitly enabled on a port. A
-finite active watch lists missing identities, modes, calendar data and snowmelt keys and
-returns status 1 for incomplete coverage.
+finite active watch lists missing identities, modes, thermostat blocks, calendar
+data and snowmelt keys and returns status 1 for incomplete coverage.
 
 `state.schedule(path).signals` retains the reported current and next phases
 per advertised system. These are not proof that a device owns a table or that

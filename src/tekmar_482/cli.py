@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING, Any, TextIO
 from ._native_payloads.climate import REMOTE_MODES, ThermostatMode
 from ._native_payloads.line import GROUP_IDS
 from ._native_payloads.scenes import NativeScene, SceneResponse
+from ._native_payloads.thermostat import TargetSlot, ThermostatTarget
 from ._native_payloads.writes import NativeField, WritableBlock
 from ._wire import GatewayEndpoint
 from .bridge import BridgeClient
@@ -61,6 +62,7 @@ from .native_sensors import read_thermostat_sensors
 from .native_snapshot import read_native_snapshot
 from .native_snow_control import SnowmeltOperation
 from .native_state import NativeState
+from .native_target_edit import ThermostatTargetChange
 from .native_water import read_water
 from .native_write import NativeWriteStatus
 from .raw import CaptureGap, InvalidCapture, PortError, TxStatus
@@ -348,11 +350,28 @@ def _add_block_commands(
     )
     _add_native_target(mode)
     mode.add_argument("mode", choices=[m.name.lower() for m in REMOTE_MODES])
-    mode.add_argument(
-        "--confirm",
-        action="store_true",
-        help="update and verify; default is preview",
+    adjustment = subparsers.add_parser(
+        "set-thermostat-target",
+        parents=[parent],
+        help="preview or verify one stored thermostat target in Celsius or percent",
     )
+    _add_native_target(adjustment)
+    adjustment.add_argument(
+        "target",
+        choices=[t.name.lower() for t in ThermostatTarget],
+    )
+    adjustment.add_argument("slot", choices=[s.name.lower() for s in TargetSlot])
+    adjustment.add_argument(
+        "value",
+        type=float,
+        help="degrees Celsius or physical percent",
+    )
+    for command in (mode, adjustment):
+        command.add_argument(
+            "--confirm",
+            action="store_true",
+            help="update and verify; default is preview",
+        )
     for sampler in (device, dump):
         sampler.add_argument(
             "--block-attempts",
@@ -645,6 +664,7 @@ async def _native(args: argparse.Namespace, stdout: TextIO) -> int:
             "read-device",
             "read-sensors",
             "set-climate-mode",
+            "set-thermostat-target",
             "set-device-group",
             "set-snowmelt-group",
             "write-block",
@@ -763,7 +783,10 @@ def _emit_derived(snapshot: NativeSnapshot, emit: Callable[[object], None]) -> N
         emit({"weekly_schedule": schedule_fields(week)})
     for device in snapshot.thermostat_sensors:
         emit({"thermostat_sensors": sensor_fields(device)})
-    for snow in snapshot.snowmelt_devices:
+    state = snapshot.observed_state()
+    for climate in state.thermostats:
+        emit({"thermostat_climate": climate_fields(climate)})
+    for snow in state.snowmelt_devices:
         emit({"snowmelt": snow_fields(snow)})
 
 
@@ -825,6 +848,19 @@ async def _native_addressed(
                 args.port,
                 address,
                 ThermostatMode[args.mode.upper()],
+                source=source,
+                timeout=args.timeout,
+                preview=not args.confirm,
+            )
+        elif args.command == "set-thermostat-target":
+            result = await stream.write_thermostat_target(
+                args.port,
+                address,
+                ThermostatTargetChange(
+                    ThermostatTarget[args.target.upper()],
+                    TargetSlot[args.slot.upper()],
+                    args.value,
+                ),
                 source=source,
                 timeout=args.timeout,
                 preview=not args.confirm,

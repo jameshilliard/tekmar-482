@@ -17,6 +17,7 @@ from .native import NativeFrame, NativeMessage
 from .native_schedule import edit_schedule_time
 from .native_snow_control import apply_snowmelt_group
 from .native_status import StatusCollector
+from .native_target_edit import edit_thermostat_target
 from .native_write import NativeBlockEditor
 from .packet import TYPE_TN4
 
@@ -30,6 +31,7 @@ if TYPE_CHECKING:
     from .native_schedule import ScheduleChange, ScheduleTarget
     from .native_snow_control import SnowmeltGroupResult, SnowmeltOperation
     from .native_status import NativeStatusBatch
+    from .native_target_edit import ThermostatTargetChange
     from .native_write import NativeWriteResult
     from .packet import Packet
 
@@ -293,6 +295,16 @@ class BridgeStream(Protocol):
         timeout: float = 20,
         preview: bool = False,
     ) -> NativeWriteResult: ...
+    async def write_thermostat_target(
+        self,
+        port: int,
+        target: NativeAddress,
+        change: ThermostatTargetChange,
+        *,
+        source: NativeAddress,
+        timeout: float = 20,
+        preview: bool = True,
+    ) -> NativeWriteResult: ...
     async def set_snowmelt_group(
         self,
         port: int,
@@ -459,6 +471,19 @@ class RawDispatcher:
     ) -> NativeWriteResult:
         async with self._editor(port, target, source, timeout) as editor:
             return await editor.write_mode(target, mode, preview=preview)
+
+    async def write_thermostat_target(
+        self,
+        port: int,
+        target: NativeAddress,
+        change: ThermostatTargetChange,
+        *,
+        source: NativeAddress,
+        timeout: float = 20,
+        preview: bool = True,
+    ) -> NativeWriteResult:
+        async with self._editor(port, target, source, timeout) as editor:
+            return await edit_thermostat_target(editor, target, change, preview=preview)
 
     async def set_snowmelt_group(
         self,
