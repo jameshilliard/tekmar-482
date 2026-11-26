@@ -21,6 +21,8 @@ from tekmar_482 import (
     Packet,
     ProtocolError,
     Tekmar482Client,
+    TxResult,
+    TxStatus,
     install_firmware,
     open_gateway,
 )
@@ -151,15 +153,15 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         async with listen(app) as endpoint, open_gateway(endpoint) as client:
             assert isinstance(client, BridgeClient)
             assert (await client.panel()).inputs == 1
-            async with client.stream(tx=(0, bytes.fromhex("12300001a5"))) as stream:
+            async with client.stream() as stream:
+                result = await stream.send(0, bytes.fromhex("12300001a5"))
+                assert result == TxResult(0, TxStatus.ACK)
                 frame = await stream.read()
                 assert (
                     isinstance(frame, NativeFrame)
                     and frame.message_id == 0x123
                     and frame.decoded == {}
                 )
-                assert await stream.read() is None
-            assert stream.tx_result == (0, "ACK")
             assert stream.diagnostics[0].invalid_dropped == 1
             assert set(stream.diagnostics) == set(range(5))
 
@@ -193,6 +195,99 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
             with self.assertRaises(ConnectionClosedError):
                 await client.open()
             assert await bridge.revision() is None
+
+    async def test_raw_exit_drains_a_result_before_reusing_link(self) -> None:
+        sent = asyncio.Event()
+        body = bytes.fromhex("12300000")
+        raw_frame = serialize(Packet(1, bytes(6) + body))
+
+        async def app(
+            reader: asyncio.StreamReader,
+            writer: asyncio.StreamWriter,
+        ) -> None:
+            for request, reply in (
+                (
+                    b"\xca" * 301 + management(1, 1),
+                    management(1, 4, bytes([1, 0, 5, 3])),
+                ),
+                (management(2, 0, b"\x01"), management(2, 3, b"\x01")),
+                (management(9, 0, b"\0"), raw_frame + management(9, 3, b"\0")),
+            ):
+                assert await reader.readexactly(len(request)) == request
+                writer.write(reply)
+            send = serialize(Packet(1, b"\x01\x01" + body))
+            assert await reader.readexactly(len(send)) == send
+            sent.set()
+            normal = management(2, 0, b"\0")
+            assert await reader.readexactly(len(normal)) == normal
+            writer.write(serialize(Packet(1, b"\x02\x01\0")) + management(2, 3, b"\0"))
+            build = management(4, 1)
+            assert await reader.readexactly(len(build)) == build
+            writer.write(management(4, 4, b"unversioned"))
+
+        async with (
+            listen(app) as endpoint,
+            endpoint.connect() as wire,
+            asyncio.timeout(3),
+        ):
+            bridge = BridgeClient(wire)
+            await bridge.identify()
+            async with bridge.stream(diagnostics=False) as stream:
+                assert await stream.read() == NativeFrame(0, 0, body)
+                pending = asyncio.create_task(stream.send(1, body))
+                await sent.wait()
+                waiting = asyncio.create_task(stream.read())
+            assert await pending == TxResult(1, TxStatus.ACK)
+            with self.assertRaises(ConnectionClosedError):
+                await waiting
+            with self.assertRaises(ConnectionClosedError):
+                await stream.send(1, body)
+            assert await bridge.revision() is None
+
+    async def test_cli_send_completes_without_rx_capture(self) -> None:
+        body = bytes.fromhex("12300000")
+
+        async def app(
+            reader: asyncio.StreamReader,
+            writer: asyncio.StreamWriter,
+        ) -> None:
+            if (first := await reader.readexactly(1)) == b"?":
+                assert await reader.readexactly(5) == b"\r\nJ\r\n"
+                assert not await reader.read()
+                return
+            caps = management(1, 1)
+            assert first + await reader.readexactly(len(caps) - 1) == caps
+            writer.write(management(1, 4, bytes([1, 0, 5, 3])))
+            for request, reply in (
+                (management(2, 0, b"\x01"), management(2, 3, b"\x01")),
+                (management(9, 0, b"\0"), management(9, 3, b"\0")),
+                (
+                    serialize(Packet(1, b"\x01\x01" + body)),
+                    serialize(Packet(1, b"\x02\x01\0")),
+                ),
+                (management(2, 0, b"\0"), management(2, 3, b"\0")),
+            ):
+                assert await reader.readexactly(len(request)) == request
+                writer.write(reply)
+
+        async with listen(app) as endpoint, asyncio.timeout(3):
+            stdout = StringIO()
+            args = build_parser().parse_args(
+                [
+                    "send",
+                    "1",
+                    body.hex(),
+                    "--tcp",
+                    f"{endpoint.address}:{endpoint.port}",
+                    "--baudrate",
+                    "9600",
+                    "--json",
+                ],
+            )
+            assert await run(args, stdout=stdout) == 0
+            assert json.loads(stdout.getvalue()) == {
+                "tx_result": {"port": 1, "status": "ACK", "reason": None},
+            }
 
     async def test_vendor_opt_in_never_probes_rom(self) -> None:
         async def app(

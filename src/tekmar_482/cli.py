@@ -11,7 +11,7 @@ from dataclasses import asdict
 from typing import TYPE_CHECKING, Any, TextIO
 
 from ._wire import GatewayEndpoint
-from .bridge import BridgeClient, InvalidCapture
+from .bridge import BridgeClient
 from .client import Tekmar482Client
 from .constants import DEFAULT_BAUDRATE
 from .decoding import (
@@ -22,6 +22,7 @@ from .decoding import (
 from .exceptions import TekmarError
 from .firmware import install_firmware
 from .gateway import open_gateway
+from .raw import CaptureGap, InvalidCapture, PortError, TxStatus
 from .trpc import (
     ResponseMatch,
     TrpcCommand,
@@ -350,6 +351,26 @@ async def _native(args: argparse.Namespace, stdout: TextIO) -> int:
         elif args.command == "request":
             async with bridge.normal() as client:
                 await _request(client, args, stdout)
+        elif args.command == "send":
+            async with bridge.stream(diagnostics=False) as stream:
+                try:
+                    async with asyncio.timeout(10):
+                        result = await stream.send(args.port, bytes.fromhex(args.body))
+                except TimeoutError as err:
+                    msg = "no transmit result; transmission outcome unknown"
+                    raise CliError(msg) from err
+            emit(
+                {
+                    "tx_result": {
+                        "port": result.port,
+                        "status": result.status.name,
+                        "reason": result.reason,
+                    },
+                },
+            )
+            if result.status is not TxStatus.ACK:
+                msg = "transmission was not acknowledged"
+                raise CliError(msg)
         else:
             await _native_capture(bridge, args, emit)
     return 0
@@ -360,9 +381,7 @@ async def _native_capture(
     args: argparse.Namespace,
     emit: Callable[[object], None],
 ) -> None:
-    sending = args.command == "send"
-    tx = (args.port, bytes.fromhex(args.body)) if sending else None
-    duration = 10 if sending else args.duration
+    duration = args.duration
     limit = getattr(args, "limit", None)
     nodes: set[tuple[int, int, int]] = set()
     frames = 0
@@ -376,12 +395,18 @@ async def _native_capture(
                 "revision": await bridge.revision(),
             },
         )
-    async with bridge.stream(tx=tx, ack_port=getattr(args, "ack_port", None)) as stream:
+    async with bridge.stream(ack_port=getattr(args, "ack_port", None)) as stream:
         window = asyncio.timeout(duration)
         try:
             async with window:
                 while limit is None or frames < limit:
                     frame = await stream.read()
+                    if isinstance(frame, CaptureGap):
+                        emit({"host_records_dropped": frame.dropped})
+                        continue
+                    if isinstance(frame, PortError):
+                        emit({"port": frame.port, "port_error": frame.reason})
+                        continue
                     if isinstance(frame, InvalidCapture):
                         if args.command in {"diagnostics", "dump", "monitor"}:
                             emit(
@@ -394,26 +419,23 @@ async def _native_capture(
                                 },
                             )
                         continue
-                    if frame is not None:
-                        frames += 1
-                        nodes.add((frame.port, frame.subnet, frame.node))
-                        if args.command != "discover":
-                            emit(
-                                {
-                                    "port": frame.port,
-                                    "timestamp_ms": frame.timestamp_ms,
-                                    "id": frame.message_id,
-                                    "subnet": frame.subnet,
-                                    "node": frame.node,
-                                    "tha_address": frame.message.source.tha_address(
-                                        frame.port,
-                                    ),
-                                    "body": frame.body.hex(),
-                                    "fields": frame.decoded,
-                                },
-                            )
-                    if sending and stream.tx_result:
-                        break
+                    frames += 1
+                    nodes.add((frame.port, frame.subnet, frame.node))
+                    if args.command != "discover":
+                        emit(
+                            {
+                                "port": frame.port,
+                                "timestamp_ms": frame.timestamp_ms,
+                                "id": frame.message_id,
+                                "subnet": frame.subnet,
+                                "node": frame.node,
+                                "tha_address": frame.message.source.tha_address(
+                                    frame.port,
+                                ),
+                                "body": frame.body.hex(),
+                                "fields": frame.decoded,
+                            },
+                        )
         except TimeoutError:
             if not window.expired():
                 raise
@@ -422,11 +444,6 @@ async def _native_capture(
     if args.command in {"diagnostics", "dump"}:
         for summary in stream.diagnostics.values():
             emit(asdict(summary))
-    if sending:
-        emit({"tx_result": stream.tx_result})
-        if not stream.tx_result or stream.tx_result[1] != "ACK":
-            msg = "transmission was not acknowledged"
-            raise CliError(msg)
 
 
 def client_from_args(args: argparse.Namespace) -> Tekmar482Client:

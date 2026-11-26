@@ -97,21 +97,31 @@ For an addressed native read, use the physical port and wire address
 from a frame observed on that line. These are not tRPC decimal addresses:
 
 ```python
-from tekmar_482 import NativeAddress, NativeMessage
+from tekmar_482 import NativeAddress, NativeMessage, TxStatus
 
 source = NativeAddress(0, 0)  # Host-supplied gateway address.
 request = NativeMessage.request_block(
     0x10, source=source, target=frame.message.source,
 )
-await stream.submit(frame.port, request)
+result = await stream.send(frame.port, request)
+if result.status is not TxStatus.ACK:
+    print(result.status.name, result.reason)
 ```
 
-`submit` transmits once; it does not wait for a reply from the device.
-Continue reading the stream for both the gateway transmit result and a
-BlockReport from the target on the requested port, with the requested block
-ID (and secondary ID for an indexed request). Do not submit another send
-on that port until its terminal result arrives. Other ports and messages
-remain independent.
+`send()` transmits once and waits for that port's terminal link result:
+`ACK`, `REJECTED` before transmission, or `FAILED` during transmission.
+A link ACK does not confirm an application change. For a block read, look
+for the target's BlockReport on the requested port with the requested block
+ID (and secondary ID for an indexed request).
+
+Different ports can send concurrently, without a capture consumer. A second
+send on the same port raises `ProtocolError` until its previous result
+arrives, even if the caller cancelled or timed out. There is no implicit retry.
+`stream.read()` delivers native frames, invalid captures, and non-terminal
+port errors in receive order. A slow consumer gets a `CaptureGap` with the
+number of oldest records dropped by the host; set `capture_backlog` on
+`bridge.stream()` to change the default of 512 records. Gateway drop counts
+are separate and available in `stream.diagnostics` after a normal exit.
 
 For a matched, complete weekly event report:
 

@@ -1,13 +1,7 @@
 """Async Python client for the tekmar 482 gateway."""
 
 from ._wire import GatewayEndpoint
-from .bridge import (
-    BridgeClient,
-    BridgeStream,
-    InvalidCapture,
-    PanelState,
-    PortDiagnostic,
-)
+from .bridge import BridgeClient, PanelState
 from .client import Tekmar482Client
 from .constants import (
     DEFAULT_BAUDRATE,
@@ -101,6 +95,19 @@ from .packet import (
     TYPE_TN4,
     TYPE_TRPC,
     Packet,
+)
+from .raw import (
+    BridgeStream,
+    CaptureGap,
+    FailureReason,
+    InvalidCapture,
+    InvalidReason,
+    PortDiagnostic,
+    PortError,
+    PortErrorReason,
+    RejectReason,
+    TxResult,
+    TxStatus,
 )
 from .session import ReportSubscription, Tekmar482Session
 from .simulator import TraceReplayTransport, TraceStep, dump_trace, load_trace
@@ -212,6 +219,7 @@ __all__ = [
     "BridgeManagement",
     "BridgeMode",
     "BridgeStream",
+    "CaptureGap",
     "ConnectionClosedError",
     "DateTimeFields",
     "DecodedDeviceRuntime",
@@ -230,6 +238,7 @@ __all__ = [
     "DiscoveredDevice",
     "DiscoveryResult",
     "EnableFields",
+    "FailureReason",
     "FieldSpec",
     "FirmwareBundle",
     "GatewayEndpoint",
@@ -237,6 +246,7 @@ __all__ = [
     "GatewayRuntime",
     "GatewaySnapshot",
     "InvalidCapture",
+    "InvalidReason",
     "InventoryDrainTimeoutError",
     "MessageApplyResult",
     "MethodSpec",
@@ -249,8 +259,11 @@ __all__ = [
     "PacketTransport",
     "PanelState",
     "PortDiagnostic",
+    "PortError",
+    "PortErrorReason",
     "ProtocolError",
     "RawTcpTpckTransport",
+    "RejectReason",
     "ReportSubscription",
     "ReportingStateFields",
     "ResponseMatch",
@@ -287,6 +300,8 @@ __all__ = [
     "TrpcPayload",
     "TrpcService",
     "TrpcServiceId",
+    "TxResult",
+    "TxStatus",
     "UnknownFieldError",
     "UnknownMethodError",
     "UnknownServiceError",
