@@ -208,6 +208,7 @@ class BridgeClient:
                 readback_methods=frozenset(
                     {
                         TrpcMethod.MODE_SETTING,
+                        TrpcMethod.SETPOINT_DEVICE,
                         TrpcMethod.HEAT_SETPOINT,
                         TrpcMethod.COOL_SETPOINT,
                         TrpcMethod.SLAB_SETPOINT,

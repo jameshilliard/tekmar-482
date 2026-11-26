@@ -319,6 +319,7 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
             writer.write(management(2, 3, bytes(1)))
             for method, request, actual in [
                 (0x127, bytes.fromhex("010002"), bytes.fromhex("010001")),
+                (0x13E, bytes.fromhex("0100074906"), bytes.fromhex("0100034606")),
                 (0x13F, bytes.fromhex("01000762"), bytes.fromhex("01000360")),
                 (0x147, bytes.fromhex("01000662"), bytes.fromhex("010006ff")),
                 (0x14F, bytes.fromhex("01000762"), bytes.fromhex("01000260")),
@@ -341,6 +342,9 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         ):
             mode = await client.set_mode(1, 2, timeout=1)
             assert mode is not None and mode.require("mode") == 1
+            target = await client.set_latest_setpoint_device(1, 0x649, timeout=1)
+            assert target is not None and target.require("setback") == 3
+            assert target.require("temp") == 0x646
             heat = await client.set_heat_setpoint(1, 98, timeout=1)
             assert (
                 heat is not None

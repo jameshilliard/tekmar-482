@@ -87,6 +87,11 @@ prove the write failed; read before retrying. For a quiet device use
 `timeout=12` to allow the gateway's ten-second transaction to finish.
 Stock firmware uses its original write-echo matching.
 
+For an addressed setpoint controller, use `set_setpoint_device_celsius()`
+or `set_latest_setpoint_device()` (raw degH). Custom Normal mode returns
+the verified 16-bit target in `temp` and the resolved `setback`. These
+are not thermostat HeatSetpoint bytes or snowmelt group enable commands.
+
 `await client.get_outdoor_temperature_celsius()` returns the selected
 network temperature, or `None` if there is no source. An unanswered read
 raises `TimeoutError`. To provide a fallback source, call

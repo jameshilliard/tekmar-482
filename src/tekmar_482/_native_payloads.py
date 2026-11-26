@@ -227,6 +227,16 @@ SCHEDULE_SETUP = (
 )
 SINGLE_WEEK = range(0x10, 0x14)
 MULTI_WEEK = range(0x38, 0x3c)
+CONTROL_APPS = ("setpoint", "hot_tub", "dhw", "floor", "pool")
+CONTROL_SETUP = ("application_mode", "mode_configuration", "run_mode_configuration",
+                 "relay_two_sampling", "relay_two_start_time", "relay_two_duration",
+                 "setpoint_enable_address", "outdoor_temp_enable")
+
+
+def control_words(block: int) -> tuple[str, ...]:
+    if 0x28 <= block <= 0x31:
+        return ("wake", "sleep") if block & 1 else ("wake_occupied", "unoccupied_sleep", "away", "maximum")
+    return ()
 
 
 def event_time(day: str, value: int) -> Fields:
@@ -239,6 +249,8 @@ def event_time(day: str, value: int) -> Fields:
 
 
 def block_fields(block: int, index: int, value: int) -> Fields:
+    if block == 0x26:
+        return {CONTROL_SETUP[index]: value}
     if block == 13 and index < 5:
         return {("onboard_sensor", "sensor1", "sensor2", "sensor3", "sensor4")[index]: value}
     if block == 0xa3 and index < 2:
@@ -266,6 +278,8 @@ def block_fields(block: int, index: int, value: int) -> Fields:
 
 
 def block_metadata(block: int) -> Fields:
+    if 0x28 <= block <= 0x31:
+        return {"control_application": CONTROL_APPS[(block - 0x28) // 2]}
     if block in SINGLE_WEEK or block in MULTI_WEEK:
         return {"event": EVENTS[block & 3]}
     return {}
@@ -296,6 +310,10 @@ def block_report(r: Reader) -> Fields:
             slots = range(start, start + size)
             if all(i in values for i in slots):
                 fields[name] = int.from_bytes(bytes(values[i] for i in slots), "little")
+    for i, name in enumerate(control_words(block)):
+        lo, hi = 2 * i, 2 * i + 1
+        if lo in values and hi in values:
+            fields.update(temp(name, values[lo] | values[hi] << 8))
     return fields | block_metadata(block)
 
 
@@ -305,7 +323,14 @@ def block_update(r: Reader) -> Fields:
     fields: Fields = {"target_subnet": dest, "target_node": node & 31,
                       "target_node_flags": node >> 5, "block_id": block}
     # Updates have no support mask. Decode only layouts with known ordering.
-    sizes = {3: 3, 5: 5, 6: 5, 7: 6, 9: 5, 13: 5, 15: 6, 0xa3: 2, 0xa4: 5, 0xa5: 5}
+    words = control_words(block)
+    if words:
+        if block == 0x2e and len(r.remaining) == 6:
+            words = words[:3]  # Some floor controls omit the maximum.
+        for name in words:
+            fields.update(temp(name, r.word()))
+        return fields | block_metadata(block)
+    sizes = {3: 3, 5: 5, 6: 5, 7: 6, 9: 5, 13: 5, 15: 6, 0x26: 8, 0xa3: 2, 0xa4: 5, 0xa5: 5}
     size = 7 if block in SINGLE_WEEK else 8 if block in MULTI_WEEK else sizes.get(block)
     if size is not None:
         for index in range(size):
