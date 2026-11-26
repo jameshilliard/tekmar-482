@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING, Self
 
 from ._native_payloads import (
     BLOCK_SELECTORS,
+    DECODERS,
     H_UNAVAILABLE,
     SNOW_SLAB_TARGETS,
     SnowmeltBlock,
@@ -276,6 +277,12 @@ class NativeMessage:
         destination = bytes((target.subnet, target.block_node))
         block = _uint(block_id, 16).to_bytes(2, "little")
         return cls(_UPDATE, source, destination + block + data)
+
+    @property
+    def name(self) -> str | None:
+        """Return the decoder's native message name, or None for an unknown ID."""
+        decoder = DECODERS.get(self.message_id)
+        return decoder[0] if decoder is not None else None
 
     @property
     def decoded(self) -> dict[str, str | int | float]:

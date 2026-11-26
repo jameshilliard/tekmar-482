@@ -178,6 +178,14 @@ Tracing never enables reporting, changes mode, or grants raw transmit access.
 Use `trace-normal --status` to inspect the gateway's mask and lifetime
 drop counts, or `trace-normal --stop` to clear a trace after a disconnect.
 
+For instrumentation, wrap custom connection creation in
+`tekmar_482.wire_trace.observe_bridge_packets(callback)`. The synchronous
+callback receives `(packet, outbound)` for each received application packet
+and submitted transmission, including operations from other tasks on that
+connection. This observer does not enable tracing or capture ROM ISP bytes.
+`tekmar_482.raw.decode_raw_packet(packet)` decodes a gateway-to-host Raw
+record without taking ownership of the stream.
+
 Raw and Normal trace carry the same native tN4 body inside TPCK. Their
 envelopes differ: Raw type `0x01` carries bridge operations; trace type
 `0xD0` identifies Normal RX or a gateway TX attempt with its origin and

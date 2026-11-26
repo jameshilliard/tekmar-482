@@ -193,6 +193,7 @@ class NativeTests(unittest.TestCase):
         body = bytes.fromhex("ffffffff") + payload
         message = NativeMessage.from_bytes(body)
         assert message.to_bytes() == body
+        assert message.name == "MasterPresent"
         assert message.priority == 3
         assert message.source == NativeAddress(255, 63)
         for invalid in (b"", body[:3], body[:-1], body + b"\0"):
@@ -200,6 +201,7 @@ class NativeTests(unittest.TestCase):
                 NativeMessage.from_bytes(invalid)
         unknown = NativeMessage(0x123, NativeAddress(0, 0), b"\xca\x2f\x35")
         assert unknown.decoded == {}
+        assert unknown.name is None
         assert NativeMessage.from_bytes(unknown.to_bytes()) == unknown
         with self.assertRaises(ValueError):
             NativeMessage(0x400, unknown.source, b"")

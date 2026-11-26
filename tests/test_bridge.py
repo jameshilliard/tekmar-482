@@ -29,6 +29,7 @@ from tekmar_482 import (
 )
 from tekmar_482.cli import build_parser, run
 from tekmar_482.tpck import serialize
+from tekmar_482.wire_trace import observe_bridge_packets
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Awaitable, Callable
@@ -77,6 +78,27 @@ RAW_CAPABILITIES = management(1, 4, bytes([2, 0, 5, 3]))
 
 
 class BridgeTests(unittest.IsolatedAsyncioTestCase):
+    async def test_wire_observer_belongs_to_the_connection(self) -> None:
+        async def app(
+            reader: asyncio.StreamReader,
+            writer: asyncio.StreamWriter,
+        ) -> None:
+            request = management(4, 1)
+            while await reader.read(len(request)):
+                writer.write(management(4, 4, b"unversioned"))
+
+        packets: list[tuple[Packet, bool]] = []
+        async with listen(app) as endpoint, endpoint.connect() as wire:
+            with observe_bridge_packets(lambda p, tx: packets.append((p, tx))):
+                bridge = BridgeClient(wire)
+            await asyncio.create_task(bridge.revision())
+            await BridgeClient(wire).revision()
+        key = bytes.fromhex("04f04b54")
+        assert packets == [
+            (Packet(6, b"\x01" + key), True),
+            (Packet(6, b"\x04" + key + b"unversioned"), False),
+        ]
+
     def setUp(self) -> None:
         # Exercise two flash pages and real image validation without a binary fixture.
         resources = Path(self.enterContext(TemporaryDirectory()))

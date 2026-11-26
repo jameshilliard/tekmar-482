@@ -208,7 +208,8 @@ def _valid_body(body: bytes) -> bool:
     return len(body) >= _HEADER and body[3] & 63 == len(body) - _HEADER
 
 
-def _decode(packet: Packet, capture_index: int) -> _Record | TxResult:
+def decode_raw_packet(packet: Packet, capture_index: int = 0) -> _Record | TxResult:
+    """Decode a gateway-to-host Raw packet without consuming a live stream."""
     data = packet.data
     if packet.type == TYPE_TN4 and len(data) >= _RAW_HEADER:
         kind, port = data[:2]
@@ -682,7 +683,7 @@ class RawDispatcher:
         return result
 
     def feed(self, packet: Packet) -> None:
-        record = _decode(packet, self._capture_index + 1)
+        record = decode_raw_packet(packet, self._capture_index + 1)
         if isinstance(record, TxResult):
             future = self._pending.pop(record.port, None)
             if future is None:

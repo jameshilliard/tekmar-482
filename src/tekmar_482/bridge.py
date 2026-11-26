@@ -25,6 +25,7 @@ from .packet import TYPE_TN4, TYPE_TRPC, Packet
 from .raw import PortDiagnostic, RawDispatcher
 from .tpck import TpckParser, serialize
 from .trpc import TrpcMethod, TrpcService
+from .wire_trace import current_observer
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Awaitable, Callable, Iterable
@@ -56,6 +57,7 @@ class BridgeClient:
         self._packets: deque[Packet] = deque()
         self._busy = asyncio.Lock()
         self._features = BridgeFeature(0)
+        self._observer = current_observer()
 
     @asynccontextmanager
     async def _transaction(self) -> AsyncIterator[None]:
@@ -76,10 +78,20 @@ class BridgeClient:
                 msg = "gateway disconnected"
                 raise ConnectionClosedError(msg)
             self._packets.extend(self._parser.feed_many(chunk))
-        return self._packets.popleft()
+        packet = self._packets.popleft()
+        self._observe(packet, outbound=False)
+        return packet
+
+    def _observe(self, packet: Packet, *, outbound: bool) -> None:
+        if self._observer is not None:
+            self._observer(packet, outbound)
+
+    async def _write_packet(self, packet: Packet) -> None:
+        self._observe(packet, outbound=True)
+        await self._wire.write(serialize(packet))
 
     async def _write_raw(self, body: bytes) -> None:
-        await self._wire.write(serialize(Packet(TYPE_TN4, body)))
+        await self._write_packet(Packet(TYPE_TN4, body))
 
     async def _call(
         self,
@@ -94,9 +106,9 @@ class BridgeClient:
             TrpcService.RESPONSE_UPDATE if update else TrpcService.RESPONSE_REQUEST
         )
         key = method.to_bytes(4, "little")
-        request = serialize(Packet(TYPE_TRPC, bytes([service]) + key + body))
+        request = Packet(TYPE_TRPC, bytes([service]) + key + body)
         async with asyncio.timeout(5):
-            await self._wire.write(request)
+            await self._write_packet(request)
             while True:
                 packet = await self._next_packet()
                 if packet.type != TYPE_TRPC:
@@ -120,7 +132,7 @@ class BridgeClient:
                     }:
                         # Busy explicitly rejects the transition before it takes effect.
                         await asyncio.sleep(0.025)
-                        await self._wire.write(request)
+                        await self._write_packet(request)
                         continue
                     msg = f"bridge management rejection: {payload[4:].hex()}"
                     raise ProtocolError(msg)
@@ -209,7 +221,11 @@ class BridgeClient:
         async with self._transaction():
             if select_mode:
                 await self._set_byte(BridgeMethod.MODE, BridgeMode.NORMAL)
-            transport = _SessionTransport(self._next_packet, self._wire)
+            transport = _SessionTransport(
+                self._next_packet,
+                self._write_packet,
+                self._wire,
+            )
             async with Tekmar482Client(
                 transport,
                 readback_methods=frozenset(
@@ -255,7 +271,9 @@ class BridgeClient:
                 raise
             return packet
 
-        client = Tekmar482Client(_SessionTransport(receive_control, self._wire))
+        client = Tekmar482Client(
+            _SessionTransport(receive_control, self._write_packet, self._wire),
+        )
         stream = RawDispatcher(
             self._write_raw,
             capture_backlog,
@@ -306,8 +324,14 @@ class BridgeClient:
 class _SessionTransport:
     """The session borrows the existing decoder and never reopens the physical link."""
 
-    def __init__(self, receive: Callable[[], Awaitable[Packet]], wire: Wire) -> None:
+    def __init__(
+        self,
+        receive: Callable[[], Awaitable[Packet]],
+        send: Callable[[Packet], Awaitable[None]],
+        wire: Wire,
+    ) -> None:
         self._receive = receive
+        self._send = send
         self._wire = wire
         self._closed = False
 
@@ -333,4 +357,4 @@ class _SessionTransport:
 
     async def write_packet(self, packet: Packet) -> None:
         await self.open()
-        await self._wire.write(serialize(packet))
+        await self._send(packet)
