@@ -131,7 +131,7 @@ class ThermostatSensorMonitor:
     ) -> ThermostatSensorMonitor:
         monitor = cls()
         for batch in batches:
-            if batch.tx_result is not None and batch.tx_result.may_have_reached_peer:
+            if batch.tx_result is not None and batch.tx_result.completed_frame:
                 for frame in batch.reports:
                     monitor.observe(frame)
         return monitor
@@ -150,7 +150,7 @@ class SensorRead:
             batch.query.block_id
             for batch in self.batches
             if batch.tx_result is not None
-            and batch.tx_result.may_have_reached_peer
+            and batch.tx_result.completed_frame
             and batch.reports
         }
         return tuple(b for b in self.candidates if b not in answered)
@@ -189,7 +189,7 @@ async def read_thermostat_sensors(
         batches.append(batch)
         if batch.tx_result is None:
             break
-        if batch.tx_result.may_have_reached_peer:
+        if batch.tx_result.completed_frame:
             for frame in batch.reports:
                 monitor.observe(frame)
     return SensorRead(monitor.devices[0], candidates, tuple(batches))

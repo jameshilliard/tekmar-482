@@ -128,8 +128,10 @@ Custom Normal mode implements all 26 input method IDs in stock J1196J
 and acknowledges valid incoming tN4 frames, including on a single-peer
 line. It sends a startup probe on quiet ports and queries for a master
 on link-up. It does not continuously scan. Raw sessions initiate neither
-probe, and Raw receive ACK remains opt-in. Retries and setting reads
-still differ from stock; see the
+probe, and Raw receive ACK remains opt-in. Normal mode yields to a winning
+sender and can reattempt a pending operation; neither mode replays a write
+just because its ACK was missing. For differences in setting reads and
+electrical fault handling see the
 [bus compatibility notes](https://github.com/jameshilliard/tekmar-482-firmware/blob/master/docs/normal-mode.md#bus-compatibility).
 
 The CLI `request` command uses Normal mode on custom firmware by default.
@@ -275,6 +277,11 @@ change the CLI's 20-second deadline.
 A link ACK does not confirm an application change. A block read can still
 succeed on a real report if the link ACK was missed; other send failures
 raise `NativeTransmitError` with the underlying `TxResult`.
+For block edits and snowmelt group changes, a bad frame ending, echo
+mismatch, missed timing or unknown transmit failure does not prove the
+device ignored the write. The client reads the device again, keeping the
+original link result; it never repeats the write. A pre-send rejection or
+loss of arbitration instead ends the edit without readback.
 
 Different ports can send concurrently, without a capture consumer. A second
 send on the same port raises `ProtocolError` until its previous result

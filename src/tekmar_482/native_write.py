@@ -71,7 +71,7 @@ class NativeBlockEditor:
             if batch.tx_result is None:
                 msg = "no terminal result for thermostat setup read"
                 raise TimeoutError(msg)
-            if batch.reports and batch.tx_result.may_have_reached_peer:
+            if batch.reports and batch.tx_result.completed_frame:
                 blocks[b] = batch.reports[0].decoded
         query = NativeBlockQuery(target, HEATING_SETUP)
         before = (await self.read(query)).require_report()
@@ -158,7 +158,7 @@ async def _write_verified_block(
     # ACK seen during the send does not verify the destination's current value.
     batch = await read()
     matches = None
-    if batch.reports and batch.tx_result and batch.tx_result.may_have_reached_peer:
+    if batch.reports and batch.tx_result and batch.tx_result.completed_frame:
         payload = batch.reports[0].message.payload
         matches = patch.matches(payload[2], payload[3:])
     match matches:

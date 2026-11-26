@@ -174,13 +174,41 @@ class NativeWriteTests(unittest.IsolatedAsyncioTestCase):
                 assert result.readback.require_report().message.payload[3:] == _BODY
             assert self.tx.empty()
 
+    async def test_uncertain_write_only_verifies_and_keeps_original_outcome(
+        self,
+    ) -> None:
+        for reason in (
+            FailureReason.ECHO_MISMATCH,
+            FailureReason.BAD_END,
+            FailureReason.MISSED_TIMING,
+            0xFF,
+        ):
+            with self.subTest(reason=reason):
+                task = self.start()
+                await self.baseline()
+                await self.expect_update()
+                self.result(TxStatus.FAILED, reason)
+                await self.expect_read()
+                self.report(_BODY)
+                self.result(TxStatus.ACK)
+                result = await task
+                assert result.tx_result == TxResult(1, TxStatus.FAILED, reason)
+                assert result.status is NativeWriteStatus.DIFFERENT and self.tx.empty()
+
     async def test_update_rejection_and_unknown_outcome_are_not_retried(self) -> None:
-        task = self.start()
-        await self.baseline()
-        await self.expect_update()
-        self.result(TxStatus.REJECTED, RejectReason.LOCAL_ACK_ACTIVE)
-        result = await task
-        assert result.status is NativeWriteStatus.LINK_FAILED and not result.readback
+        for status, reason in (
+            (TxStatus.REJECTED, RejectReason.LOCAL_ACK_ACTIVE),
+            (TxStatus.FAILED, FailureReason.ARBITRATION_LOST),
+        ):
+            task = self.start()
+            await self.baseline()
+            await self.expect_update()
+            self.result(status, reason)
+            result = await task
+            assert (
+                result.status is NativeWriteStatus.LINK_FAILED and not result.readback
+            )
+            assert self.tx.empty()
         for cancel in (False, True):
             task = self.start(timeout=0.05)
             await self.baseline()

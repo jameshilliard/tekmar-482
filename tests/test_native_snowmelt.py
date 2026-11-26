@@ -5,6 +5,7 @@ import unittest
 
 from tekmar_482 import (
     CaptureGap,
+    FailureReason,
     NativeAddress,
     NativeBlockBatch,
     NativeBlockQuery,
@@ -338,7 +339,11 @@ class SnowmeltWatchTests(unittest.IsolatedAsyncioTestCase):
     async def test_group_state_readback_uses_zone_not_ack_echo_or_other_sensor(
         self,
     ) -> None:
-        for raw, expected in ((0x400, True), (0x200, False), (0xA534, None)):
+        for raw, expected, outcome in (
+            (0x400, True, bytes([TxStatus.ACK])),
+            (0x200, False, bytes([TxStatus.FAILED, FailureReason.MISSED_TIMING])),
+            (0xA534, None, bytes([TxStatus.FAILED, FailureReason.BAD_END])),
+        ):
             task = self.command(Operation.MELT, expected=4)
             await self.assignments()
             port, command = await self.next_send()
@@ -346,7 +351,7 @@ class SnowmeltWatchTests(unittest.IsolatedAsyncioTestCase):
                 "21f00002 0401",
             )
             self.rx(snow(ZONE, [(0x1B, 0x400)]))
-            self.ack()
+            self.stream.feed(Packet(1, bytes([2, port]) + outcome))
             _, query = await self.next_send()
             assert query.to_bytes() == bytes.fromhex("17f00003 11011b")
             self.rx(snow(SENSOR, [(0x1B, 0x400)]))
@@ -356,6 +361,7 @@ class SnowmeltWatchTests(unittest.IsolatedAsyncioTestCase):
             self.rx(snow(ZONE, [(0x1B, raw)]))
             result = await task
             assert result.status is GroupStatus.STATE_REPORTED
+            assert result.tx_result and result.tx_result.status == outcome[0]
             assert (
                 result.matches_requested_state is expected
                 and result.readback is not None

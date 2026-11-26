@@ -267,7 +267,7 @@ def _status_queries(
             # No terminal link result: the gateway still owns its send slot.
             busy.add(batch.port)
             continue
-        if not batch.tx_result.may_have_reached_peer or not batch.reports:
+        if not batch.tx_result.completed_frame or not batch.reports:
             continue
         active.add(batch.port)
         if batch.query.block_id in {

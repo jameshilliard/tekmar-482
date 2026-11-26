@@ -95,9 +95,18 @@ class TxResult:
     reason: RejectReason | FailureReason | int | None = None
 
     @property
-    def may_have_reached_peer(self) -> bool:
+    def completed_frame(self) -> bool:
+        """The gateway reached the end of its own frame, with or without an ACK."""
         return self.status == TxStatus.ACK or (
             self.status == TxStatus.FAILED and self.reason == FailureReason.NO_ACK
+        )
+
+    @property
+    def may_have_reached_peer(self) -> bool:
+        """A write needs fresh readback unless non-delivery is known."""
+        return self.status == TxStatus.ACK or (
+            self.status == TxStatus.FAILED
+            and self.reason != FailureReason.ARBITRATION_LOST
         )
 
 
@@ -127,7 +136,7 @@ class NativeBlockBatch:
         if self.query.target.request_mask().bit_count() != 1:
             msg = "expected a single-node block request"
             raise ValueError(msg)
-        if self.tx_result is not None and not self.tx_result.may_have_reached_peer:
+        if self.tx_result is not None and not self.tx_result.completed_frame:
             raise NativeTransmitError(self.tx_result)
         if self.tx_result is None or not self.reports:
             msg = (
@@ -635,7 +644,7 @@ class RawDispatcher:
         try:
             async with deadline:
                 result = await self._send(port, request)
-                if result.may_have_reached_peer:
+                if result.completed_frame:
                     await waiter.done
         except TimeoutError:
             if not deadline.expired():

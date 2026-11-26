@@ -356,7 +356,7 @@ class ScheduleDirectory:
             block = batch.query.block_id
             if (
                 not batch.tx_result
-                or not batch.tx_result.may_have_reached_peer
+                or not batch.tx_result.completed_frame
                 or (
                     block not in (0, SETUP_BLOCK)
                     and block not in SINGLE_WEEK
@@ -448,11 +448,7 @@ async def read_weekly_schedule(
         batch = setup if setup.query == query else await read(query)
         report = (
             batch.reports[0]
-            if (
-                batch.reports
-                and batch.tx_result
-                and batch.tx_result.may_have_reached_peer
-            )
+            if (batch.reports and batch.tx_result and batch.tx_result.completed_frame)
             else None
         )
         rows.append(_row(config, event, query, report, batch))

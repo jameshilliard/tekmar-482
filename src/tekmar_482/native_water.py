@@ -134,11 +134,7 @@ async def _probe_water_port(
     if identity is None:
         return master, ()
     batches = [identity]
-    if (
-        identity.reports
-        and identity.tx_result
-        and identity.tx_result.may_have_reached_peer
-    ):
+    if identity.reports and identity.tx_result and identity.tx_result.completed_frame:
         info = NativeIdentity.from_report(identity.reports[0].decoded)
         product = info.product if info else None
         if plant_settings and info is not None and has_plant_registers(product):

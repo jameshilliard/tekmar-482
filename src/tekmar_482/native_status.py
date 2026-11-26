@@ -34,7 +34,7 @@ class NativeStatusBatch:
     def answered(self) -> bool:
         return (
             self.tx_result is not None
-            and self.tx_result.may_have_reached_peer
+            and self.tx_result.completed_frame
             and self.complete
         )
 

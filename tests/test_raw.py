@@ -141,15 +141,23 @@ class RawTests(unittest.IsolatedAsyncioTestCase):
             for status, reason in (
                 (TxStatus.REJECTED, RejectReason.INVALID_BODY),
                 (TxStatus.FAILED, FailureReason.ARBITRATION_LOST),
+                (TxStatus.FAILED, FailureReason.BAD_END),
+                (TxStatus.FAILED, FailureReason.ECHO_MISMATCH),
+                (TxStatus.FAILED, FailureReason.MISSED_TIMING),
+                (TxStatus.FAILED, 0xFF),
             ):
                 task = asyncio.create_task(
                     self.stream.read_block(0, query, source=host),
                 )
                 await self.tx.get()
+                peer = NativeAddress(0, 4)
+                report = NativeMessage(0x2E7, peer, bytes([query.block_id, 0, 1, 5]))
+                self.deliver(0, 0, 0, 0, 0, 0, *report.to_bytes())
                 self.deliver(2, 0, status, reason)
                 with self.assertRaises(NativeTransmitError) as ctx:
                     await task
                 assert ctx.exception.result == TxResult(0, status, reason)
+                assert isinstance(await self.stream.read(), NativeFrame)
             hanging = asyncio.create_task(self.stream.read_block(0, query, source=host))
             await self.tx.get()
             self.deliver(2, 0, 0)
