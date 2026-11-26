@@ -15,6 +15,7 @@ from ._native_payloads import (
     decode_payload,
 )
 from ._native_payloads.queries import NativeStatusQuery, StatusRequest
+from ._native_payloads.scenes import SCENE_REPORT, NativeScene, SceneReport
 from .constants import SETPOINT_GROUP_IDS, TN4_PORTS
 from .units import celsius_to_degh, degh_to_celsius
 
@@ -28,6 +29,7 @@ _REQUEST = 0x2D7
 _UPDATE = 0x2DF
 _REPORT = 0x2E7
 _BLOCK_HEADER = 3
+_SCENE_HEADER = 3
 _WORD_MASK = 0b11
 _SINGLE = 0x10
 _MULTI = 0x38
@@ -133,6 +135,11 @@ class NativeMessage:
     def request_status(cls, query: NativeStatusQuery, *, source: NativeAddress) -> Self:
         """Build a read-only status request at the 483 gateway's native priority."""
         return cls(query.kind, source, query.payload, priority=0)
+
+    @classmethod
+    def scene_report(cls, scene: NativeScene, *, source: NativeAddress) -> Self:
+        """Announce a scene to one line at the 483's priority and duration."""
+        return cls(SCENE_REPORT, source, scene.payload(), priority=0)
 
     @classmethod
     def request_clock(cls, *, source: NativeAddress) -> Self:
@@ -255,6 +262,16 @@ class NativeFrame:
     @property
     def decoded(self) -> dict[str, str | int | float]:
         return self.message.decoded
+
+    @property
+    def scene_report(self) -> SceneReport | None:
+        """An observed announcement, possibly our own echo, not device state."""
+        if (
+            self.message_id == SCENE_REPORT
+            and len(self.message.payload) >= _SCENE_HEADER
+        ):
+            return SceneReport.from_payload(self.message.payload)
+        return None
 
 
 @dataclass(frozen=True, slots=True)

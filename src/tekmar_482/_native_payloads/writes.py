@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from enum import Enum, IntEnum, auto
 
 from .layouts import H_UNAVAILABLE, MULTI_WEEK
+from .scenes import SCENE_RESPONSE_FIELDS, SceneResponse
 
 
 class WritableBlock(IntEnum):
@@ -214,6 +215,10 @@ class BlockPatch:
                 raise ValueError(f"{field.label} does not fit its wire field")
             if field in _DAYS and value > 144:
                 raise ValueError("a schedule day must be a ten-minute slot 0..143 or disabled (144)")
+            if field.label in SCENE_RESPONSE_FIELDS and value not in range(len(SceneResponse)):
+                raise ValueError("unknown scene response setting")
+            if field is F.SCENES_ENABLED and value not in (0, 1):
+                raise ValueError("scenes_enabled must be zero or one")
             if block == 0x5a and value:
                 raise ValueError("only a reset to zero is documented for tank runtime")
             if block in (0x05, 0x06, 0x07) and value == 0xff:

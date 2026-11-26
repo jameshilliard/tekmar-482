@@ -150,6 +150,10 @@ class NativeTransmitError(TekmarError):
         )
 
 
+class NativePortBusyError(ProtocolError):
+    """A local operation already owns this port. No new request was sent."""
+
+
 @dataclass(frozen=True, slots=True)
 class PortError:
     port: int
@@ -307,12 +311,12 @@ class RawDispatcher:
     def _check_no_read(self, port: int) -> None:
         if port in self._waiters:
             msg = f"native read already in progress on port {port}"
-            raise ProtocolError(msg)
+            raise NativePortBusyError(msg)
 
     def _check_no_edit(self, port: int) -> None:
         if port in self._edits and self._edits[port].locked():
             msg = f"block write in progress on port {port}"
-            raise ProtocolError(msg)
+            raise NativePortBusyError(msg)
 
     async def _send(self, port: int, body: bytes | NativeMessage) -> TxResult:
         self._check_active()
@@ -323,7 +327,7 @@ class RawDispatcher:
             raise ValueError(msg)
         if port in self._pending:
             msg = f"send already in progress on port {port}"
-            raise ProtocolError(msg)
+            raise NativePortBusyError(msg)
         future: asyncio.Future[TxResult] = asyncio.get_running_loop().create_future()
         self._pending[port] = future
         try:
@@ -399,7 +403,7 @@ class RawDispatcher:
             self._check_active()
             if port in self._pending or port in self._waiters:
                 msg = f"native operation already in progress on port {port}"
-                raise ProtocolError(msg)
+                raise NativePortBusyError(msg)
             return await write_verified_block(
                 patch,
                 source=source,

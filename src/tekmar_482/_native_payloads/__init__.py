@@ -13,6 +13,7 @@ from .layouts import (
     SnowmeltBlock as SnowmeltBlock,
 )
 from .products import identify_product
+from .scenes import SCENE_REPORT, SCENE_RESPONSE_FIELDS, SceneReport, SceneResponse
 
 Fields = dict[str, str | int | float]
 SETBACK = ("wake", "unoccupied_4", "occupied_4", "sleep", "occupied_2", "unoccupied_2", "away", "unknown")
@@ -271,6 +272,8 @@ def fixed_value(block: int, name: str, value: int) -> Fields:
     elif name in ("pump_flags", "stage1_pump_flags", "stage2_pump_flags"):
         pump = name.removesuffix("_flags")
         fields.update(bits(value, (pump + "_delay", 0, 127), (pump + "_required", 7, 1)))
+    elif block == 0x0e and name in SCENE_RESPONSE_FIELDS and value in range(len(SceneResponse)):
+        fields[name + "_name"] = SceneResponse(value).name.lower()
     elif block in (0x33, 0x34) and name.endswith("_subnet"):
         prefix = name.removesuffix("_subnet")
         fields.update(bits(value, (prefix + "_water_bus", 0, 7), (prefix + "_water_control", 3, 31)))
@@ -295,6 +298,15 @@ def fixed_fields(block: int, layout: FixedLayout, values: dict[int, int]) -> Fie
         fields.update(fixed_value(block, name, value))
     # Preserve partial words and future supported slots without assigning units.
     fields.update({f"byte{i + 1}_raw": value for i, value in remaining.items()})
+    return fields
+
+
+def scene_report(r: Reader) -> Fields:
+    report = SceneReport.from_payload(r.take(3))
+    fields: Fields = {"scene": report.wire_id, "duration": report.duration_minutes,
+                      "duration_minutes": report.duration_minutes}
+    if report.scene is not None:
+        fields.update(scene_number=report.scene.value, scene_name=report.scene.name.lower())
     return fields
 
 
@@ -574,7 +586,7 @@ DECODERS: dict[int, tuple[str, Callable[[Reader], Fields]]] = {
     0x287: ("CalibrationMode", octets("mode")),
     0x2ef: ("NetworkLock", lambda r: bits(r.byte(), ("access_lock", 0, 1), ("address_lock", 1, 1))),
     0x2f7: ("ScheduleStatus", schedule),
-    0x2ff: ("SceneReport", lambda r: {"scene": r.byte(), "duration": r.word()}),
+    SCENE_REPORT: ("SceneReport", scene_report),
     0x307: ("WWSDRequest", octets()),
     0x30f: ("WWSDStatus", lambda r: bits(r.byte(), *((name, i, 1) for i, name in enumerate(SETPOINT_FIELDS)))),
     0x317: ("RealTimeClockRequest", octets()),

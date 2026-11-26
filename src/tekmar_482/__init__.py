@@ -8,6 +8,7 @@ from ._native_payloads.queries import (
     SnowmeltRole,
     StatusRequest,
 )
+from ._native_payloads.scenes import NativeScene, SceneReport, SceneResponse
 from ._native_payloads.writes import NativeField, WritableBlock
 from ._wire import GatewayEndpoint
 from .bridge import BridgeClient, PanelState
@@ -106,6 +107,13 @@ from .native_discovery import (
     NativeProbe,
     discover_native,
 )
+from .native_scene import (
+    ScenePortResult,
+    SceneSelection,
+    SceneSendIssue,
+    SceneSetup,
+    write_scene_response,
+)
 from .native_snapshot import NativeSnapshot, read_native_devices, read_native_snapshot
 from .native_status import NativeStatusBatch, read_snowmelt_status
 from .native_write import NativeWriteResult, NativeWriteStatus
@@ -127,6 +135,7 @@ from .raw import (
     InvalidCapture,
     InvalidReason,
     NativeBlockBatch,
+    NativePortBusyError,
     NativeTransmitError,
     PortDiagnostic,
     PortError,
@@ -288,8 +297,10 @@ __all__ = [
     "NativeIdentity",
     "NativeInventory",
     "NativeMessage",
+    "NativePortBusyError",
     "NativeProbe",
     "NativeProduct",
+    "NativeScene",
     "NativeSnapshot",
     "NativeStatusBatch",
     "NativeStatusQuery",
@@ -310,6 +321,12 @@ __all__ = [
     "ReportSubscription",
     "ReportingStateFields",
     "ResponseMatch",
+    "ScenePortResult",
+    "SceneReport",
+    "SceneResponse",
+    "SceneSelection",
+    "SceneSendIssue",
+    "SceneSetup",
     "ScheduleEvent",
     "SerialxTpckTransport",
     "SetbackPercentFields",
@@ -399,4 +416,5 @@ __all__ = [
     "service_id",
     "service_name",
     "setback_from_value",
+    "write_scene_response",
 ]

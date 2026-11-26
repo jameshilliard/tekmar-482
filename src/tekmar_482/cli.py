@@ -10,6 +10,7 @@ from collections.abc import Callable, Sequence
 from dataclasses import asdict
 from typing import TYPE_CHECKING, Any, TextIO
 
+from ._native_payloads.scenes import NativeScene, SceneResponse
 from ._native_payloads.writes import NativeField, WritableBlock
 from ._wire import GatewayEndpoint
 from .bridge import BridgeClient
@@ -26,6 +27,7 @@ from .firmware import install_firmware
 from .gateway import open_gateway
 from .native import NativeAddress, NativeBlockQuery
 from .native_discovery import NativeDevice, discover_native
+from .native_scene import SceneSelection, SceneSendIssue, write_scene_response
 from .native_snapshot import read_native_snapshot
 from .native_write import NativeWriteStatus
 from .raw import CaptureGap, InvalidCapture, PortError, TxStatus
@@ -216,6 +218,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
 
     _add_block_commands(subparsers, dump)
+    _add_scene_commands(subparsers)
     add_status_commands(subparsers, _common_parent(default_timeout=20), _int_value)
     for name in (
         "panel",
@@ -317,6 +320,51 @@ def _add_block_commands(
     )
 
 
+def _add_scene_commands(
+    subparsers: argparse._SubParsersAction[argparse.ArgumentParser],
+) -> None:
+    select = subparsers.add_parser(
+        "select-scene",
+        parents=[_common_parent(default_timeout=20, require_transport=False)],
+        help="preview or broadcast a system scene on selected ports",
+    )
+    select.add_argument("scene", type=int, choices=tuple(s.value for s in NativeScene))
+    select.add_argument(
+        "--ports",
+        nargs="+",
+        type=int,
+        choices=TN4_PORTS,
+        required=True,
+    )
+    select.add_argument("--source-subnet", type=_int_value, default=0)
+    select.add_argument("--source-node", type=_int_value, default=0)
+    select.add_argument(
+        "--confirm",
+        action="store_true",
+        help="transmit; default is offline preview",
+    )
+    response = subparsers.add_parser(
+        "scene-response",
+        parents=[_common_parent(default_timeout=20)],
+        help="preview or edit one device's response without selecting the scene",
+    )
+    _add_native_target(response)
+    response.add_argument(
+        "scene",
+        type=int,
+        choices=tuple(s.value for s in NativeScene if s.response_field),
+    )
+    response.add_argument(
+        "response",
+        choices=tuple(r.name.lower() for r in SceneResponse),
+    )
+    response.add_argument(
+        "--confirm",
+        action="store_true",
+        help="update and verify; default is preview",
+    )
+
+
 def _add_native_target(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("port", type=int, choices=TN4_PORTS)
     parser.add_argument("subnet", type=_int_value)
@@ -330,7 +378,11 @@ def _add_native_target(parser: argparse.ArgumentParser) -> None:
     )
 
 
-def _common_parent(*, default_timeout: float = 5.0) -> argparse.ArgumentParser:
+def _common_parent(
+    *,
+    default_timeout: float = 5.0,
+    require_transport: bool = True,
+) -> argparse.ArgumentParser:
     parent = argparse.ArgumentParser(add_help=False)
     parent.add_argument("--vendor", action="store_true", default=argparse.SUPPRESS)
     parent.add_argument(
@@ -338,7 +390,7 @@ def _common_parent(*, default_timeout: float = 5.0) -> argparse.ArgumentParser:
         action="store_true",
         help="install the bundled build if the custom gateway revision differs",
     )
-    transport = parent.add_mutually_exclusive_group(required=True)
+    transport = parent.add_mutually_exclusive_group(required=require_transport)
     transport.add_argument(
         "--tcp",
         metavar="HOST:PORT",
@@ -455,16 +507,24 @@ async def run(
     return 0
 
 
-async def _native(args: argparse.Namespace, stdout: TextIO) -> int:
-    endpoint = (
+def _endpoint(args: argparse.Namespace) -> GatewayEndpoint:
+    if not (args.tcp or args.serial):
+        msg = "specify --serial or --tcp to connect to the gateway"
+        raise CliError(msg)
+    return (
         GatewayEndpoint.tcp(*parse_host_port(args.tcp), baudrate=args.baudrate)
         if args.tcp
         else GatewayEndpoint.serial(args.serial, baudrate=args.baudrate)
     )
 
+
+async def _native(args: argparse.Namespace, stdout: TextIO) -> int:
     def emit(value: object) -> None:
         stdout.write((json.dumps(value) if args.json else str(value)) + "\n")
 
+    if args.command == "select-scene":
+        return await _select_scene(args, emit)
+    endpoint = _endpoint(args)
     if args.command in {"install", "update"}:
         changed = await install_firmware(
             endpoint,
@@ -487,7 +547,12 @@ async def _native(args: argparse.Namespace, stdout: TextIO) -> int:
         elif args.command == "request":
             async with bridge.normal() as client:
                 await _request(client, args, stdout)
-        elif args.command in {"read-block", "read-device", "write-block"}:
+        elif args.command in {
+            "read-block",
+            "read-device",
+            "write-block",
+            "scene-response",
+        }:
             return await _native_addressed(bridge, args, emit)
         elif args.command == "read-status":
             async with bridge.stream(
@@ -520,6 +585,49 @@ async def _native(args: argparse.Namespace, stdout: TextIO) -> int:
         else:
             await _native_capture(bridge, args, emit)
     return 0
+
+
+async def _select_scene(
+    args: argparse.Namespace,
+    emit: Callable[[object], None],
+) -> int:
+    selection = SceneSelection(
+        NativeScene(args.scene),
+        tuple(args.ports),
+        NativeAddress(args.source_subnet, args.source_node),
+    )
+    if not args.timeout > 0:
+        msg = "scene send timeout must be positive"
+        raise CliError(msg)
+    description = {
+        "scene": selection.scene.value,
+        "duration_minutes": selection.scene.duration_minutes,
+        "ports": selection.ports,
+        "body": selection.message.to_bytes().hex(),
+    }
+    if not args.confirm:
+        emit({"preview": description})
+        return 0
+    async with open_gateway(_endpoint(args), auto_update=args.auto_update) as bridge:
+        if not isinstance(bridge, BridgeClient):
+            msg = "expected native firmware"
+            raise CliError(msg)
+        async with bridge.stream(diagnostics=False) as stream:
+            results = await selection.send(stream, timeout=args.timeout)
+            for result in results:
+                link = result.outcome
+                emit(
+                    {
+                        "port": result.port,
+                        "tx_status": link.value
+                        if isinstance(link, SceneSendIssue)
+                        else link.status.name,
+                        "tx_reason": None
+                        if isinstance(link, SceneSendIssue)
+                        else link.reason,
+                    },
+                )
+    return int(not all(result.link_acknowledged for result in results))
 
 
 def _native_edits(items: Sequence[str]) -> dict[NativeField, int]:
@@ -559,35 +667,45 @@ async def _native_addressed(
                 on_status=lambda s: emit(_status_fields(s)),
             )
             return 0
-        query = NativeBlockQuery(address, args.block, args.selector)
-        if args.command == "write-block":
+        if args.command == "scene-response":
+            result = await write_scene_response(
+                stream,
+                args.port,
+                address,
+                NativeScene(args.scene),
+                SceneResponse[args.response.upper()],
+                source=source,
+                timeout=args.timeout,
+                preview=not args.confirm,
+            )
+        elif args.command == "write-block":
             result = await stream.write_block(
                 args.port,
-                query,
+                NativeBlockQuery(address, args.block, args.selector),
                 _native_edits(args.fields),
                 source=source,
                 timeout=args.timeout,
                 preview=not args.confirm,
             )
-            emit(_write_fields(result))
-            return (
-                0
-                if result.status
-                in {
-                    NativeWriteStatus.UNCHANGED,
-                    NativeWriteStatus.PREVIEW,
-                    NativeWriteStatus.CONFIRMED,
-                }
-                else 1
-            )
-        try:
-            async with asyncio.timeout(args.timeout):
-                report = await stream.read_block(args.port, query, source=source)
-        except TimeoutError as err:
-            msg = f"no matching block {args.block:#x} report before the deadline"
-            raise CliError(msg) from err
-        emit(_frame_fields(report))
-        return 0
+        else:
+            query = NativeBlockQuery(address, args.block, args.selector)
+            try:
+                async with asyncio.timeout(args.timeout):
+                    report = await stream.read_block(args.port, query, source=source)
+            except TimeoutError as err:
+                msg = f"no matching block {args.block:#x} report before the deadline"
+                raise CliError(msg) from err
+            emit(_frame_fields(report))
+            return 0
+        emit(_write_fields(result))
+        return int(
+            result.status
+            not in {
+                NativeWriteStatus.UNCHANGED,
+                NativeWriteStatus.PREVIEW,
+                NativeWriteStatus.CONFIRMED,
+            },
+        )
 
 
 def _write_fields(result: NativeWriteResult) -> dict[str, object]:

@@ -331,6 +331,45 @@ and a link ACK without a report never constitute a complete answer.
 Partial data are available even when the CLI exits with status 1. These
 commands do not change device settings or enable a snowmelt group.
 
+### Scenes
+
+Scenes are system-wide announcements, not a thermostat mode or schedule
+edit. Use the numbers **1 through 8** printed on user switches. Preview the
+exact frame and the physical lines it would reach without opening a connection:
+
+```bash
+tekmar-482 select-scene 6 --ports 0 2 --json
+```
+
+To transmit, add an endpoint and `--confirm`. There is one attempt per
+selected port; the CLI reports each link's outcome and exits nonzero if any
+port was not link-acknowledged. An ACK does **not** mean every device on a
+line acted. The Python equivalent in an active Raw stream is:
+
+```python
+from tekmar_482 import NativeAddress, NativeScene, SceneSelection
+
+selection = SceneSelection(NativeScene.TEMPORARY_OCCUPIED, (0, 2), NativeAddress(0, 0))
+results = await selection.send(stream)
+```
+
+`monitor` decodes announcements. In Python, `NativeFrame.scene_report`
+provides the received ID, duration and any extension; the frame identifies
+the line and sender. Captures can include the host's own transmission.
+There is no known current-scene request: do not infer the active scene on
+startup or from a device's configured response.
+
+To inspect one device's participation and response settings, read block
+`0x0e` or use `await SceneSetup.read(stream, port, peer, source=source)`.
+Only supported slots are reported. To preview a change to one such slot:
+
+```bash
+tekmar-482 scene-response 2 0x12 3 4 schedule --tcp 192.0.2.10:3001 --json
+```
+
+Adding `--confirm` edits the device and reads the field back. It does not
+activate the scene. See the [wire IDs, durations and response table](https://github.com/jameshilliard/tekmar-482-firmware/blob/master/docs/tn4-frames.md#system-scenes).
+
 ### Installation and updates
 
 Only the **source distribution (sdist)** is released. Its build compiles
