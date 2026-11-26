@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING, Any, TextIO
 from ._native_payloads.writes import NativeField, WritableBlock
 from ._wire import GatewayEndpoint
 from .bridge import BridgeClient
+from .cli_status import add_status_commands, read_status_from_args
 from .client import Tekmar482Client
 from .constants import DEFAULT_BAUDRATE, TN4_PORTS
 from .decoding import (
@@ -25,7 +26,7 @@ from .firmware import install_firmware
 from .gateway import open_gateway
 from .native import NativeAddress, NativeBlockQuery
 from .native_discovery import NativeDevice, discover_native
-from .native_snapshot import read_native_devices
+from .native_snapshot import read_native_snapshot
 from .native_write import NativeWriteStatus
 from .raw import CaptureGap, InvalidCapture, PortError, TxStatus
 from .trpc import (
@@ -50,6 +51,7 @@ if TYPE_CHECKING:
         GatewaySnapshot,
     )
     from .native import NativeFrame
+    from .native_status import NativeStatusBatch
     from .native_write import NativeWriteResult
     from .raw import BridgeStream, CaptureRecord, NativeBlockBatch
 
@@ -132,6 +134,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="native block response window in seconds (default 20)",
     )
     dump.add_argument(
+        "--line-status",
+        action=argparse.BooleanOptionalAction,
+        default=argparse.SUPPRESS,
+        help="also request shared native status on responding ports (default on)",
+    )
+    dump.add_argument(
         "--include-setbacks",
         action=argparse.BooleanOptionalAction,
         default=True,
@@ -208,6 +216,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
 
     _add_block_commands(subparsers, dump)
+    add_status_commands(subparsers, _common_parent(default_timeout=20), _int_value)
     for name in (
         "panel",
         "led-test",
@@ -411,6 +420,7 @@ async def run(
         return await _native(args, stdout)
     if (
         hasattr(args, "block_timeout")
+        or hasattr(args, "line_status")
         or hasattr(args, "block_attempts")
         or any(
             getattr(args, key, None) for key in ("passive", "probe_subnet", "ack_port")
@@ -479,6 +489,14 @@ async def _native(args: argparse.Namespace, stdout: TextIO) -> int:
                 await _request(client, args, stdout)
         elif args.command in {"read-block", "read-device", "write-block"}:
             return await _native_addressed(bridge, args, emit)
+        elif args.command == "read-status":
+            async with bridge.stream(
+                ack_ports=(args.port,) if args.ack else (),
+                diagnostics=False,
+            ) as stream:
+                answer = await read_status_from_args(stream, args)
+                emit(_status_fields(answer))
+                return int(not answer.answered)
         elif args.command == "send":
             async with bridge.stream(diagnostics=False) as stream:
                 try:
@@ -531,13 +549,14 @@ async def _native_addressed(
         diagnostics=False,
     ) as stream:
         if args.command == "read-device":
-            await read_native_devices(
+            await read_native_snapshot(
                 stream,
                 [NativeDevice(args.port, address)],
                 source=source,
                 timeout=args.timeout,
                 attempts=getattr(args, "block_attempts", 2),
-                on_batch=lambda b: emit(_batch_fields(b)),
+                on_block=lambda b: emit(_batch_fields(b)),
+                on_status=lambda s: emit(_status_fields(s)),
             )
             return 0
         query = NativeBlockQuery(address, args.block, args.selector)
@@ -683,6 +702,7 @@ async def _native_capture(
                 getattr(args, "block_attempts", 2),
                 capture,
                 emit,
+                include_line_status=getattr(args, "line_status", True),
             )
         for diagnostic in scan.diagnostics.values():
             emit(asdict(diagnostic))
@@ -695,18 +715,22 @@ async def _dump_blocks(
     attempts: int,
     capture: Callable[[CaptureRecord], None],
     emit: Callable[[object], None],
+    *,
+    include_line_status: bool,
 ) -> None:
     async def listen() -> None:
         while True:
             capture(await stream.read())
 
     async def sample() -> None:
-        await read_native_devices(
+        await read_native_snapshot(
             stream,
             devices,
             timeout=timeout,
             attempts=attempts,
-            on_batch=lambda b: emit(_batch_fields(b)),
+            include_line_status=include_line_status,
+            on_block=lambda b: emit(_batch_fields(b)),
+            on_status=lambda s: emit(_status_fields(s)),
         )
 
     tasks = (asyncio.create_task(listen()), asyncio.create_task(sample()))
@@ -718,6 +742,25 @@ async def _dump_blocks(
         for task in tasks:
             task.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
+
+
+def _status_fields(batch: NativeStatusBatch) -> dict[str, object]:
+    result = batch.tx_result
+    return {
+        "status_read": {
+            "port": batch.port,
+            "peer": asdict(batch.peer) if batch.peer else None,
+            "service": batch.query.kind.name.lower(),
+            "request_data": batch.query.payload.hex(),
+            "answered": batch.answered,
+            "complete": batch.complete,
+            "missing_keys": batch.missing_keys,
+            "expected_count": batch.expected_count,
+            "tx_status": result.status.name if result else None,
+            "tx_reason": result.reason if result else None,
+            "reports": [_frame_fields(f) for f in batch.reports],
+        },
+    }
 
 
 def _batch_fields(batch: NativeBlockBatch) -> dict[str, object]:

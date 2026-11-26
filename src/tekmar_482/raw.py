@@ -5,22 +5,26 @@ from __future__ import annotations
 import asyncio
 from collections import deque
 from contextlib import asynccontextmanager
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from enum import IntEnum
 from typing import TYPE_CHECKING, Protocol
 
+from ._native_payloads.queries import StatusRequest
 from ._native_payloads.writes import BlockPatch
 from .constants import TN4_PORTS
 from .exceptions import ConnectionClosedError, ProtocolError, TekmarError
 from .native import NativeFrame, NativeMessage
+from .native_status import StatusCollector
 from .native_write import write_verified_block
 from .packet import TYPE_TN4
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 
+    from ._native_payloads.queries import NativeStatusQuery
     from ._native_payloads.writes import NativeField
     from .native import NativeAddress, NativeBlockQuery
+    from .native_status import NativeStatusBatch
     from .native_write import NativeWriteResult
     from .packet import Packet
 
@@ -127,16 +131,13 @@ class NativeBlockBatch:
 
 
 @dataclass(slots=True)
-class _BlockWaiter:
-    query: NativeBlockQuery
+class _ReportWaiter:
+    collect: Callable[[NativeFrame], bool]
     done: asyncio.Future[None]
-    frames: dict[int, NativeFrame] = field(default_factory=dict)
 
     def observe(self, frame: NativeFrame) -> None:
-        if not self.done.done() and self.query.matches(frame.message):
-            self.frames.setdefault(frame.node & 31, frame)
-            if len(self.frames) == self.query.target.request_mask().bit_count():
-                self.done.set_result(None)
+        if not self.done.done() and self.collect(frame):
+            self.done.set_result(None)
 
 
 class NativeTransmitError(TekmarError):
@@ -235,6 +236,15 @@ class BridgeStream(Protocol):
     @property
     def diagnostics(self) -> Mapping[int, PortDiagnostic]: ...
     async def send(self, port: int, body: bytes | NativeMessage) -> TxResult: ...
+    async def read_status(
+        self,
+        port: int,
+        query: NativeStatusQuery,
+        *,
+        source: NativeAddress,
+        peer: NativeAddress | None = None,
+        timeout: float = 20,
+    ) -> NativeStatusBatch: ...
     async def read_block(
         self,
         port: int,
@@ -273,7 +283,7 @@ class RawDispatcher:
         self._write = write
         self.diagnostics: dict[int, PortDiagnostic] = {}
         self._pending: dict[int, asyncio.Future[TxResult]] = {}
-        self._blocks: dict[int, _BlockWaiter] = {}
+        self._waiters: dict[int, _ReportWaiter] = {}
         self._edits = {port: asyncio.Lock() for port in TN4_PORTS}
         self._records: deque[_Record] = deque(maxlen=backlog)
         self._lost = 0
@@ -291,7 +301,13 @@ class RawDispatcher:
     async def send(self, port: int, body: bytes | NativeMessage) -> TxResult:
         """Send once and await this port's link result; cancellation cannot undo TX."""
         self._check_no_edit(port)
+        self._check_no_read(port)
         return await self._send(port, body)
+
+    def _check_no_read(self, port: int) -> None:
+        if port in self._waiters:
+            msg = f"native read already in progress on port {port}"
+            raise ProtocolError(msg)
 
     def _check_no_edit(self, port: int) -> None:
         if port in self._edits and self._edits[port].locked():
@@ -381,7 +397,7 @@ class RawDispatcher:
 
         async with self._edits[port]:
             self._check_active()
-            if port in self._pending or port in self._blocks:
+            if port in self._pending or port in self._waiters:
                 msg = f"native operation already in progress on port {port}"
                 raise ProtocolError(msg)
             return await write_verified_block(
@@ -400,34 +416,74 @@ class RawDispatcher:
         source: NativeAddress,
         timeout: float | None,
     ) -> NativeBlockBatch:
+        frames: dict[int, NativeFrame] = {}
+        count = query.target.request_mask().bit_count()
+
+        def collect(frame: NativeFrame) -> bool:
+            if query.matches(frame.message):
+                frames.setdefault(frame.node & 31, frame)
+            return len(frames) == count
+
+        result = await self._exchange(port, query.request(source), collect, timeout)
+        return NativeBlockBatch(
+            port,
+            query,
+            result,
+            tuple(frames[n] for n in sorted(frames)),
+        )
+
+    async def read_status(
+        self,
+        port: int,
+        query: NativeStatusQuery,
+        *,
+        source: NativeAddress,
+        peer: NativeAddress | None = None,
+        timeout: float = 20,
+    ) -> NativeStatusBatch:
+        """Request fresh, non-block status. Captures remain on the normal stream."""
+        if port not in TN4_PORTS or not timeout > 0:
+            msg = "expected a physical port and positive response timeout"
+            raise ValueError(msg)
+        if query.kind is StatusRequest.HUMIDITY and (
+            peer is None or peer.subnet != query.payload[0]
+        ):
+            msg = "humidity queries need the reporting peer on the requested subnet"
+            raise ValueError(msg)
+        self._check_no_edit(port)
+        collector = StatusCollector(query, peer)
+        request = NativeMessage.request_status(query, source=source)
+        result = await self._exchange(port, request, collector.observe, timeout)
+        return collector.batch(port, result)
+
+    async def _exchange(
+        self,
+        port: int,
+        request: NativeMessage,
+        collect: Callable[[NativeFrame], bool],
+        timeout: float | None,
+    ) -> TxResult | None:
         self._check_active()
-        if port in self._blocks:
-            msg = f"block read already in progress on port {port}"
-            raise ProtocolError(msg)
-        waiter = _BlockWaiter(query, asyncio.get_running_loop().create_future())
-        self._blocks[port] = waiter
+        self._check_no_read(port)
+        waiter = _ReportWaiter(collect, asyncio.get_running_loop().create_future())
+        self._waiters[port] = waiter
         result = None
         deadline = asyncio.timeout(timeout)
         try:
             async with deadline:
-                result = await self._send(port, query.request(source))
+                result = await self._send(port, request)
                 if result.may_have_reached_peer:
                     await waiter.done
         except TimeoutError:
             if not deadline.expired():
                 raise
         finally:
-            del self._blocks[port]
+            del self._waiters[port]
             if not waiter.done.done():
                 waiter.done.cancel()
             elif not waiter.done.cancelled():
                 waiter.done.exception()
-        return NativeBlockBatch(
-            port,
-            query,
-            result,
-            tuple(waiter.frames[n] for n in sorted(waiter.frames)),
-        )
+        return result
 
     def feed(self, packet: Packet) -> None:
         record = _decode(packet)
@@ -440,7 +496,7 @@ class RawDispatcher:
                 future.set_result(record)
         else:
             if isinstance(record, NativeFrame) and (
-                waiter := self._blocks.get(record.port)
+                waiter := self._waiters.get(record.port)
             ):
                 waiter.observe(record)
             if len(self._records) == self._records.maxlen:
@@ -463,8 +519,8 @@ class RawDispatcher:
             self._ready.clear()
             await self._ready.wait()
 
-    def _fail_blocks(self, error: Exception) -> None:
-        for waiter in self._blocks.values():
+    def _fail_reads(self, error: Exception) -> None:
+        for waiter in self._waiters.values():
             if not waiter.done.done():
                 waiter.done.set_exception(error)
 
@@ -475,7 +531,7 @@ class RawDispatcher:
         for future in self._pending.values():
             if not future.done():
                 future.set_exception(self._error)
-        self._fail_blocks(error)
+        self._fail_reads(error)
         self._ready.set()
 
     @asynccontextmanager
@@ -499,7 +555,7 @@ class RawDispatcher:
         finally:
             self._active = False
             self._ready.set()
-            self._fail_blocks(ConnectionClosedError("raw session closed"))
+            self._fail_reads(ConnectionClosedError("raw session closed"))
             reader.cancel()
             await asyncio.gather(reader, return_exceptions=True)
 

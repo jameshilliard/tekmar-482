@@ -14,6 +14,7 @@ from ._native_payloads import (
     SnowmeltBlock,
     decode_payload,
 )
+from ._native_payloads.queries import NativeStatusQuery, StatusRequest
 from .constants import SETPOINT_GROUP_IDS, TN4_PORTS
 from .units import celsius_to_degh, degh_to_celsius
 
@@ -129,9 +130,14 @@ class NativeMessage:
         )
 
     @classmethod
+    def request_status(cls, query: NativeStatusQuery, *, source: NativeAddress) -> Self:
+        """Build a read-only status request at the 483 gateway's native priority."""
+        return cls(query.kind, source, query.payload, priority=0)
+
+    @classmethod
     def request_clock(cls, *, source: NativeAddress) -> Self:
         """Ask for a native clock report on one line, not for a gateway clock."""
-        return cls(0x317, source, b"")
+        return cls.request_status(NativeStatusQuery(StatusRequest.CLOCK), source=source)
 
     @classmethod
     def clock_report(
@@ -179,9 +185,14 @@ class NativeMessage:
         zone_id: int,
         keys: bytes,
     ) -> Self:
-        """Request ordered status keys from a native snowmelt zone on one line."""
+        """Low-level 17F encoder: zone_id is the zero-based *wire* destination."""
         destination = _uint(zone_id, 5) << 3 | _uint(zone_type, 3)
-        return cls(0x17F, source, bytes([destination, _uint(len(keys), 6)]) + keys)
+        return cls(
+            StatusRequest.SNOWMELT,
+            source,
+            bytes([destination, _uint(len(keys), 6)]) + keys,
+            priority=0,
+        )
 
     @classmethod
     def request_block(

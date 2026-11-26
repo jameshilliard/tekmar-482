@@ -121,7 +121,7 @@ class NativeTests(unittest.TestCase):
     def test_native_clock_vectors_and_optional_dst_mode(self) -> None:
         source = NativeAddress(0, 0)
         assert NativeMessage.request_clock(source=source).to_bytes() == bytes.fromhex(
-            "71700000",
+            "31700000",
         )
         published = datetime(2012, 6, 26, 10, 27, tzinfo=UTC)
         assert NativeMessage.clock_report(published, source=source).to_bytes() == (
@@ -158,7 +158,7 @@ class NativeTests(unittest.TestCase):
             zone_id=5,
             keys=bytes.fromhex("25262222"),
         )
-        assert request.to_bytes() == bytes.fromhex("57f00006 2a04 25262222")
+        assert request.to_bytes() == bytes.fromhex("17f00006 2a04 25262222")
         assert request.decoded["keys_hex"] == "25262222"
         with self.assertRaises(ValueError):
             NativeMessage.request_snowmelt_status(

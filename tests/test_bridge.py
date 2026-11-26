@@ -430,6 +430,69 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
                     assert result["status"] == "preview"
                     assert result["tx_status"] is None and result["readback"] is None
 
+    async def test_cli_snowmelt_reads_configuration_and_reports_missing_status_keys(
+        self,
+    ) -> None:
+        async def app(
+            reader: asyncio.StreamReader,
+            writer: asyncio.StreamWriter,
+        ) -> None:
+            if (first := await reader.readexactly(1)) == b"?":
+                assert await reader.readexactly(5) == b"\r\nJ\r\n"
+                assert not await reader.read()
+                return
+            caps = management(1, 1)
+            assert first + await reader.readexactly(len(caps) - 1) == caps
+            writer.write(management(1, 4, bytes([1, 0, 5, 3])))
+            mode = management(2, 0, b"\x01"), management(2, 3, b"\x01")
+            mask = management(9, 0, b"\0"), management(9, 3, b"\0")
+            steps = [mode, mask]
+            for outgoing, report in (
+                ("6d70000b d00014 04000000 00000000", "6e7148c5 d000030400"),
+                ("6d70000b c10014 04000000 00000000", "6e7148c4 c1000108"),
+                ("17f00004 3a021922", "57e148c5 4201190200"),
+            ):
+                steps.append(
+                    (
+                        serialize(Packet(1, bytes([1, 1]) + bytes.fromhex(outgoing))),
+                        serialize(Packet(1, bytes([2, 1, 0])))
+                        + serialize(
+                            Packet(
+                                1,
+                                bytes([0, 1, 1, 0, 0, 0]) + bytes.fromhex(report),
+                            ),
+                        ),
+                    ),
+                )
+            steps.append((management(2, 0, b"\0"), management(2, 3, b"\0")))
+            for command, reply in steps:
+                assert await reader.readexactly(len(command)) == command
+                writer.write(reply)
+
+        async with listen(app) as endpoint, asyncio.timeout(4):
+            out = StringIO()
+            args = build_parser().parse_args(
+                [
+                    "read-status",
+                    "snowmelt",
+                    "1",
+                    "0x14",
+                    "3",
+                    "--keys",
+                    "1922",
+                    "--timeout",
+                    "0.12",
+                    "--json",
+                    "--tcp",
+                    f"{endpoint.address}:{endpoint.port}",
+                ],
+            )
+            assert await run(args, stdout=out) == 1
+            answer = json.loads(out.getvalue())["status_read"]
+            assert not answer["answered"] and answer["missing_keys"] == [0x22]
+            assert answer["tx_status"] == "ACK" and answer["service"] == "snowmelt"
+            assert answer["reports"][0]["fields"]["pair0_water_detect_state"] == 2
+
     async def test_cli_discovery_probes_quiet_subnet_and_preserves_ack_mask(
         self,
     ) -> None:
@@ -564,10 +627,27 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
                             ack,
                             (request(0, 64), rx_identity + result),
                             (request(0x77, 64), result + rx_other),
-                            stop,
-                            *stats,
                         ],
                     )
+                    for query, report_hex in (
+                        ("3f700000", "7ff161c2 1604"),
+                        ("32700000", "72f161c2 2204"),
+                        ("31700000", "71f161c5 2241040019"),
+                        ("30700000", "70f161c1 02"),
+                        ("01100000", "410161c3 000102"),
+                    ):
+                        steps.append(
+                            (
+                                serialize(
+                                    Packet(1, bytes([1, 3]) + bytes.fromhex(query)),
+                                ),
+                                result
+                                + serialize(
+                                    Packet(1, prefix + bytes.fromhex(report_hex)),
+                                ),
+                            ),
+                        )
+                    steps.extend([stop, *stats])
                 for command, response in steps:
                     assert await reader.readexactly(len(command)) == command
                     writer.write(response)
@@ -590,6 +670,15 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
                 )
                 out = StringIO()
                 assert await run(args, stdout=out) == 0
+                telemetry = [
+                    json.loads(line)["status_read"]
+                    for line in out.getvalue().splitlines()
+                    if "status_read" in line
+                ]
+                assert len(telemetry) == (0 if passive else 5)
+                assert all(
+                    entry["answered"] and entry["reports"] for entry in telemetry
+                )
                 return [
                     json.loads(line)["block_read"]
                     for line in out.getvalue().splitlines()

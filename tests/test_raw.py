@@ -107,7 +107,7 @@ class RawTests(unittest.IsolatedAsyncioTestCase):
             self.stream.feed(Packet(1, bytes((0, 1, 0, 0, 0, 0)) + body))
             first = asyncio.create_task(self.stream.read_block(1, query, source=host))
             assert await self.tx.get() == bytes((1, 1)) + query.request(host).to_bytes()
-            with self.assertRaisesRegex(ProtocolError, "block read already"):
+            with self.assertRaisesRegex(ProtocolError, "native read already"):
                 await self.stream.read_block(1, query, source=host)
             other = asyncio.create_task(self.stream.read_block(2, query, source=host))
             await self.tx.get()

@@ -23,7 +23,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--check", action="store_true")
     args = parser.parse_args()
-    for name in ("__init__.py", "layouts.py", "products.py", "writes.py"):
+    for name in ("__init__.py", "layouts.py", "products.py", "queries.py", "writes.py"):
         data = (SOURCE / "tools" / "payloads" / name).read_bytes()
         path = PACKAGE / "_native_payloads" / name
         if args.check:

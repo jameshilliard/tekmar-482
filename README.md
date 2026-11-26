@@ -70,7 +70,7 @@ tekmar-482 discover --tcp 192.0.2.10:3001 --duration 45 --json
 ```
 
 Use `--probe-subnet PORT:SUBNET` to include a known silent subnet, or
-`--passive` to skip all identity and block requests. A solitary peer can need a link
+`--passive` to skip all native requests. A solitary peer can need a link
 ACK to deliver its frames: `--ack-port PORT` is explicit and repeatable.
 By default the gateway does not ACK incoming Raw frames. Use a longer
 window if devices have not yet answered. Scanning does not change setpoints.
@@ -95,9 +95,10 @@ and node from discovery, for example:
 tekmar-482 read-device 2 0x12 3 --tcp 192.0.2.10:3001 --json
 ```
 
-`read_native_devices(stream, devices)` implements both this command and
-the device-read phase of `dump`. It confirms identity before expanding a
-model's block list. Unknown models can still be queried for blocks and
+`read_native_snapshot(stream, devices)` implements this command and the
+device-read phase of `dump`. Its block reader, `read_native_devices()`,
+confirms identity before expanding a model's block list.
+Unknown models can still be queried for blocks and
 selectors previously observed on that path. An explicit zero availability
 mask advertises no instances; a missing mask does not. Read batches group
 nodes sharing a subnet, block and selector into one request. Results contain
@@ -301,6 +302,35 @@ update = slab.update_celsius(2.0, source=source)  # Constructs only.
 A temperature update does not start a melt cycle. After an intentional
 send, read the same block again and check the device's reported value.
 
+**Live status queries.** A device's operating state and slab temperature
+are reported as snowmelt status keys, separate from its configuration
+blocks. `read_snowmelt_status(stream, port, peer, source=source)` reads
+the application and configured zone or sensor number before sending the status request.
+It requests the 483 application's keys by default. Pass `keys=bytes([...])`
+to select other keys, including melt and storm group IDs. The public
+`NativeStatusQuery.snowmelt(role, number, keys)` takes the **one-based**
+configured number, not a native node or the zero-based 17F wire destination.
+Both `read-device` and active `dump` use the configuration they already
+read from an identified snowmelt controller to request live telemetry.
+
+```bash
+tekmar-482 read-status snowmelt 2 0x12 3 --keys 19221b --tcp 192.0.2.10:3001 --json
+tekmar-482 read-status clock 2 --peer 0x12 3 --tcp 192.0.2.10:3001 --json
+tekmar-482 read-status master 2 --tcp 192.0.2.10:3001 --json
+```
+
+Other services are `outdoor`, `wwsd`, `zone-sync`, `io-discovery`,
+`io-channel` and `humidity`. Active `dump` also requests the five shared
+line services once per responding port; use `--no-line-status` to skip them.
+`read_native_snapshot(..., include_line_status=True)` does the same.
+`stream.read_status(port, query, source=source, peer=peer)` returns a
+`NativeStatusBatch` with the link result, actual reporting source, and
+fresh frames. Without an explicit peer it follows the first matching
+source. Keys may arrive out of order or in several frames. Missing keys
+and a link ACK without a report never constitute a complete answer.
+Partial data are available even when the CLI exits with status 1. These
+commands do not change device settings or enable a snowmelt group.
+
 ### Installation and updates
 
 Only the **source distribution (sdist)** is released. Its build compiles
@@ -465,8 +495,8 @@ same setpoint on one device keep their submission order. With setbacks
 enabled, a write to an independent slot can proceed.
 `get_setpoint_group(group_id)` reads recent activity without transmitting
 on tN4. An idle group does not identify an installed device. For an observed
-snowmelt zone, `NativeMessage.request_snowmelt_status()` can request its
-melt and storm group IDs (keys 0x25/0x26) in Raw mode without changing them.
+snowmelt zone, request its melt and storm group IDs (keys 0x25/0x26)
+with `read_snowmelt_status()` in Raw mode without changing them.
 
 `set_setpoint_group()` waits for a matching group report. Stock firmware
 06 and custom Normal mode report only when reporting is enabled; neither directly acknowledges

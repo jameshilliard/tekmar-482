@@ -2,6 +2,12 @@
 
 from ._native_payloads import SnowmeltBlock
 from ._native_payloads.products import NativeProduct
+from ._native_payloads.queries import (
+    NativeStatusQuery,
+    SnowmeltKey,
+    SnowmeltRole,
+    StatusRequest,
+)
 from ._native_payloads.writes import NativeField, WritableBlock
 from ._wire import GatewayEndpoint
 from .bridge import BridgeClient, PanelState
@@ -100,7 +106,8 @@ from .native_discovery import (
     NativeProbe,
     discover_native,
 )
-from .native_snapshot import read_native_devices
+from .native_snapshot import NativeSnapshot, read_native_devices, read_native_snapshot
+from .native_status import NativeStatusBatch, read_snowmelt_status
 from .native_write import NativeWriteResult, NativeWriteStatus
 from .packet import (
     TYPE_DISPLAY,
@@ -283,6 +290,9 @@ __all__ = [
     "NativeMessage",
     "NativeProbe",
     "NativeProduct",
+    "NativeSnapshot",
+    "NativeStatusBatch",
+    "NativeStatusQuery",
     "NativeTargets",
     "NativeTransmitError",
     "NativeWriteResult",
@@ -311,8 +321,11 @@ __all__ = [
     "SetpointValues",
     "SnowmeltBlock",
     "SnowmeltData",
+    "SnowmeltKey",
+    "SnowmeltRole",
     "SnowmeltRuntime",
     "SnowmeltSetpoint",
+    "StatusRequest",
     "Tekmar482Client",
     "Tekmar482Controller",
     "Tekmar482DeviceHandle",
@@ -377,6 +390,8 @@ __all__ = [
     "method_spec",
     "open_gateway",
     "read_native_devices",
+    "read_native_snapshot",
+    "read_snowmelt_status",
     "require_device_support",
     "response_service_for",
     "schedule_setbacks_for_events",

@@ -6,7 +6,9 @@ import asyncio
 from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING
 
+from ._native_payloads import SnowmeltBlock
 from ._native_payloads.products import AVAILABILITY_FIELDS, block_selectors
+from ._native_payloads.queries import NativeStatusQuery, SnowmeltRole, StatusRequest
 from .constants import TN4_PORTS
 from .native import NativeAddress, NativeBlockQuery, NativeTargets
 from .native_discovery import NativeInventory
@@ -17,9 +19,16 @@ if TYPE_CHECKING:
 
     from ._native_payloads.products import NativeProduct
     from .native_discovery import NativeDevice
+    from .native_status import NativeStatusBatch
     from .raw import BridgeStream, NativeBlockBatch
 
 _HOST = NativeAddress(0, 0)
+
+
+@dataclass(frozen=True, slots=True)
+class NativeSnapshot:
+    blocks: tuple[NativeBlockBatch, ...]
+    statuses: tuple[NativeStatusBatch, ...]
 
 
 @dataclass(slots=True)
@@ -198,6 +207,122 @@ async def read_native_devices(
     try:
         return tuple(
             batch for batches in await asyncio.gather(*tasks) for batch in batches
+        )
+    finally:
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+
+
+def _status_queries(
+    batches: Iterable[NativeBlockBatch],
+    *,
+    include_line_status: bool,
+) -> dict[int, list[tuple[NativeAddress | None, NativeStatusQuery]]]:
+    configs: dict[tuple[int, int, int], dict[str, str | float | int]] = {}
+    busy: set[int] = set()
+    active: set[int] = set()
+    for batch in batches:
+        if batch.tx_result is None:
+            # No terminal link result: the gateway still owns its send slot.
+            busy.add(batch.port)
+            continue
+        if not batch.tx_result.may_have_reached_peer or not batch.reports:
+            continue
+        active.add(batch.port)
+        if batch.query.block_id in {
+            0,
+            SnowmeltBlock.APPLICATION_MODE,
+            SnowmeltBlock.ZONE_ID,
+            SnowmeltBlock.SENSOR_ID,
+        }:
+            for frame in batch.reports:
+                path = (frame.port, frame.subnet, frame.node & 31)
+                configs.setdefault(path, {}).update(frame.decoded)
+    ports: dict[int, list[tuple[NativeAddress | None, NativeStatusQuery]]] = {}
+    for (port, subnet, node), fields in configs.items():
+        application = fields.get("application_mode")
+        if (
+            port in busy
+            or fields.get("family") != "snowmelt_control"
+            or not isinstance(application, int)
+        ):
+            continue
+        try:
+            role = SnowmeltRole.for_application(application)
+            number = fields.get(
+                "sensor_id" if role is SnowmeltRole.SENSOR else "zone_id",
+            )
+            if not isinstance(number, int):
+                continue
+            query = NativeStatusQuery.for_snowmelt_device(application, number)
+        except ValueError:
+            continue  # Unknown application or unconfigured address, not a target.
+        ports.setdefault(port, []).append((NativeAddress(subnet, node), query))
+    if include_line_status:
+        for port in active - busy:
+            ports.setdefault(port, []).extend(
+                (None, NativeStatusQuery(kind))
+                for kind in (
+                    StatusRequest.MASTER,
+                    StatusRequest.OUTDOOR,
+                    StatusRequest.CLOCK,
+                    StatusRequest.WWSD,
+                    StatusRequest.ZONE_SYNC,
+                )
+            )
+    return ports
+
+
+async def read_native_snapshot(
+    stream: BridgeStream,
+    devices: Iterable[NativeDevice],
+    *,
+    source: NativeAddress = _HOST,
+    timeout: float = 20,
+    attempts: int = 2,
+    include_line_status: bool = False,
+    on_block: Callable[[NativeBlockBatch], None] | None = None,
+    on_status: Callable[[NativeStatusBatch], None] | None = None,
+) -> NativeSnapshot:
+    """Read blocks, then application-specific telemetry from identified devices."""
+    blocks = await read_native_devices(
+        stream,
+        devices,
+        source=source,
+        timeout=timeout,
+        attempts=attempts,
+        on_batch=on_block,
+    )
+
+    async def sample(
+        port: int,
+        queries: list[tuple[NativeAddress | None, NativeStatusQuery]],
+    ) -> list[NativeStatusBatch]:
+        batches = []
+        for peer, query in queries:
+            batch = await stream.read_status(
+                port,
+                query,
+                source=source,
+                peer=peer,
+                timeout=timeout,
+            )
+            batches.append(batch)
+            if on_status is not None:
+                on_status(batch)
+            if batch.tx_result is None:
+                break
+        return batches
+
+    ports = _status_queries(blocks, include_line_status=include_line_status)
+    tasks = [
+        asyncio.create_task(sample(p, queries)) for p, queries in sorted(ports.items())
+    ]
+    try:
+        return NativeSnapshot(
+            blocks,
+            tuple(b for answers in await asyncio.gather(*tasks) for b in answers),
         )
     finally:
         for task in tasks:

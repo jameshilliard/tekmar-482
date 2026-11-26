@@ -11,6 +11,7 @@ from tekmar_482 import (
     Packet,
     TxStatus,
     read_native_devices,
+    read_native_snapshot,
 )
 from tekmar_482._native_payloads import BLOCK_SELECTORS
 from tekmar_482.raw import RawDispatcher
@@ -20,6 +21,8 @@ class NativeSnapshotTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self) -> None:
         self.rx: asyncio.Queue[Packet] = asyncio.Queue()
         self.requests: list[tuple[int, int, int, int, int]] = []
+        self.status_requests: list[NativeMessage] = []
+        self.block_fields: dict[int, bytes] = {}
         self.identities: dict[int, tuple[int, int]] = {}
         self.availability: dict[int, int] = {}
         self.stalled: set[int] = set()
@@ -29,7 +32,17 @@ class NativeSnapshotTests(unittest.IsolatedAsyncioTestCase):
     async def write(self, data: bytes) -> None:
         port = data[1]
         msg = NativeMessage.from_bytes(data[2:])
-        assert data[0] == 1 and msg.message_id == 0x2D7
+        assert data[0] == 1
+        if msg.message_id == 0x17F:
+            self.status_requests.append(msg)
+            payload = bytes([msg.payload[0] + 8, len(msg.payload[2:])]) + b"".join(
+                bytes([key, 5, 0]) for key in reversed(msg.payload[2:])
+            )
+            body = NativeMessage(0x17E, NativeAddress(0x16, 7), payload).to_bytes()
+            self.stream.feed(Packet(1, bytes([0, port, 0, 0, 0, 0]) + body))
+            self.stream.feed(Packet(1, bytes([2, port, TxStatus.ACK])))
+            return
+        assert msg.message_id == 0x2D7
         block = int.from_bytes(msg.payload[:2], "little")
         subnet = msg.payload[2]
         mask = int.from_bytes(msg.payload[3:7], "little")
@@ -49,6 +62,8 @@ class NativeSnapshotTests(unittest.IsolatedAsyncioTestCase):
                     + product.to_bytes(3, "little")
                     + j_number.to_bytes(2, "little")
                 )
+            elif block in self.block_fields:
+                fields = self.block_fields[block]
             elif block == 0x50:
                 fields = bytes([3, self.availability[n], 0])
             elif block in BLOCK_SELECTORS:
@@ -133,3 +148,23 @@ class NativeSnapshotTests(unittest.IsolatedAsyncioTestCase):
             )
         assert first.missing_nodes == (8,) and not retry.missing_nodes
         assert [(b, mask) for _, _, b, _, mask in self.requests] == [(0, 132), (0, 128)]
+
+    async def test_snapshot_uses_confirmed_snowmelt_configuration_only_once(
+        self,
+    ) -> None:
+        self.identities = {7: (105801, 1226)}
+        self.block_fields = {
+            0xD0: bytes([3, 3, 2]),
+            0xC0: bytes([1, 8]),
+            0xC1: bytes([1, 6]),
+        }
+        dev = NativeDevice(3, NativeAddress(0x16, 7))
+        async with self.stream.receiving(self.rx.get), asyncio.timeout(2):
+            snapshot = await read_native_snapshot(self.stream, [dev])
+            assert len(snapshot.statuses) == 1 and snapshot.statuses[0].answered
+            assert self.status_requests[0].payload == bytes.fromhex("390519221b2329")
+            assert sum(q[2] == 0xD0 for q in self.requests) == 1
+            assert sum(q[2] == 0xC0 for q in self.requests) == 1
+            self.block_fields[0xC0] = b"\0"
+            assert not (await read_native_snapshot(self.stream, [dev])).statuses
+            assert len(self.status_requests) == 1
