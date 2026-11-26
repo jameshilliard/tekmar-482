@@ -1,0 +1,135 @@
+import asyncio
+import unittest
+
+from tekmar_482 import (
+    NativeAddress,
+    NativeDevice,
+    NativeFrame,
+    NativeIdentity,
+    NativeInventory,
+    NativeMessage,
+    Packet,
+    TxStatus,
+    read_native_devices,
+)
+from tekmar_482._native_payloads import BLOCK_SELECTORS
+from tekmar_482.raw import RawDispatcher
+
+
+class NativeSnapshotTests(unittest.IsolatedAsyncioTestCase):
+    def setUp(self) -> None:
+        self.rx: asyncio.Queue[Packet] = asyncio.Queue()
+        self.requests: list[tuple[int, int, int, int, int]] = []
+        self.identities: dict[int, tuple[int, int]] = {}
+        self.availability: dict[int, int] = {}
+        self.stalled: set[int] = set()
+        self.skip_once: set[tuple[int, int]] = set()
+        self.stream = RawDispatcher(self.write, 32)
+
+    async def write(self, data: bytes) -> None:
+        port = data[1]
+        msg = NativeMessage.from_bytes(data[2:])
+        assert data[0] == 1 and msg.message_id == 0x2D7
+        block = int.from_bytes(msg.payload[:2], "little")
+        subnet = msg.payload[2]
+        mask = int.from_bytes(msg.payload[3:7], "little")
+        selector = int.from_bytes(msg.payload[7:], "little")
+        self.requests.append((port, subnet, block, selector, mask))
+        if port in self.stalled:
+            return
+        for n, (product, j_number) in self.identities.items():
+            if not mask & (1 << (n - 1)):
+                continue
+            if (n, block) in self.skip_once:
+                self.skip_once.remove((n, block))
+                continue
+            if block == 0:
+                fields = (
+                    bytes([31])
+                    + product.to_bytes(3, "little")
+                    + j_number.to_bytes(2, "little")
+                )
+            elif block == 0x50:
+                fields = bytes([3, self.availability[n], 0])
+            elif block in BLOCK_SELECTORS:
+                fields = bytes([1, selector])
+            else:
+                fields = b"\0"
+            source = NativeAddress(subnet, n | 32)
+            body = NativeMessage(0x2E7, source, msg.payload[:2] + fields).to_bytes()
+            self.stream.feed(Packet(1, bytes([0, port, 0, 0, 0, 0]) + body))
+        self.stream.feed(Packet(1, bytes([2, port, TxStatus.ACK])))
+
+    async def test_group_plans_model_and_observed_instances_per_peer(self) -> None:
+        self.identities = dict.fromkeys((2, 7), (104103, 1206))
+        self.availability = {2: 0, 7: 9}
+        inventory = NativeInventory()
+        for node, selector in ((2, 5), (7, 3)):
+            msg = NativeMessage(
+                0x2E7,
+                NativeAddress(0x24, node),
+                bytes([0x44, 0, 1, selector]),
+            )
+            inventory.observe(NativeFrame(3, 0, msg.to_bytes()))
+        async with self.stream.receiving(self.rx.get), asyncio.timeout(2):
+            batches = await read_native_devices(self.stream, inventory.devices)
+        assert self.requests[:2] == [(3, 0x24, 0, 0, 66), (3, 0x24, 0x50, 0, 66)]
+        assert [(s, m) for _, _, b, s, m in self.requests if b == 0x44] == [
+            (0, 66),
+            (3, 64),
+            (5, 2),
+            (129, 66),
+        ]
+        assert [(s, m) for _, _, b, s, m in self.requests if b == 0x4D] == [
+            (0, 64),
+            (3, 64),
+        ]
+        assert all(not batch.missing_nodes for batch in batches)
+        assert len(batches) == len(set(self.requests))
+
+    async def test_unknown_model_and_reused_address_do_not_inherit_candidates(
+        self,
+    ) -> None:
+        self.identities = {1: (999, 12), 2: (101103, 1173)}
+        dev = NativeDevice(3, NativeAddress(8, 1), reported_blocks=frozenset({0x77}))
+        reused = NativeDevice(
+            3,
+            NativeAddress(8, 2),
+            NativeIdentity(104103, 1206, None, None),
+            frozenset({0x44}),
+            frozenset({(0x44, 129)}),
+        )
+        async with self.stream.receiving(self.rx.get), asyncio.timeout(2):
+            await read_native_devices(self.stream, [dev, reused])
+        assert (3, 8, 0x77, 0, 1) in self.requests
+        assert not any(b == 0x44 for _, _, b, _, _ in self.requests)
+        assert [(s, m) for _, _, b, s, m in self.requests if b == 0x38] == [
+            (i, 2) for i in range(4)
+        ]
+
+    async def test_missing_tx_stops_only_that_port(self) -> None:
+        self.stalled = {1}
+        self.identities = {2: (108402, 1)}
+        devices = [
+            NativeDevice(p, NativeAddress(s, 2)) for p, s in ((1, 9), (1, 10), (4, 10))
+        ]
+        async with self.stream.receiving(self.rx.get), asyncio.timeout(2):
+            batches = await read_native_devices(self.stream, devices, timeout=0.03)
+            self.stream.feed(Packet(1, bytes([2, 1, 0])))
+        assert batches[0].port == 1 and batches[0].tx_result is None
+        assert batches[0].missing_nodes == (2,)
+        assert batches[1].port == 4 and not batches[1].missing_nodes
+        assert len(self.requests) == 2
+
+    async def test_late_peer_gets_one_targeted_retry(self) -> None:
+        self.identities = dict.fromkeys((3, 8), (108402, 1))
+        self.skip_once.add((8, 0))
+        devices = [NativeDevice(4, NativeAddress(14, n)) for n in self.identities]
+        async with self.stream.receiving(self.rx.get), asyncio.timeout(2):
+            first, retry = await read_native_devices(
+                self.stream,
+                devices,
+                timeout=0.025,
+            )
+        assert first.missing_nodes == (8,) and not retry.missing_nodes
+        assert [(b, mask) for _, _, b, _, mask in self.requests] == [(0, 132), (0, 128)]

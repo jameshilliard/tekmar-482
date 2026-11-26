@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 from collections import deque
 from contextlib import asynccontextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import IntEnum
 from typing import TYPE_CHECKING, Protocol
 
@@ -78,6 +78,47 @@ class TxResult:
     port: int
     status: TxStatus
     reason: RejectReason | FailureReason | int | None = None
+
+    @property
+    def may_have_reached_peer(self) -> bool:
+        return self.status == TxStatus.ACK or (
+            self.status == TxStatus.FAILED and self.reason == FailureReason.NO_ACK
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class NativeBlockBatch:
+    """One request and the distinct peers that reported before its deadline."""
+
+    port: int
+    query: NativeBlockQuery
+    tx_result: TxResult | None
+    reports: tuple[NativeFrame, ...]
+
+    @property
+    def missing_mask(self) -> int:
+        mask = self.query.target.request_mask()
+        for frame in self.reports:
+            mask &= ~frame.message.source.request_mask()
+        return mask
+
+    @property
+    def missing_nodes(self) -> tuple[int, ...]:
+        mask = self.missing_mask
+        return tuple(node for node in range(1, 32) if mask & (1 << (node - 1)))
+
+
+@dataclass(slots=True)
+class _BlockWaiter:
+    query: NativeBlockQuery
+    done: asyncio.Future[None]
+    frames: dict[int, NativeFrame] = field(default_factory=dict)
+
+    def observe(self, frame: NativeFrame) -> None:
+        if not self.done.done() and self.query.matches(frame.message):
+            self.frames.setdefault(frame.node & 31, frame)
+            if len(self.frames) == self.query.target.request_mask().bit_count():
+                self.done.set_result(None)
 
 
 class NativeTransmitError(TekmarError):
@@ -183,6 +224,14 @@ class BridgeStream(Protocol):
         *,
         source: NativeAddress,
     ) -> NativeFrame: ...
+    async def read_block_group(
+        self,
+        port: int,
+        query: NativeBlockQuery,
+        *,
+        source: NativeAddress,
+        timeout: float = 20,
+    ) -> NativeBlockBatch: ...
     async def read(self) -> CaptureRecord: ...
 
 
@@ -196,10 +245,7 @@ class RawDispatcher:
         self._write = write
         self.diagnostics: dict[int, PortDiagnostic] = {}
         self._pending: dict[int, asyncio.Future[TxResult]] = {}
-        self._blocks: dict[
-            int,
-            tuple[NativeBlockQuery, asyncio.Future[NativeFrame]],
-        ] = {}
+        self._blocks: dict[int, _BlockWaiter] = {}
         self._records: deque[_Record] = deque(maxlen=backlog)
         self._lost = 0
         self._ready = asyncio.Event()
@@ -248,27 +294,63 @@ class RawDispatcher:
         source: NativeAddress,
     ) -> NativeFrame:
         """Send once and wait for a matching new report without consuming captures."""
+        if query.target.request_mask().bit_count() != 1:
+            msg = "use read_block_group for multiple nodes"
+            raise ValueError(msg)
+        batch = await self._collect_blocks(port, query, source, None)
+        if batch.tx_result is not None and not batch.tx_result.may_have_reached_peer:
+            raise NativeTransmitError(batch.tx_result)
+        return batch.reports[0]
+
+    async def read_block_group(
+        self,
+        port: int,
+        query: NativeBlockQuery,
+        *,
+        source: NativeAddress,
+        timeout: float = 20,
+    ) -> NativeBlockBatch:
+        """Collect reports in one deadline including TX. A missing node is unknown."""
+        if not timeout > 0:
+            msg = "block response timeout must be positive"
+            raise ValueError(msg)
+        return await self._collect_blocks(port, query, source, timeout)
+
+    async def _collect_blocks(
+        self,
+        port: int,
+        query: NativeBlockQuery,
+        source: NativeAddress,
+        timeout: float | None,
+    ) -> NativeBlockBatch:
         self._check_active()
         if port in self._blocks:
             msg = f"block read already in progress on port {port}"
             raise ProtocolError(msg)
-        future: asyncio.Future[NativeFrame] = asyncio.get_running_loop().create_future()
-        self._blocks[port] = (query, future)
+        waiter = _BlockWaiter(query, asyncio.get_running_loop().create_future())
+        self._blocks[port] = waiter
+        result = None
+        deadline = asyncio.timeout(timeout)
         try:
-            result = await self.send(port, query.request(source))
-            # A peer can receive the request even if its link ACK was missed.
-            if result.status != TxStatus.ACK and not (
-                result.status == TxStatus.FAILED
-                and result.reason == FailureReason.NO_ACK
-            ):
-                raise NativeTransmitError(result)
-            return await future
+            async with deadline:
+                result = await self.send(port, query.request(source))
+                if result.may_have_reached_peer:
+                    await waiter.done
+        except TimeoutError:
+            if not deadline.expired():
+                raise
         finally:
             del self._blocks[port]
-            if not future.done():
-                future.cancel()
-            elif not future.cancelled():
-                future.exception()
+            if not waiter.done.done():
+                waiter.done.cancel()
+            elif not waiter.done.cancelled():
+                waiter.done.exception()
+        return NativeBlockBatch(
+            port,
+            query,
+            result,
+            tuple(waiter.frames[n] for n in sorted(waiter.frames)),
+        )
 
     def feed(self, packet: Packet) -> None:
         record = _decode(packet)
@@ -283,9 +365,7 @@ class RawDispatcher:
             if isinstance(record, NativeFrame) and (
                 waiter := self._blocks.get(record.port)
             ):
-                query, report = waiter
-                if not report.done() and query.matches(record.message):
-                    report.set_result(record)
+                waiter.observe(record)
             if len(self._records) == self._records.maxlen:
                 self._lost += 1
             self._records.append(record)
@@ -307,9 +387,9 @@ class RawDispatcher:
             await self._ready.wait()
 
     def _fail_blocks(self, error: Exception) -> None:
-        for _, report in self._blocks.values():
-            if not report.done():
-                report.set_exception(error)
+        for waiter in self._blocks.values():
+            if not waiter.done.done():
+                waiter.done.set_exception(error)
 
     def fail(self, error: Exception) -> None:
         if self._error is not None:

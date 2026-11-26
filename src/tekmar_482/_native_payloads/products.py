@@ -1,6 +1,9 @@
 """Native product identities and addressed-read hints, not live capabilities."""
 
+from collections.abc import Mapping
 from dataclasses import dataclass
+
+from .layouts import BLOCK_SELECTORS, MULTI_WEEK
 
 
 @dataclass(frozen=True, slots=True)
@@ -12,6 +15,39 @@ class NativeProduct:
     def candidate_blocks(self) -> tuple[int, ...]:
         """Candidates for reads, not a whitelist or evidence that a field exists."""
         return _BLOCKS.get(self.model, (0,))
+
+
+# Read these blocks first when present in a device's candidate set.
+AVAILABILITY_FIELDS = {
+    0x35: "available_boilers", 0x50: "available_mix_pumps",
+    0x5b: "available_tank_pumps", 0x97: "available_heat_pumps",
+}
+_BOILER_INSTANCES = (0x3c, 0x3d, 0x43, 0x45)
+_INSTANCE_MASK = {**dict.fromkeys(_BOILER_INSTANCES, 0x35),
+                  0x4d: 0x50, 0x5a: 0x5b, 0x98: 0x97}
+
+
+def block_selectors(block: int, product: NativeProduct | None, subnet: int,
+                    availability: Mapping[int, int]) -> tuple[int | None, ...]:
+    """Candidate wire arguments for one device. A live zero mask is not absent."""
+    if block not in BLOCK_SELECTORS:
+        return (None,)
+    if product is not None:
+        if product.model == "033" and block in MULTI_WEEK:
+            return (0, 1, 2, 3)
+        if product.model in ("400", "401", "402"):
+            if block in _BOILER_INSTANCES:
+                return (0,)
+            if block == 0x44:
+                return (0, 129)
+        if product.family == "reset_control":
+            if block == 0x44:
+                return (0,) if product.model == "406" else (0, 1)
+            if block in (0x48, 0x49) and subnet & 7:
+                return ((subnet & 7) - 1,)
+    if block in _INSTANCE_MASK and (mask := availability.get(_INSTANCE_MASK[block])) is not None:
+        return tuple(i for i in range(8) if mask & (1 << i))
+    return (0,)  # Reference probe, not evidence there are no other instances.
 
 
 # Model, family, Tektra numbers, J numbers. Some early revisions share

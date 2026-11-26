@@ -23,7 +23,8 @@ from .exceptions import TekmarError
 from .firmware import install_firmware
 from .gateway import open_gateway
 from .native import NativeAddress, NativeBlockQuery
-from .native_discovery import discover_native
+from .native_discovery import NativeDevice, discover_native
+from .native_snapshot import read_native_devices
 from .raw import CaptureGap, InvalidCapture, PortError, TxStatus
 from .trpc import (
     ResponseMatch,
@@ -47,8 +48,7 @@ if TYPE_CHECKING:
         GatewaySnapshot,
     )
     from .native import NativeFrame
-    from .native_discovery import NativeDevice
-    from .raw import CaptureRecord
+    from .raw import BridgeStream, CaptureRecord, NativeBlockBatch
 
 
 class CliError(Exception):
@@ -120,7 +120,13 @@ def build_parser() -> argparse.ArgumentParser:
         "--duration",
         type=float,
         default=30,
-        help="native dump listening window",
+        help="native discovery window before device reads",
+    )
+    dump.add_argument(
+        "--block-timeout",
+        type=float,
+        default=argparse.SUPPRESS,
+        help="native block response window in seconds (default 20)",
     )
     dump.add_argument(
         "--include-setbacks",
@@ -203,21 +209,25 @@ def build_parser() -> argparse.ArgumentParser:
         parents=[_common_parent(default_timeout=20.0)],
         help="read an addressed native tN4 block from a physical port",
     )
-    block.add_argument("port", type=int, choices=range(5))
-    block.add_argument("subnet", type=_int_value)
-    block.add_argument("node", type=_int_value)
+    device = subparsers.add_parser(
+        "read-device",
+        parents=[_common_parent(default_timeout=20.0)],
+        help="identify one native device and read its candidate blocks",
+    )
+    for sampler in (device, dump):
+        sampler.add_argument(
+            "--block-attempts",
+            type=int,
+            default=argparse.SUPPRESS,
+            help="maximum attempts for missing native block replies (default 2)",
+        )
+    for reader in (block, device):
+        _add_native_target(reader)
     block.add_argument("block", type=_int_value, help="numeric native block ID")
     block.add_argument(
         "--selector",
         type=_int_value,
         help="secondary ID, including zero",
-    )
-    block.add_argument("--source-subnet", type=_int_value, default=0)
-    block.add_argument("--source-node", type=_int_value, default=0)
-    block.add_argument(
-        "--ack",
-        action="store_true",
-        help="link-ACK valid incoming frames on this port",
     )
     for name in (
         "panel",
@@ -257,6 +267,19 @@ def build_parser() -> argparse.ArgumentParser:
                 help="already in unsynchronized ROM ISP",
             )
     return parser
+
+
+def _add_native_target(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("port", type=int, choices=TN4_PORTS)
+    parser.add_argument("subnet", type=_int_value)
+    parser.add_argument("node", type=_int_value)
+    parser.add_argument("--source-subnet", type=_int_value, default=0)
+    parser.add_argument("--source-node", type=_int_value, default=0)
+    parser.add_argument(
+        "--ack",
+        action="store_true",
+        help="link-ACK valid incoming frames on this port",
+    )
 
 
 def _common_parent(*, default_timeout: float = 5.0) -> argparse.ArgumentParser:
@@ -326,7 +349,13 @@ async def run(
     """Run an already-parsed command."""
     if not args.vendor:
         return await _native(args, stdout)
-    if any(getattr(args, key, None) for key in ("passive", "probe_subnet", "ack_port")):
+    if (
+        hasattr(args, "block_timeout")
+        or hasattr(args, "block_attempts")
+        or any(
+            getattr(args, key, None) for key in ("passive", "probe_subnet", "ack_port")
+        )
+    ):
         msg = "native discovery options are unavailable with --vendor"
         raise CliError(msg)
     if args.auto_update or args.command not in {
@@ -388,17 +417,24 @@ async def _native(args: argparse.Namespace, stdout: TextIO) -> int:
         elif args.command == "request":
             async with bridge.normal() as client:
                 await _request(client, args, stdout)
-        elif args.command == "read-block":
-            query = NativeBlockQuery(
-                NativeAddress(args.subnet, args.node),
-                args.block,
-                args.selector,
-            )
+        elif args.command in {"read-block", "read-device"}:
+            address = NativeAddress(args.subnet, args.node)
             source = NativeAddress(args.source_subnet, args.source_node)
             async with bridge.stream(
                 ack_ports=(args.port,) if args.ack else (),
                 diagnostics=False,
             ) as stream:
+                if args.command == "read-device":
+                    await read_native_devices(
+                        stream,
+                        [NativeDevice(args.port, address)],
+                        source=source,
+                        timeout=args.timeout,
+                        attempts=getattr(args, "block_attempts", 2),
+                        on_batch=lambda b: emit(_batch_fields(b)),
+                    )
+                    return 0
+                query = NativeBlockQuery(address, args.block, args.selector)
                 try:
                     async with asyncio.timeout(args.timeout):
                         report = await stream.read_block(
@@ -524,6 +560,69 @@ async def _native_capture(
     if args.command in {"diagnostics", "dump"}:
         for diagnostic in stream.diagnostics.values():
             emit(asdict(diagnostic))
+    if args.command == "dump" and not args.passive and summary and summary.devices:
+        # A discovery deadline can cancel a probe before its TxResult. The
+        # previous stream has drained that send before we reuse its port.
+        async with bridge.stream(ack_ports=args.ack_port) as scan:
+            await _dump_blocks(
+                scan,
+                summary.devices,
+                getattr(args, "block_timeout", 20),
+                getattr(args, "block_attempts", 2),
+                capture,
+                emit,
+            )
+        for diagnostic in scan.diagnostics.values():
+            emit(asdict(diagnostic))
+
+
+async def _dump_blocks(
+    stream: BridgeStream,
+    devices: Sequence[NativeDevice],
+    timeout: float,
+    attempts: int,
+    capture: Callable[[CaptureRecord], None],
+    emit: Callable[[object], None],
+) -> None:
+    async def listen() -> None:
+        while True:
+            capture(await stream.read())
+
+    async def sample() -> None:
+        await read_native_devices(
+            stream,
+            devices,
+            timeout=timeout,
+            attempts=attempts,
+            on_batch=lambda b: emit(_batch_fields(b)),
+        )
+
+    tasks = (asyncio.create_task(listen()), asyncio.create_task(sample()))
+    try:
+        done, _ = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+        for task in done:
+            task.result()
+    finally:
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+
+
+def _batch_fields(batch: NativeBlockBatch) -> dict[str, object]:
+    result = batch.tx_result
+    return {
+        "block_read": {
+            "port": batch.port,
+            "subnet": batch.query.target.subnet,
+            "block": batch.query.block_id,
+            "selector": batch.query.selector,
+            "target_mask": batch.query.target.request_mask(),
+            "tx_status": result.status.name if result is not None else None,
+            "tx_reason": result.reason if result is not None else None,
+            "missing_nodes": batch.missing_nodes,
+            "reports": [_frame_fields(f) for f in batch.reports],
+        },
+    }
 
 
 def _frame_fields(frame: NativeFrame) -> dict[str, object]:
@@ -551,6 +650,7 @@ def _native_device_fields(device: NativeDevice) -> dict[str, object]:
         "family": product.family if product else None,
         "candidate_blocks": product.candidate_blocks if product else (),
         "reported_blocks": sorted(device.reported_blocks),
+        "reported_selectors": sorted(device.reported_selectors),
     }
 
 

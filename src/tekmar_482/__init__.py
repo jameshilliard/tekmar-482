@@ -99,6 +99,7 @@ from .native_discovery import (
     NativeProbe,
     discover_native,
 )
+from .native_snapshot import read_native_devices
 from .packet import (
     TYPE_DISPLAY,
     TYPE_GENERAL,
@@ -116,6 +117,7 @@ from .raw import (
     FailureReason,
     InvalidCapture,
     InvalidReason,
+    NativeBlockBatch,
     NativeTransmitError,
     PortDiagnostic,
     PortError,
@@ -268,6 +270,7 @@ __all__ = [
     "MethodSpec",
     "ModeSettingFields",
     "NativeAddress",
+    "NativeBlockBatch",
     "NativeBlockQuery",
     "NativeDevice",
     "NativeDiscovery",
@@ -367,6 +370,7 @@ __all__ = [
     "method_name",
     "method_spec",
     "open_gateway",
+    "read_native_devices",
     "require_device_support",
     "response_service_for",
     "schedule_setbacks_for_events",

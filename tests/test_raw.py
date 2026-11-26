@@ -10,6 +10,7 @@ from tekmar_482 import (
     NativeBlockQuery,
     NativeFrame,
     NativeMessage,
+    NativeTargets,
     NativeTransmitError,
     Packet,
     PortError,
@@ -33,6 +34,68 @@ class RawTests(unittest.IsolatedAsyncioTestCase):
 
     def deliver(self, *data: int) -> None:
         self.rx.put_nowait(Packet(1, bytes(data)))
+
+    async def test_group_accepts_each_selected_node_once_even_before_tx_result(
+        self,
+    ) -> None:
+        host = NativeAddress(0, 0)
+        query = NativeBlockQuery(NativeTargets(0x24, 0b101), 0x44, 129)
+
+        def report(port: int, node: int, value: bytes) -> None:
+            body = NativeMessage(0x2E7, NativeAddress(0x24, node), b"\x44\0" + value)
+            self.deliver(0, port, 0, 0, 0, 0, *body.to_bytes())
+
+        async with self.stream.receiving(self.rx.get), asyncio.timeout(2):
+            with self.assertRaisesRegex(ValueError, "multiple nodes"):
+                await self.stream.read_block(3, query, source=host)
+            task = asyncio.create_task(
+                self.stream.read_block_group(3, query, source=host),
+            )
+            assert await self.tx.get() == bytes((1, 3)) + query.request(host).to_bytes()
+            report(3, 0, b"\x07\x81\x01\0")
+            report(3, 2, b"\x07\x81\x01\0")
+            report(4, 3, b"\x07\x81\x01\0")
+            report(3, 1, b"\x07\x81\x04\0")
+            report(3, 33, b"\x07\x81\x05\0")
+            report(3, 3, b"\x07\x80\x01\0")
+            report(3, 3, b"\0")
+            report(3, 35, b"\x07\x81\x06\0")
+            self.deliver(2, 3, TxStatus.FAILED, FailureReason.NO_ACK)
+            batch = await task
+            assert batch.tx_result == TxResult(3, TxStatus.FAILED, FailureReason.NO_ACK)
+            assert not batch.missing_nodes
+            assert [(f.node, f.decoded["pump_hours"]) for f in batch.reports] == [
+                (1, 4),
+                (35, 6),
+            ]
+            assert await self.stream.read() == CaptureGap(6)
+            assert self.tx.empty()
+
+    async def test_group_deadline_distinguishes_missing_peer_from_missing_tx(
+        self,
+    ) -> None:
+        host = NativeAddress(0, 0)
+        query = NativeBlockQuery(NativeTargets(8, 3), 0x15)
+        async with self.stream.receiving(self.rx.get), asyncio.timeout(2):
+            for lost_tx in (False, True):
+                task = asyncio.create_task(
+                    self.stream.read_block_group(0, query, source=host, timeout=0.025),
+                )
+                await self.tx.get()
+                if not lost_tx:
+                    self.deliver(2, 0, TxStatus.ACK)
+                msg = NativeMessage(0x2E7, NativeAddress(8, 2), bytes.fromhex("150000"))
+                self.deliver(0, 0, 8, 0, 0, 0, *msg.to_bytes())
+                batch = await task
+                assert batch.tx_result == (
+                    None if lost_tx else TxResult(0, TxStatus.ACK)
+                )
+                assert batch.missing_nodes == (1,)
+                assert batch.reports[0].decoded["support_mask"] == "0x00"
+            with self.assertRaisesRegex(ProtocolError, "send already in progress"):
+                await self.stream.send(0, query.request(host))
+            self.stream.feed(Packet(1, bytes((2, 0, TxStatus.ACK))))
+            self.stream.check_drained()
 
     async def test_block_reports_are_copied_not_consumed_or_taken_from_backlog(
         self,

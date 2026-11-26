@@ -84,6 +84,9 @@ class NativeTargets:
             msg = "a block request must select at least one node"
             raise ValueError(msg)
 
+    def request_mask(self) -> int:
+        return self.mask
+
 
 @dataclass(frozen=True, slots=True)
 class NativeMessage:
@@ -184,13 +187,10 @@ class NativeMessage:
         target: NativeAddress | NativeTargets,
         argument: int | None = None,
     ) -> Self:
-        mask = (
-            target.mask if isinstance(target, NativeTargets) else target.request_mask()
-        )
         payload = (
             _uint(block_id, 16).to_bytes(2, "little")
             + bytes([target.subnet])
-            + mask.to_bytes(4, "little")
+            + target.request_mask().to_bytes(4, "little")
         )
         if argument is not None:
             payload += _uint(argument, 32).to_bytes(4, "little")
@@ -247,7 +247,7 @@ class NativeFrame:
 class NativeBlockQuery:
     """An addressed read with a known selector layout, independent of the host port."""
 
-    target: NativeAddress
+    target: NativeAddress | NativeTargets
     block_id: int
     selector: int | None = None
 
@@ -274,10 +274,12 @@ class NativeBlockQuery:
     def matches(self, message: NativeMessage) -> bool:
         """Match the reporting node and payload; the stream checks the physical port."""
         data = message.payload
+        node = message.source.node & 31
         if (
             message.message_id != _REPORT
             or message.source.subnet != self.target.subnet
-            or message.source.node & 31 != self.target.node & 31
+            or not node
+            or not (self.target.request_mask() & (1 << (node - 1)))
             or len(data) < _BLOCK_HEADER
             or int.from_bytes(data[:2], "little") != self.block_id
         ):
@@ -287,8 +289,12 @@ class NativeBlockQuery:
             return False
         if self.selector is None:
             return True
-        return bool(data[2] & 1) and (
-            data[_BLOCK_HEADER] & BLOCK_SELECTORS[self.block_id][1] == self.selector
+        return (
+            len(data) > _BLOCK_HEADER
+            and bool(data[2] & 1)
+            and (
+                data[_BLOCK_HEADER] & BLOCK_SELECTORS[self.block_id][1] == self.selector
+            )
         )
 
 

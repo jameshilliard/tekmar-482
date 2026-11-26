@@ -429,6 +429,99 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         ):
             assert isinstance(client, Tekmar482Client)
 
+    async def test_native_dump_requests_catalog_blocks_only_when_active(self) -> None:
+        prefix = bytes.fromhex("00030a000000")
+        identity = (
+            bytes.fromhex("6e7161c8 00001f")
+            + (101901).to_bytes(3, "little")
+            + (1145).to_bytes(2, "little")
+        )
+        observed = bytes.fromhex("6e7161c4 770001 13")
+        rx_identity = serialize(Packet(1, prefix + identity))
+        rx_other = serialize(Packet(1, prefix + observed))
+        result = serialize(Packet(1, bytes([2, 3, 0])))
+        mode = management(2, 0, b"\x01"), management(2, 3, b"\x01")
+        stop = management(2, 0, b"\0"), management(2, 3, b"\0")
+        ack = management(9, 0, b"\x08"), management(9, 3, b"\x08")
+        stats = [
+            (management(3, 1, bytes([p])), management(3, 4, bytes([p]) + bytes(8)))
+            for p in range(5)
+        ]
+
+        def request(block: int, mask: int) -> bytes:
+            body = (
+                bytes.fromhex("6d70000b")
+                + bytes([block, 0, 0x16])
+                + mask.to_bytes(4, "little")
+                + bytes(4)
+            )
+            return serialize(Packet(1, bytes([1, 3]) + body))
+
+        async def simulate(*, passive: bool) -> list[dict[str, object]]:
+            async def app(
+                reader: asyncio.StreamReader,
+                writer: asyncio.StreamWriter,
+            ) -> None:
+                if (first := await reader.readexactly(1)) == b"?":
+                    assert await reader.readexactly(5) == b"\r\nJ\r\n"
+                    assert not await reader.read()
+                    return
+                caps = management(1, 1)
+                assert first + await reader.readexactly(len(caps) - 1) == caps
+                writer.write(management(1, 4, bytes([1, 0, 5, 3])))
+                steps = [
+                    (management(7, 1), management(7, 4, bytes(28))),
+                    (management(4, 1), management(4, 4, b"1" * 40)),
+                    mode,
+                    (ack[0], ack[1] + rx_identity + rx_other),
+                ]
+                if not passive:
+                    steps.append((request(0, (1 << 31) - 1), result))
+                steps.extend([stop, *stats])
+                if not passive:
+                    steps.extend(
+                        [
+                            mode,
+                            ack,
+                            (request(0, 64), rx_identity + result),
+                            (request(0x77, 64), result + rx_other),
+                            stop,
+                            *stats,
+                        ],
+                    )
+                for command, response in steps:
+                    assert await reader.readexactly(len(command)) == command
+                    writer.write(response)
+
+            async with listen(app) as endpoint, asyncio.timeout(4):
+                args = build_parser().parse_args(
+                    [
+                        "dump",
+                        "--ack-port",
+                        "3",
+                        "--duration",
+                        "0.10",
+                        "--block-timeout",
+                        "0.2",
+                        "--tcp",
+                        f"{endpoint.address}:{endpoint.port}",
+                        "--json",
+                        *(["--passive"] if passive else []),
+                    ],
+                )
+                out = StringIO()
+                assert await run(args, stdout=out) == 0
+                return [
+                    json.loads(line)["block_read"]
+                    for line in out.getvalue().splitlines()
+                    if "block_read" in line
+                ]
+
+        assert not await simulate(passive=True)
+        reads = await simulate(passive=False)
+        assert [r["block"] for r in reads] == [0, 0x77]
+        assert all(r["missing_nodes"] == [] and r["tx_status"] == "ACK" for r in reads)
+
     async def test_normal_setting_updates_return_device_readback(self) -> None:
         def packet(service: int, method: int, body: bytes) -> bytes:
             return serialize(Packet(6, struct.pack("<BI", service, method) + body))

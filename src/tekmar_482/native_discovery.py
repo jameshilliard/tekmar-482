@@ -6,6 +6,7 @@ import asyncio
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING
 
+from ._native_payloads import BLOCK_SELECTORS
 from ._native_payloads.products import NativeProduct, identify_product
 from .constants import TN4_PORTS
 from .native import NativeAddress, NativeFrame, NativeMessage, NativeTargets
@@ -74,13 +75,16 @@ class NativeDevice:
     address: NativeAddress
     identity: NativeIdentity | None = None
     reported_blocks: frozenset[int] = frozenset()
+    reported_selectors: frozenset[tuple[int, int]] = frozenset()
 
 
 class NativeInventory:
     """Accumulate valid native captures in one connection or discovery window."""
 
-    def __init__(self) -> None:
-        self._nodes: dict[tuple[int, int, int], NativeDevice] = {}
+    def __init__(self, devices: Iterable[NativeDevice] = ()) -> None:
+        self._nodes = {
+            (d.port, d.address.subnet, d.address.node & _NODE_BITS): d for d in devices
+        }
         self._moved_from: dict[tuple[int, int, int], tuple[int, int, int]] = {}
 
     @property
@@ -113,6 +117,7 @@ class NativeInventory:
                 block = int.from_bytes(data[:2], "little")
                 current = device.identity
                 blocks = device.reported_blocks
+                selectors = device.reported_selectors
                 if (
                     block == 0
                     and (number := _number(fields, "product_number")) is not None
@@ -126,11 +131,16 @@ class NativeInventory:
                     merged = identity.merge(current) if current is not None else None
                     if current is not None and merged is None:
                         blocks = frozenset()
+                        selectors = frozenset()
                     current = merged or identity
+                spec = BLOCK_SELECTORS.get(block)
+                if spec and data[2] & 1 and len(data) > _BLOCK_HEADER:
+                    selectors |= {(block, data[_BLOCK_HEADER] & spec[1])}
                 device = replace(
                     device,
                     identity=current,
                     reported_blocks=blocks | {block},
+                    reported_selectors=selectors,
                 )
         self._nodes[key] = device
         return device

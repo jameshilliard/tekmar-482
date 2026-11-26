@@ -52,8 +52,9 @@ async def read_frame() -> None:
 
 `monitor` streams native frames. `discover` sends one read-only block-zero
 request per observed port/subnet to identify all answering nodes, including
-quiet thermostats and plant masters. `dump` also prints the panel state,
-individual frames and receiver summaries. See the firmware's
+quiet thermostats and plant masters. `dump` then reads the cataloged and
+previously observed blocks for those receive paths and prints the panel
+state, native frames and receiver summaries. See the firmware's
 [frame catalog](https://github.com/jameshilliard/tekmar-482-firmware/blob/master/docs/tn4-frames.md)
 and [binary UART protocol](https://github.com/jameshilliard/tekmar-482-firmware/blob/master/docs/tpck-bridge.md).
 
@@ -69,7 +70,7 @@ tekmar-482 discover --tcp 192.0.2.10:3001 --duration 45 --json
 ```
 
 Use `--probe-subnet PORT:SUBNET` to include a known silent subnet, or
-`--passive` to send no identity requests. A solitary peer can need a link
+`--passive` to skip all identity and block requests. A solitary peer can need a link
 ACK to deliver its frames: `--ack-port PORT` is explicit and repeatable.
 By default the gateway does not ACK incoming Raw frames. Use a longer
 window if devices have not yet answered. Scanning does not change setpoints.
@@ -86,6 +87,28 @@ for device in result.devices:
 The scanner owns the capture consumer for the window; `on_record` can
 observe the same traffic. For an ongoing subscription, feed frames from
 your own receive loop to `NativeInventory.observe()` instead.
+
+For a model-aware read of one device, use its physical port, native subnet
+and node from discovery, for example:
+
+```bash
+tekmar-482 read-device 2 0x12 3 --tcp 192.0.2.10:3001 --json
+```
+
+`read_native_devices(stream, devices)` implements both this command and
+the device-read phase of `dump`. It confirms identity before expanding a
+model's block list. Unknown models can still be queried for blocks and
+selectors previously observed on that path. An explicit zero availability
+mask advertises no instances; a missing mask does not. Read batches group
+nodes sharing a subnet, block and selector into one request. Results contain
+the link outcome, matching frames (including raw bytes and field support
+masks), and any nodes that didn't reply. A missing reply means unknown.
+Use `--block-timeout` on `dump` or `--timeout` on `read-device` to
+adjust the per-request deadline (default 20 seconds). Missing peers get
+one read-only retry by default; `--block-attempts 1` disables it. Peers
+that already replied are not queried again in the retry. A missing TX
+result stops that port, since its send slot may still be occupied. `--duration` on
+`dump` bounds discovery only. No settings or counters are written.
 
 Use `bridge.normal()` to run tRPC on the **same** custom-firmware connection:
 
