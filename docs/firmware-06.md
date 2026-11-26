@@ -47,6 +47,11 @@ These are firmware behaviors, not a list of recommended commands.
 - Inventory request zero walks the device table and ends with zero. A nonzero
   address returns exactly one address or FFFF, with no following terminator
   (`0xa82c`). Do not infer a missing device from a timed-out walk.
+- The physical Test button produces FirmwareRevision and ProtocolVersion
+  Reports (`0x342c`). During either unheld stage, a ReportingState Report
+  reflects a change in the sampled DIP position (`0x78dc`), **not** a
+  change to the live flag. Request and Update read back the active flag
+  (`0xa7a0`). A DIP report is not a reason to reconnect or re-enable push.
 - A named slot in a reply to a CURRENT request or update identifies the
   device-wide active period: the indexed handlers and SetbackState read the
   same device byte at offset 2E. An unsolicited named-slot report or an

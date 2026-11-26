@@ -583,7 +583,8 @@ class Tekmar482Controller:
                 )
         if (
             message.method is TrpcMethod.REPORTING_STATE
-            and is_runtime_message(message)
+            and message.service
+            in {TrpcService.RESPONSE_REQUEST, TrpcService.RESPONSE_UPDATE}
             and message.get("state") == 0
         ):
             self._reporting_disabled()

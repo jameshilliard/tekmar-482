@@ -347,6 +347,12 @@ inventory walk, retaining measurements for controls that still exist.
 See the [firmware 06 compatibility notes](docs/firmware-06.md) for the scope
 of the protocol review and the distinction between gateway and device state.
 
+`gateway.reporting_enabled` is the software flag read from the gateway.
+`gateway.reporting_dip_on` is the last physical switch position reported
+during a front-panel Test, or `None` if none was observed. A DIP change does
+not turn push on or off mid-session. The custom firmware returns a numeric
+FirmwareRevision of 0 (unnumbered); `await bridge.revision()` gives its build ID.
+
 In Normal mode, both the custom firmware and vendor firmware 06 support
 `await client.set_datetime(value)`. Supply local wall time in years 2000
 through 2255; seconds and timezone offsets are not transmitted. A successful
@@ -370,7 +376,7 @@ reporting during discovery, seed an initial runtime snapshot, enable reports,
 apply live reports to state, and reconnect if the stream drops. On reconnect
 it repeats discovery, reapplies the configured setback setting (if any), and
 publishes the new inventory and runtime snapshot only after reporting is
-confirmed. If a report or a runtime scan shows reporting unexpectedly disabled,
+confirmed. If a ReportingState readback shows reporting unexpectedly disabled,
 the controller reconnects and reads fresh state, since updates may have been
 missed. There is no periodic full-state poll. With setpoint groups enabled,
 the controller rechecks only groups last seen on, after 60 seconds without a

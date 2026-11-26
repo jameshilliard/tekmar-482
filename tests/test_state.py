@@ -300,7 +300,9 @@ class StateTest(unittest.TestCase):
             ),
         )
 
-        assert state.data.gateway.reporting_enabled is True
+        assert state.data.gateway.reporting_enabled is None
+        assert state.data.gateway.reporting_dip_on is True
+        assert state.data.gateway.runtime.reporting_dip_on is True
         snapshot = state.device_snapshots[1201]
         assert snapshot.values["current_temperature"] == 0x6400
         assert snapshot.values["heat_setpoints"] == {"current": 68}
@@ -310,6 +312,26 @@ class StateTest(unittest.TestCase):
         assert runtime.current_temperature == 0x6400
         assert runtime.heat_setpoints.current == 68
         assert state.data.runtime.device_map[1201] == runtime
+
+    def test_test_mode_versions_update_both_metadata_views(self) -> None:
+        state = _state()
+        for method, fields in [
+            (TrpcMethod.FIRMWARE_REVISION, {"revision": 0}),
+            (TrpcMethod.PROTOCOL_VERSION, {"version": 2}),
+        ]:
+            assert not state.apply_message(
+                TrpcPacket.create(
+                    service=TrpcService.RESPONSE_UPDATE,
+                    method=method,
+                    fields=fields,
+                ),
+            )
+            for service in (TrpcService.REPORT, TrpcService.RESPONSE_REQUEST):
+                changed = state.apply_message(
+                    TrpcPacket.create(service=service, method=method, fields=fields),
+                )
+                assert changed is (service is TrpcService.REPORT)
+        assert state.discovery.gateway == state.data.gateway.info == GatewayInfo(0, 2)
 
     def test_apply_message_ignores_unknown_address(self) -> None:
         state = _state()

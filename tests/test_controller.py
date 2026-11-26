@@ -1709,7 +1709,7 @@ class ControllerTest(unittest.IsolatedAsyncioTestCase):
                     initial = await seen.get()
                     generation = client.session.connection_generation
                     if live:
-                        transport.queue_message(report(method, state=0))
+                        transport.queue_message(response(method, state=0))
                     else:
                         with self.assertRaisesRegex(ProtocolError, "disabled"):
                             await controller.refresh_runtime()
@@ -1723,6 +1723,25 @@ class ControllerTest(unittest.IsolatedAsyncioTestCase):
                     assert restored.gateway.reporting_enabled is True
                     assert client.session.connection_generation != generation
                 transport.assert_complete()
+
+    async def test_reporting_dip_is_not_a_loss_of_push(self) -> None:
+        method = TrpcMethod.REPORTING_STATE
+        transport = TraceReplayTransport([*start_steps(), update_step(method, state=0)])
+        client = Tekmar482Client(transport)
+        controller = Tekmar482Controller(client, reconnect_interval=0)
+        async with controller, asyncio.timeout(2):
+            generation = client.session.connection_generation
+            seen: asyncio.Queue[AvailableInfo] = asyncio.Queue()
+            controller.add_listener(seen.put_nowait)
+            for value in (0, 1):
+                transport.queue_message(report(method, state=value))
+                data = await seen.get()
+                assert data.gateway.reporting_dip_on is bool(value)
+                assert data.gateway.reporting_enabled is True
+                assert controller.require_ready_state().data is data
+            assert controller.last_error is None
+            assert client.session.connection_generation == generation
+        transport.assert_complete()
 
     async def test_rediscover_retains_missing_read_but_not_explicit_na(self) -> None:
         missing = {

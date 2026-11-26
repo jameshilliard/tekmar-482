@@ -590,6 +590,7 @@ async def _dump(
             f"decoded={decoded_gateway['network_error']}\n",
         )
         stdout.write(f"reporting_enabled: {gateway.reporting_enabled}\n")
+        stdout.write(f"reporting_dip_on: {gateway.reporting_dip_on}\n")
         stdout.write(f"setback_enabled: {gateway.setback_enabled}\n")
         stdout.write("setpoint_groups:\n")
         stdout.writelines(
@@ -811,6 +812,7 @@ def gateway_snapshot_to_dict(snapshot: GatewaySnapshot) -> dict[str, Any]:
             ),
         },
         "reporting_enabled": snapshot.reporting_enabled,
+        "reporting_dip_on": snapshot.reporting_dip_on,
         "setback_enabled": snapshot.setback_enabled,
         "setpoint_groups": {
             str(group_id): enabled

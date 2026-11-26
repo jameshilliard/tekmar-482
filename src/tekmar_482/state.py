@@ -37,7 +37,9 @@ RUNTIME_SERVICES = {
     TrpcService.RESPONSE_UPDATE,
 }
 
+GATEWAY_VERSION_METHODS = {TrpcMethod.FIRMWARE_REVISION, TrpcMethod.PROTOCOL_VERSION}
 GATEWAY_METHODS = {
+    *GATEWAY_VERSION_METHODS,
     TrpcMethod.NETWORK_ERROR,
     TrpcMethod.OUTDOOR_TEMP,
     TrpcMethod.REPORTING_STATE,
@@ -187,7 +189,8 @@ class Tekmar482State:
         return (
             discovery
             if devices == discovery.devices
-            else replace(discovery, devices=devices)
+            and self.data.gateway.info == discovery.gateway
+            else replace(discovery, devices=devices, gateway=self.data.gateway.info)
         )
 
     @property
@@ -269,7 +272,10 @@ class Tekmar482State:
         if updated == self.data:
             return MessageApplyResult.UNCHANGED
         self.data = updated
-        if message.method in DEVICE_METADATA_FIELDS:
+        if (
+            message.method in DEVICE_METADATA_FIELDS
+            or message.method in GATEWAY_VERSION_METHODS
+        ):
             self.discovery = self._snapshot_metadata(self.discovery)
         return MessageApplyResult.CHANGED
 
@@ -398,14 +404,33 @@ def _apply_gateway_message(
     method: TrpcMethod,
     message: TrpcPacket,
 ) -> AvailableInfo | None:
+    if method in GATEWAY_VERSION_METHODS:
+        if message.service is TrpcService.RESPONSE_UPDATE:
+            return None
+        if method is TrpcMethod.FIRMWARE_REVISION:
+            revision = message.get("revision")
+            if revision is None:
+                return None
+            info = replace(data.gateway.info, firmware_revision=revision)
+        else:
+            version = message.get("version")
+            if version is None:
+                return None
+            info = replace(data.gateway.info, protocol_version=version)
+        return replace(data, gateway=replace(data.gateway, info=info))
     if method == TrpcMethod.REPORTING_STATE:
         state = message.get("state")
+        if state not in (0, 1):
+            return None
+        if message.service is TrpcService.REPORT:
+            # The Test task samples the physical DIP, not reporting_get_enabled().
+            return replace(
+                data,
+                gateway=replace(data.gateway, reporting_dip_on=bool(state)),
+            )
         return replace(
             data,
-            gateway=replace(
-                data.gateway,
-                reporting_enabled=None if state is None else bool(state),
-            ),
+            gateway=replace(data.gateway, reporting_enabled=bool(state)),
         )
     if method == TrpcMethod.NETWORK_ERROR:
         return replace(

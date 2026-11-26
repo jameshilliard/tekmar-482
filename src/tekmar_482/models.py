@@ -278,6 +278,7 @@ class GatewaySnapshot:
     reporting_enabled: bool | None = None
     setback_enabled: bool | None = None
     setpoint_groups: Mapping[int, bool | None] | None = None
+    reporting_dip_on: bool | None = None
 
     def __post_init__(self) -> None:
         """Freeze mutable constructor inputs."""
@@ -386,6 +387,7 @@ class GatewayRuntime:
     reporting_enabled: bool | None = None
     setback_enabled: bool | None = None
     setpoint_groups: Mapping[int, bool | None] = field(default_factory=dict)
+    reporting_dip_on: bool | None = None
 
     def __post_init__(self) -> None:
         """Freeze mutable constructor inputs."""
@@ -408,6 +410,7 @@ class GatewayRuntime:
             outdoor_temp=snapshot.outdoor_temp,
             network_error=snapshot.network_error,
             reporting_enabled=snapshot.reporting_enabled,
+            reporting_dip_on=snapshot.reporting_dip_on,
             setback_enabled=snapshot.setback_enabled,
             setpoint_groups=dict(snapshot.setpoint_groups or {}),
         )
