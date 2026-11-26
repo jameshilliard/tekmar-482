@@ -18,6 +18,7 @@ if TYPE_CHECKING:
     from .raw import BridgeStream
 
 LINE_COMMANDS = {
+    "network-init": "send one native network-init probe per selected line",
     "select-scene": "select a system scene",
     "set-clock": "announce local civil time",
     "set-group": "enable or disable a setpoint group",
@@ -79,7 +80,7 @@ def add_line_commands(
         elif name == "set-group":
             cmd.add_argument("group", type=int, choices=GROUP_IDS)
             cmd.add_argument("state", choices=("on", "off"))
-        else:
+        elif name == "set-zone-sync":
             cmd.add_argument(
                 "--cycle",
                 type=int,
@@ -101,7 +102,10 @@ def prepare_broadcast(
     ports = tuple(args.ports)
     source = NativeAddress(args.source_subnet, args.source_node)
     details: dict[str, object]
-    if args.command == "select-scene":
+    if args.command == "network-init":
+        send = LineBroadcast.network_init(ports, source=source)
+        details = {}
+    elif args.command == "select-scene":
         scene = NativeScene(args.scene)
         send = LineBroadcast.scene(ports, scene, source=source)
         details = {"scene": scene.value, "duration_minutes": scene.duration_minutes}

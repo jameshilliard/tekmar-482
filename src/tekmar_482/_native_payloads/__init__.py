@@ -14,7 +14,7 @@ from .layouts import (
     FixedLayout,
     SnowmeltBlock as SnowmeltBlock,
 )
-from .line import ACCESS_STATUS, CLOCK_REPORT, GROUP_REPORT, GROUP_UPDATE, ZONE_ADJUSTMENT, ClockReport, GroupReport
+from .line import ACCESS_STATUS, CLOCK_REPORT, GROUP_REPORT, GROUP_UPDATE, NETWORK_INIT_REQUEST, ZONE_ADJUSTMENT, ClockReport, GroupReport
 from .plant import MIXING_PRESENT, MIXING_REPORT, MIXING_UPDATE, PLANT_OUTPUT, MixingPresent, MixingReport, MixingUpdate, PlantOutput
 from .products import identify_product
 from .scenes import SCENE_REPORT, SCENE_RESPONSE_FIELDS, SceneReport, SceneResponse
@@ -403,7 +403,7 @@ DECODERS: dict[int, tuple[str, Callable[[Reader], Fields]]] = {
     RELAY_HEARTBEAT: ("RelayStatusHeartbeat", lambda r: RelayHeartbeat(r.byte()).fields()),
     MASTER_STATUS: ("MasterStatus", lambda r: LoopStatus.read(r, master=True).fields()),
     0x3d7: ("NetworkError", network_error),
-    0x3df: ("NetworkInitRequest", lambda _: {}),
+    NETWORK_INIT_REQUEST: ("NetworkInitRequest", lambda _: {}),
     0x3f7: ("MasterQuery", lambda _: {}),
 }
 

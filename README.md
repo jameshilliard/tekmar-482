@@ -126,8 +126,10 @@ before using other vendor client methods on custom firmware.
 
 Custom Normal mode implements all 26 input method IDs in stock J1196J
 and acknowledges valid incoming tN4 frames, including on a single-peer
-line. Raw receive ACK remains opt-in. The firmware does not reproduce
-all stock discovery, retry or cache timing; see the
+line. It sends a startup probe on quiet ports and queries for a master
+on link-up. It does not continuously scan. Raw sessions initiate neither
+probe, and Raw receive ACK remains opt-in. Retries and setting reads
+still differ from stock; see the
 [bus compatibility notes](https://github.com/jameshilliard/tekmar-482-firmware/blob/master/docs/normal-mode.md#bus-compatibility).
 
 The CLI `request` command uses Normal mode on custom firmware by default.
@@ -599,6 +601,7 @@ These commands preview the exact native frame offline. Sending requires
 `--confirm`, a transport and an explicit list of physical ports:
 
 ```bash
+tekmar-482 network-init --ports 2 --json
 tekmar-482 set-clock 2030-07-15T00:30 --dst --ports 0 2 --json
 tekmar-482 set-group 4 on --ports 1 --json
 tekmar-482 set-zone-sync --cycle 0 --purge on --target outdoor-reset --ports 2 --json
@@ -609,6 +612,11 @@ provide the equivalent Python API. Inspect `announcement.message.to_bytes()`
 or call `await announcement.send(stream)`. Each selected port has its own
 link outcome. A timeout never causes an automatic retry; a link ACK does
 not mean every controller applied the announcement.
+
+`LineBroadcast.network_init((2,))` builds the stock 482's empty class-1
+`3DF` probe. Raw mode sends it only on request. There is no defined
+application reply: a link ACK does not identify a master or a thermostat.
+Use `read-status master` to request MasterPresent instead.
 
 To look up a 161/162's remote-enable assignment, use
 `set-device-group PORT SUBNET NODE on --tcp HOST:PORT`. The default only

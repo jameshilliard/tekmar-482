@@ -117,6 +117,16 @@ class GroupReadTests(unittest.IsolatedAsyncioTestCase):
                     Packet(1, bytes([0, 3, 0, 0, 0, 0]) + reply.to_bytes()),
                 )
 
+    async def test_network_init_completes_from_link_result_without_an_inventory(
+        self,
+    ) -> None:
+        probe = LineBroadcast.network_init((3,), source=_PEER)
+        (result,) = await probe.send(self.stream)
+        assert result.port == 3 and result.link_acknowledged
+        assert [frame.to_bytes() for frame in self.messages] == [
+            bytes.fromhex("7df23180"),
+        ]
+
     async def test_device_group_reads_fresh_assignment_then_sends_to_group_only(
         self,
     ) -> None:
@@ -180,6 +190,7 @@ class GroupReadTests(unittest.IsolatedAsyncioTestCase):
     ) -> None:
         parser = build_parser()
         for args, wire in (
+            (["network-init"], "7df00000"),
             (["set-clock", "2007-01-08T00:30", "--dst"], "31f000051ebf100607"),
             (["set-group", "4", "off"], "21f000020400"),
             (

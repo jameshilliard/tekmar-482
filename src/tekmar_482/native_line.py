@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import TYPE_CHECKING, Self
 
-from ._native_payloads.line import SetpointAssignment
+from ._native_payloads.line import NETWORK_INIT_REQUEST, SetpointAssignment
 from ._native_payloads.products import product_revision
 from .constants import TN4_PORTS
 from .native import NativeAddress, NativeBlockQuery, NativeMessage
@@ -56,6 +56,16 @@ class LineBroadcast:
         ):
             msg = "select one or more distinct physical ports (0..4)"
             raise ValueError(msg)
+
+    @classmethod
+    def network_init(
+        cls,
+        ports: tuple[int, ...],
+        *,
+        source: NativeAddress = _HOST,
+    ) -> Self:
+        """Send the stock 482's class-1 empty probe; no application reply is defined."""
+        return cls(ports, NativeMessage(NETWORK_INIT_REQUEST, source, b"", priority=1))
 
     @classmethod
     def scene(
