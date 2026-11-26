@@ -11,7 +11,87 @@ MASTER_STATUS = 0x3cf
 PLANT_LOOP_STATUS = 0x3ce
 DHW_STATUS = 0x23f
 TANK_STATUS = 0x173
+BOILER_MAXIMUM = 0x337
+GENERAL_DEMAND = 0x363
+STAGE_DEMAND = 0x367
+WATER_CYCLE = 0x37f
+RELAY_HEARTBEAT = 0x3c7
 SETUP_SLOTS = {0x33: range(1, 5), 0x34: range(5, 8)}
+
+
+def subnet_fields(value: int) -> Fields:
+    return {"water_subnet": value, "water_bus": value & 7, "water_control": value >> 3}
+
+
+@dataclass(frozen=True, slots=True)
+class StageDemand:
+    subnet: int
+    flags: int
+    output_flags: int
+    target_raw: int | None
+
+    @classmethod
+    def read(cls, r: Reader) -> "StageDemand":
+        subnet, flags, output = r.take(3)
+        return cls(subnet, flags, output, r.word() if output & 0x80 else None)
+
+    @property
+    def stage(self) -> int:
+        return self.flags & 1
+
+    @property
+    def output_on(self) -> bool:
+        return bool(self.output_flags & 0x80)
+
+    def fields(self) -> Fields:
+        b, p = self.flags, self.output_flags
+        result = subnet_fields(self.subnet)
+        result.update(stage=self.stage, override_status=b >> 1 & 3, first_report=b >> 3 & 1,
+                      setpoint_control=b >> 4 & 1, dhw_control=b >> 5 & 1, priority_level=b >> 6,
+                      pump_delay=p & 63, pump_not_required=p >> 6 & 1, output_on=int(self.output_on))
+        return result | temp("target_temp", self.target_raw) if self.target_raw is not None else result
+
+
+@dataclass(frozen=True, slots=True)
+class GeneralDemand:
+    subnet: int
+    flags: int
+
+    @classmethod
+    def read(cls, r: Reader) -> "GeneralDemand":
+        return cls(*r.take(2))
+
+    def fields(self) -> Fields:
+        return subnet_fields(self.subnet) | {"cooling": self.flags >> 6 & 1,
+                "demand": self.flags >> 7, "reserved": self.flags & 63}
+
+
+@dataclass(frozen=True, slots=True)
+class BoilerMaximum:
+    raw: int
+
+    @property
+    def percent(self) -> int | None:
+        return self.raw if self.raw <= 100 else None
+
+    def fields(self) -> Fields:
+        return {"max_value": self.raw}
+
+
+@dataclass(frozen=True, slots=True)
+class WaterCycle:
+    flags: int
+
+    def fields(self) -> Fields:
+        return {"cycle_length": self.flags & 127, "hold_override": self.flags >> 7}
+
+
+@dataclass(frozen=True, slots=True)
+class RelayHeartbeat:
+    subnet: int
+
+    def fields(self) -> Fields:
+        return subnet_fields(self.subnet)
 
 
 class LoopKind(str, Enum):

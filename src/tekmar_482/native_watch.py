@@ -14,6 +14,7 @@ from ._native_payloads.layouts import MULTI_WEEK
 from ._native_payloads.schedules import SCHEDULE_STATUS, SETUP_BLOCK
 from ._snow_watch import SnowRead, SnowWatch
 from .native import NativeAddress, NativeBlockQuery, NativeFrame
+from .native_plant_registers import PLANT_REGISTERS
 from .native_state import BLOCK_UPDATE, TAKING_ADDRESS, NativePath, NativeState
 from .native_targets import ADJUSTMENT_BLOCKS
 from .raw import CaptureGap
@@ -105,6 +106,7 @@ class _Watch:
         include_snow: bool = False,
         schedules: bool = False,
         thermostat_targets: bool = False,
+        plant_settings: bool = False,
         on_native: Callable[[NativePath, NativeState], None] | None = None,
     ) -> None:
         self.state = NativeState(paths)
@@ -120,8 +122,9 @@ class _Watch:
                 self._queue,
                 schedules=schedules,
                 targets=thermostat_targets,
+                plants=plant_settings,
             )
-            if (schedules or thermostat_targets) and active
+            if (schedules or thermostat_targets or plant_settings) and active
             else None
         )
         self.on_native = on_native
@@ -141,6 +144,7 @@ class _Watch:
                 and (
                     block[0] in (SETUP_BLOCK, MULTI_WEEK.start)
                     or block[0] in ADJUSTMENT_BLOCKS
+                    or block[0] in PLANT_REGISTERS
                 )
                 and self.state.block_revision(path, block) > 0
             )
@@ -202,13 +206,13 @@ class _Watch:
             self.on_native(path, self.state)
 
     def observe(self, record: CaptureRecord) -> None:
-        if (
-            isinstance(record, NativeFrame)
-            and self.configuration is not None
-            and not self.configuration.accept(record)
-        ):
+        changed = (
+            self.configuration.reader.observe(record)
+            if self.configuration is not None
+            else self.state.observe(record)
+        )
+        if changed is None:
             return
-        changed = self.state.observe(record)
         if isinstance(record, CaptureGap) or (
             isinstance(record, NativeFrame) and record.message_id == TAKING_ADDRESS
         ):
@@ -414,6 +418,7 @@ async def watch_native(
     timeout: float = 20,
     schedules: bool = True,
     thermostat_targets: bool = True,
+    plant_settings: bool = True,
     on_change: Callable[[NativePath, NativeState], None] | None = None,
     on_record: Callable[[CaptureRecord], None] | None = None,
 ) -> NativeWatchResult:
@@ -430,6 +435,7 @@ async def watch_native(
         include_snow=True,
         schedules=schedules,
         thermostat_targets=thermostat_targets,
+        plant_settings=plant_settings,
         on_native=on_change,
     )
     await _run_watch(

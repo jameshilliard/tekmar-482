@@ -39,6 +39,7 @@ from .cli_schedule import (
 from .cli_status import (
     add_status_commands,
     climate_fields,
+    plant_register_fields,
     read_status_from_args,
     sensor_fields,
     watch_from_args,
@@ -727,6 +728,7 @@ async def _native_status(
             args.ports,
             duration=args.duration,
             timeout=args.timeout,
+            plant_settings=not args.no_plant_settings,
             source=None
             if args.passive
             else NativeAddress(args.source_subnet, args.source_node),
@@ -734,6 +736,10 @@ async def _native_status(
     emit(
         {
             "water_sources": [water_fields(s) for s in water.sources],
+            "plant_configurations": [
+                {**asdict(path), **plant_register_fields(settings)}
+                for path, settings in water.plant_configurations
+            ],
             "master_queries": [
                 _status_fields(q)["status_read"] for q in water.master_queries
             ],
@@ -784,6 +790,8 @@ def _emit_derived(snapshot: NativeSnapshot, emit: Callable[[object], None]) -> N
     for device in snapshot.thermostat_sensors:
         emit({"thermostat_sensors": sensor_fields(device)})
     state = snapshot.observed_state()
+    for path, plant in state.plant_configurations:
+        emit({"plant_registers": {**asdict(path), **plant_register_fields(plant)}})
     for climate in state.thermostats:
         emit({"thermostat_climate": climate_fields(climate)})
     for snow in state.snowmelt_devices:
@@ -1045,6 +1053,8 @@ def _emit_capture_summary(
         emit(asdict(diagnostic))
     if sources := observed.water_sources:
         emit({"water_sources": [water_fields(s) for s in sources]})
+    for path, plant in observed.plant_configurations:
+        emit({"plant_registers": {**asdict(path), **plant_register_fields(plant)}})
     for thermostat in observed.thermostats:
         emit({"thermostat_climate": climate_fields(thermostat)})
     for snow in observed.snowmelt_devices:

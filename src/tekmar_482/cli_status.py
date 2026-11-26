@@ -18,13 +18,14 @@ if TYPE_CHECKING:
     import argparse
     from collections.abc import Callable
 
-    from ._native_payloads.water import DhwStatus, LoopStatus, TankStatus
+    from .native_plant import PlantEquipment, WaterSample, WaterValue
+    from .native_plant_registers import PlantRegisters
     from .native_sensors import SensorObservation
     from .native_state import NativeClimate
     from .native_status import NativeStatusBatch
     from .native_targets import ThermostatAdjustments
     from .native_watch import ClimateChange
-    from .native_water import WaterSample, WaterSource
+    from .native_water import WaterSource
     from .raw import BridgeStream
 
 
@@ -72,7 +73,7 @@ def sensor_fields(device: SensorObservation) -> dict[str, object]:
     }
 
 
-def _sample_fields[T: (LoopStatus, DhwStatus, TankStatus)](
+def _sample_fields[T: WaterValue](
     sample: WaterSample[T] | None,
 ) -> dict[str, object] | None:
     if sample is None:
@@ -86,6 +87,46 @@ def _sample_fields[T: (LoopStatus, DhwStatus, TankStatus)](
     return result
 
 
+def _equipment_fields(equipment: PlantEquipment) -> dict[str, object]:
+    return {
+        "outputs": [_sample_fields(s) for s in equipment.outputs],
+        "mixing_present": _sample_fields(equipment.mixing_present),
+        "mixing_report": _sample_fields(equipment.mixing_report),
+        "stage_demands": [_sample_fields(s) for s in equipment.stage_demands],
+        "general_demands": [_sample_fields(s) for s in equipment.general_demands],
+        "relay_heartbeats": [_sample_fields(s) for s in equipment.relay_heartbeats],
+        "boiler_maximum": _sample_fields(equipment.boiler_maximum),
+        "water_cycle": _sample_fields(equipment.cycle),
+    }
+
+
+def plant_register_fields(config: PlantRegisters) -> dict[str, object]:
+    return {
+        "banks": [
+            {**asdict(b), "available_indices": b.available_indices}
+            for b in config.banks
+        ],
+        "runtimes": [
+            {
+                "register": t.register.name.lower(),
+                "selector": t.selector,
+                "hours": t.hours,
+            }
+            for t in config.runtimes
+        ],
+        "reports": [
+            {
+                "block": r.block,
+                "selector": r.selector,
+                "timestamp_ms": r.frame.timestamp_ms,
+                "fields": r.frame.decoded,
+            }
+            for r in config.reports
+        ],
+        "missing_blocks": [{"block": b, "selector": s} for b, s in config.missing],
+    }
+
+
 def water_fields(source: WaterSource) -> dict[str, object]:
     assignment = source.assignment
     identity = source.identity
@@ -96,6 +137,7 @@ def water_fields(source: WaterSource) -> dict[str, object]:
         "identity": asdict(identity) if identity is not None else None,
         "model": identity.product.model if identity and identity.product else None,
         "topology": asdict(source.topology),
+        "pending_setup": sorted(source.pending_setup),
         "assignment": {
             "from": "setup" if assignment.heat_source is not None else "master_present",
             "slot": assignment.slot,
@@ -109,6 +151,7 @@ def water_fields(source: WaterSource) -> dict[str, object]:
         "plant_loop_status": _sample_fields(source.plant),
         "dhw_status": _sample_fields(source.dhw),
         "tank_statuses": [_sample_fields(s) for s in source.tanks],
+        "equipment": _equipment_fields(source.equipment),
     }
 
 
@@ -240,6 +283,11 @@ def _add_watch(
     )
     if name == "watch-native":
         watch.add_argument(
+            "--no-plant-settings",
+            action="store_true",
+            help="skip addressed plant setup and runtime reads",
+        )
+        watch.add_argument(
             "--no-thermostat-targets",
             action="store_true",
             help="skip additional thermostat adjustment reads",
@@ -306,6 +354,11 @@ def add_status_commands(
         help="capture window in seconds",
     )
     water.add_argument("--passive", action="store_true", help="do not send MasterQuery")
+    water.add_argument(
+        "--no-plant-settings",
+        action="store_true",
+        help="only request master topology and loop assignments",
+    )
     water.add_argument("--source-subnet", type=number, default=0)
     water.add_argument("--source-node", type=number, default=0)
     cmd = subparsers.add_parser(

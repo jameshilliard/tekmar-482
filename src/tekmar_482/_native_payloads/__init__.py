@@ -15,16 +15,17 @@ from .layouts import (
     SnowmeltBlock as SnowmeltBlock,
 )
 from .line import ACCESS_STATUS, CLOCK_REPORT, GROUP_REPORT, GROUP_UPDATE, ZONE_ADJUSTMENT, ClockReport, GroupReport
+from .plant import MIXING_PRESENT, MIXING_REPORT, MIXING_UPDATE, PLANT_OUTPUT, MixingPresent, MixingReport, MixingUpdate, PlantOutput
 from .products import identify_product
 from .scenes import SCENE_REPORT, SCENE_RESPONSE_FIELDS, SceneReport, SceneResponse
 from .schedules import DAY_NAMES, SCHEDULE_STATUS, SINGLE_WEEK, DailyEvents, ScheduleBinding, ScheduleCycle, ScheduleEvent, ScheduleStatus
 from .snowmelt import SNOW_REPORT, SNOW_REQUEST, SnowmeltApplication, SnowmeltReport
 from .thermostat import FAN_STATUS, HUMIDITY_STATUS, SLAB_STATUS, FanDuctStatus, HumidityStatus, SlabStatus
-from .water import DHW_STATUS, MASTER_PRESENT, MASTER_STATUS, PLANT_LOOP_STATUS, TANK_STATUS, DhwStatus, HeatSource, LoopStatus, TankStatus
-
-
-def subnet(value: int) -> Fields:
-    return {"water_subnet": value, "water_bus": value & 7, "water_control": value >> 3}
+from .water import (
+    BOILER_MAXIMUM, DHW_STATUS, GENERAL_DEMAND, MASTER_PRESENT, MASTER_STATUS, PLANT_LOOP_STATUS,
+    RELAY_HEARTBEAT, STAGE_DEMAND, TANK_STATUS, WATER_CYCLE, BoilerMaximum, DhwStatus, GeneralDemand,
+    HeatSource, LoopStatus, RelayHeartbeat, StageDemand, TankStatus, WaterCycle,
+)
 
 
 def io_change(r: Reader) -> Fields:
@@ -45,74 +46,6 @@ def setpoint(r: Reader) -> Fields:
     return fields | {"aux_relay_status": aux & 3, "requested_enable_status": (aux >> 2) & 3,
                      "actual_enable_status": (aux >> 4) & 3, "reserved": aux >> 6,
                      "status_excuse1": excuse1, "status_excuse2": excuse2}
-
-
-PLANT_TYPES = (
-    "heat_enable", "cool_enable", "modulating_heat", "modulating_cool",
-    "staged_boiler", "staged_chiller", "modulating_boiler", "modulating_chiller",
-    "air_to_air_heat_pump", "water_to_air_heat_pump", "water_to_water_heat_pump",
-    "air_to_water_heat_pump", "modulating_air_to_air_heat_pump",
-    "modulating_water_to_air_heat_pump", "modulating_water_to_water_heat_pump",
-    "modulating_air_to_water_heat_pump", "staged_electric", "on_off_injection_pump",
-    "variable_speed_pump",
-)
-
-
-def modulation(r: Reader) -> Fields:
-    return {"current_modulation_level": r.byte(), "minimum_modulation_level": r.byte(),
-            "maximum_modulation_level": r.byte()}
-
-
-def heat_pump(r: Reader, kind: int) -> Fields:
-    state = r.byte()
-    fields: Fields = {"state": state & 15, "ob_config": state >> 4 & 1, "cooling": state >> 5 & 1}
-    if kind < 12:
-        fields.update(number_stages_on=r.byte(), number_stages_available=r.byte())
-    else:
-        fields.update(modulation(r))
-    if kind in (10, 11, 14, 15):
-        fields["pump_status"] = r.byte() & 3
-    if kind in (9, 10, 11, 14, 15):
-        if kind in (14, 15) and len(r.remaining) > 4:
-            # The declarative layout packs two words; the indexed reader skips
-            # an extra byte. An extension is indistinguishable from that byte.
-            fields["temperature_tail_hex"] = r.take(len(r.remaining)).hex()
-        else:
-            fields.update(input_temp_raw=r.word(), outlet_temp_raw=r.word())
-    return fields
-
-
-def plant(r: Reader) -> Fields:
-    device, kind = r.take(2)
-    fields: Fields = {"device_total": device & 15, "device_id": device >> 4, "device_type": kind}
-    if kind >= len(PLANT_TYPES):
-        return fields
-    fields["plant"] = PLANT_TYPES[kind]
-    if kind in (0, 1):
-        fields["heat_enabled" if kind == 0 else "cool_enabled"] = r.byte()
-    elif kind in (2, 3):
-        fields.update(signal_type=r.byte(), output_level=r.word())
-    elif kind in (4, 5, 6):
-        b = r.byte()
-        fields.update(state=b & 15, reserved=b >> 4 & 3, pump_status=b >> 6)
-        if kind == 6:
-            fields.update(modulation(r))
-        else:
-            stages = r.byte()
-            fields.update(stages_available_mask=stages & 15, stages_operating_mask=stages >> 4)
-        fields.update(input_temp_raw=r.byte(), outlet_temp_raw=r.byte())
-        if kind != 5:
-            output = r.byte()
-            fields.update(output=output & 31, return_protection=output >> 5)
-    elif 8 <= kind <= 15:
-        fields.update(heat_pump(r, kind))
-    elif kind >= 16:
-        fields["state"] = r.byte()
-        if kind == 16:
-            fields.update(number_stages_on=r.byte(), number_stages_available=r.byte())
-        fields["sensor_temp_raw"] = r.word()
-    # No fields are defined for subtype 7. decode_payload retains its tail.
-    return fields
 
 
 def outdoor(r: Reader) -> Fields:
@@ -367,18 +300,6 @@ def block_update(r: Reader) -> Fields:
     return fields | block_metadata(block)
 
 
-def stage(r: Reader) -> Fields:
-    fields = subnet(r.byte())
-    b, p = r.take(2)
-    fields.update(stage=b & 1, override_status=(b >> 1) & 3, first_report=(b >> 3) & 1,
-                  setpoint_control=(b >> 4) & 1, dhw_control=(b >> 5) & 1,
-                  priority_level=b >> 6, pump_delay=p & 63, pump_not_required=(p >> 6) & 1,
-                  output_on=p >> 7)
-    if p & 0x80:
-        fields.update(temp("target_temp", r.word()))
-    return fields
-
-
 def network_error(r: Reader) -> Fields:
     code, value = r.take(2)
     return {"code": code, "instance": value & 63, "priority": value >> 6}
@@ -406,22 +327,6 @@ def io_discovery(r: Reader) -> Fields:
     fields = octets("subnet_id", "node_id", "channel_id", "channel_count")(r)
     # Preserve embedded NULs and non-ASCII labels exactly.
     return fields | {"label_hex": r.take(6).hex(), "type_id": r.byte(), "io_value": r.word()}
-
-
-def mix_report(r: Reader) -> Fields:
-    mode, pump, actuator, high, target, supply, ret = r.take(7)
-    return {"output_mode": mode & 3, "cooling_logic": mode >> 2 & 1, "external_demand": mode >> 4 & 1,
-            "adjustment_latched": mode >> 5 & 1, "output_limited": mode >> 6 & 1, "fault": mode >> 7,
-            "pump_output": pump, "actuator_percent": actuator & 63, "decreasing": actuator >> 6 & 1,
-            "increasing": actuator >> 7, "target_raw": (high & 3) << 8 | target,
-            "supply_raw": (high >> 2 & 3) << 8 | supply, "return_raw": (high >> 4 & 3) << 8 | ret,
-            "return_sensor_fault": high >> 6 & 1, "supply_sensor_fault": high >> 7}
-
-
-def mix_update(r: Reader) -> Fields:
-    b, target, pump = r.take(3)
-    return {"output_mode": b & 3, "cooling_logic": b >> 2 & 1, "clear_error": b >> 3 & 1,
-            "target_raw": (b >> 6) << 8 | target, "target_pump_output": pump}
 
 
 def bits(value: int, *fields: tuple[str, int, int]) -> Fields:
@@ -459,16 +364,15 @@ DECODERS: dict[int, tuple[str, Callable[[Reader], Fields]]] = {
     0x322: ("RHQuery", lambda r: {"target_subnet": r.byte(), "node_selector": int.from_bytes(r.take(4), "little")}),
     HUMIDITY_STATUS: ("RHReport", lambda r: HumidityStatus.read(r).fields()),
     0x327: ("OutdoorTemperatureRequest", octets()),
-    0x347: ("MixingModulePresent", lambda r: bits(r.byte(), ("actuator_type", 0, 15),
-        ("adjustable_speed", 6, 1), ("system_pump_controllable", 7, 1)) | {"motor_speed": r.byte()}),
-    0x34f: ("MixingModuleReport", mix_report),
-    0x357: ("MixingModuleUpdate", mix_update),
+    MIXING_PRESENT: ("MixingModulePresent", lambda r: MixingPresent.read(r).fields()),
+    MIXING_REPORT: ("MixingModuleReport", lambda r: MixingReport.read(r).fields()),
+    MIXING_UPDATE: ("MixingModuleUpdate", lambda r: MixingUpdate.read(r).fields()),
     0x35f: ("StageHeatDemandRequest", target_selection),
-    0x363: ("GeneralDemand", lambda r: subnet(r.byte()) | bits(r.byte(), ("cooling", 6, 1), ("demand", 7, 1))),
+    GENERAL_DEMAND: ("GeneralDemand", lambda r: GeneralDemand.read(r).fields()),
     0x36a: ("AirGroupMasterConfig", lambda r: bits(r.byte(), ("group", 0, 31), ("no_response_required", 6, 1),
         ("master", 7, 1)) | bits(r.byte(), ("previous_group", 0, 31), ("previous_master", 7, 1))),
     AIR_MASTER: ("AirGroupMasterStatus", lambda r: AirStatus.read(r, master=True).fields()),
-    0x37f: ("WaterCycleStart", lambda r: bits(r.byte(), ("cycle_length", 0, 127), ("hold_override", 7, 1))),
+    WATER_CYCLE: ("WaterCycleStart", lambda r: WaterCycle(r.byte()).fields()),
     0x387: ("NetworkTestTime", lambda r: {"additional_time": r.word()}),
     0x38f: ("NetworkTestMode", lambda r: {"test_mode": r.byte(), "expected_duration": r.word()}),
     0x397: ("EndPurge", target_selection),
@@ -486,17 +390,17 @@ DECODERS: dict[int, tuple[str, Callable[[Reader], Fields]]] = {
     0x1f2: ("IOChangeReport", io_change),
     0x22f: ("SetpointStatus", setpoint),
     DHW_STATUS: ("DHWStatus", lambda r: DhwStatus.read(r).fields()),
-    0x24f: ("PlantOutputStatus", plant),
+    PLANT_OUTPUT: ("PlantOutputStatus", lambda r: PlantOutput.read(r).fields()),
     0x2d7: ("BlockRequest", block_request),
     0x2df: ("BlockUpdate", block_update),
     0x2e7: ("BlockReport", block_report),
     CLOCK_REPORT: ("RealTimeClockReport", clock_report),
     0x32f: ("OutdoorTemperatureReport", outdoor),
-    0x337: ("MaximumBoilerPercent", lambda r: {"max_value": r.byte()}),
+    BOILER_MAXIMUM: ("MaximumBoilerPercent", lambda r: BoilerMaximum(r.byte()).fields()),
     0x33f: ("CycleLengthRequest", lambda r: {"air_group_id": r.byte(), "requested_length": r.byte()}),
-    0x367: ("StageHeatDemand", stage),
+    STAGE_DEMAND: ("StageHeatDemand", lambda r: StageDemand.read(r).fields()),
     AIR_MEMBER: ("AirGroupMemberStatus", lambda r: AirStatus.read(r, master=False).fields()),
-    0x3c7: ("RelayStatusHeartbeat", lambda r: subnet(r.byte())),
+    RELAY_HEARTBEAT: ("RelayStatusHeartbeat", lambda r: RelayHeartbeat(r.byte()).fields()),
     MASTER_STATUS: ("MasterStatus", lambda r: LoopStatus.read(r, master=True).fields()),
     0x3d7: ("NetworkError", network_error),
     0x3df: ("NetworkInitRequest", lambda _: {}),

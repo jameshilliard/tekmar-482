@@ -15,6 +15,21 @@ from ._native_payloads.line import (
     ZoneSyncAdjustment,
     ZoneTargetMode,
 )
+from ._native_payloads.plant import (
+    BoilerChillerOutput,
+    HeatPumpOutput,
+    MixingPresent,
+    MixingReport,
+    MixingUpdate,
+    ModulatingSignal,
+    Modulation,
+    PlantEnable,
+    PlantKind,
+    PlantOutput,
+    PumpElectricOutput,
+    StageBits,
+    StageCounts,
+)
 from ._native_payloads.products import NativeProduct
 from ._native_payloads.queries import (
     NativeStatusQuery,
@@ -57,14 +72,19 @@ from ._native_payloads.thermostat import (
     ThermostatTarget,
 )
 from ._native_payloads.water import (
+    BoilerMaximum,
     DhwStatus,
+    GeneralDemand,
     HeatSource,
     LoopAssignment,
     LoopKind,
     LoopSetupSlot,
     LoopStatus,
     LoopTopology,
+    RelayHeartbeat,
+    StageDemand,
     TankStatus,
+    WaterCycle,
 )
 from ._native_payloads.writes import NativeField, WritableBlock
 from ._wire import GatewayEndpoint
@@ -170,6 +190,15 @@ from .native_line import (
     DeviceGroupBinding,
     LineBroadcast,
 )
+from .native_plant import PlantEquipment, WaterSample
+from .native_plant_registers import (
+    EquipmentAvailability,
+    EquipmentBank,
+    EquipmentRuntime,
+    PlantRegisterReport,
+    PlantRegisters,
+    RuntimeRegister,
+)
 from .native_scene import (
     ScenePortResult,
     SceneSelection,
@@ -222,7 +251,7 @@ from .native_watch import (
     watch_climate,
     watch_native,
 )
-from .native_water import WaterMonitor, WaterRead, WaterSample, WaterSource, read_water
+from .native_water import WaterMonitor, WaterRead, WaterSource, read_water
 from .native_write import NativeWriteResult, NativeWriteStatus
 from .packet import (
     TYPE_DISPLAY,
@@ -357,6 +386,8 @@ __all__ = [
     "AirStatus",
     "AvailableInfo",
     "AvailableRuntime",
+    "BoilerChillerOutput",
+    "BoilerMaximum",
     "BridgeCapabilities",
     "BridgeClient",
     "BridgeFeature",
@@ -391,6 +422,9 @@ __all__ = [
     "DiscoveredDevice",
     "DiscoveryResult",
     "EnableFields",
+    "EquipmentAvailability",
+    "EquipmentBank",
+    "EquipmentRuntime",
     "FailureReason",
     "FanDuctStatus",
     "FanSetup",
@@ -400,7 +434,9 @@ __all__ = [
     "GatewayInfo",
     "GatewayRuntime",
     "GatewaySnapshot",
+    "GeneralDemand",
     "GroupReport",
+    "HeatPumpOutput",
     "HeatSource",
     "HumiditySetup",
     "HumidityStatus",
@@ -415,7 +451,12 @@ __all__ = [
     "LoopTopology",
     "MessageApplyResult",
     "MethodSpec",
+    "MixingPresent",
+    "MixingReport",
+    "MixingUpdate",
     "ModeSettingFields",
+    "ModulatingSignal",
+    "Modulation",
     "NativeAddress",
     "NativeBlockBatch",
     "NativeBlockQuery",
@@ -449,18 +490,27 @@ __all__ = [
     "Packet",
     "PacketTransport",
     "PanelState",
+    "PlantEnable",
+    "PlantEquipment",
+    "PlantKind",
+    "PlantOutput",
+    "PlantRegisterReport",
+    "PlantRegisters",
     "PortDiagnostic",
     "PortError",
     "PortErrorReason",
     "ProtocolError",
+    "PumpElectricOutput",
     "RawTcpTpckTransport",
     "RejectReason",
+    "RelayHeartbeat",
     "ReportSubscription",
     "ReportingStateFields",
     "ResponseMatch",
     "RoomLimit",
     "RoomLimitTable",
     "RoomTemperatures",
+    "RuntimeRegister",
     "ScenePortResult",
     "SceneReport",
     "SceneResponse",
@@ -512,6 +562,9 @@ __all__ = [
     "SnowmeltRuntime",
     "SnowmeltSample",
     "SnowmeltSetpoint",
+    "StageBits",
+    "StageCounts",
+    "StageDemand",
     "StatusRequest",
     "SystemSchedule",
     "TankStatus",
@@ -551,6 +604,7 @@ __all__ = [
     "UnknownFieldError",
     "UnknownMethodError",
     "UnknownServiceError",
+    "WaterCycle",
     "WaterDetection",
     "WaterMonitor",
     "WaterRead",

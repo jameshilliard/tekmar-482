@@ -23,8 +23,8 @@ AVAILABILITY_FIELDS = {
     0x5b: "available_tank_pumps", 0x97: "available_heat_pumps",
 }
 _BOILER_INSTANCES = (0x3c, 0x3d, 0x43, 0x45)
-_INSTANCE_MASK = {**dict.fromkeys(_BOILER_INSTANCES, 0x35),
-                  0x4d: 0x50, 0x5a: 0x5b, 0x98: 0x97}
+INSTANCE_AVAILABILITY = {**dict.fromkeys(_BOILER_INSTANCES, 0x35),
+                         0x4d: 0x50, 0x5a: 0x5b, 0x98: 0x97}
 
 
 def block_selectors(block: int, product: NativeProduct | None, subnet: int,
@@ -45,7 +45,7 @@ def block_selectors(block: int, product: NativeProduct | None, subnet: int,
                 return (0,) if product.model == "406" else (0, 1)
             if block in (0x48, 0x49) and subnet & 7:
                 return ((subnet & 7) - 1,)
-    if block in _INSTANCE_MASK and (mask := availability.get(_INSTANCE_MASK[block])) is not None:
+    if block in INSTANCE_AVAILABILITY and (mask := availability.get(INSTANCE_AVAILABILITY[block])) is not None:
         return tuple(i for i in range(8) if mask & (1 << i))
     return (0,)  # Reference probe, not evidence there are no other instances.
 

@@ -6,7 +6,7 @@ from dataclasses import asdict
 from typing import TYPE_CHECKING
 
 from .cli_schedule import schedule_fields
-from .cli_status import climate_fields, water_fields
+from .cli_status import climate_fields, plant_register_fields, water_fields
 from .native import NativeAddress
 from .native_snow_control import SnowmeltGroupStatus, SnowmeltOperation
 from .native_state import NativePath
@@ -17,6 +17,7 @@ if TYPE_CHECKING:
     from collections.abc import Callable
 
     from .native_calendar import NativeCalendar
+    from .native_plant_registers import PlantRegisters
     from .native_snowmelt import NativeSnowmelt, SnowmeltChannel
     from .native_state import NativeState
     from .raw import BridgeStream
@@ -103,6 +104,7 @@ async def watch_all_from_args(
     emit: Callable[[object], None],
 ) -> int:
     previous: dict[NativePath, dict[str, object]] = {}
+    previous_plants: dict[NativePath, PlantRegisters] = {}
 
     def changed(path: NativePath, state: NativeState) -> None:
         if (snow := state.snowmelt(path)) is not None:
@@ -122,6 +124,12 @@ async def watch_all_from_args(
             emit({"native_identity": {**asdict(path), **asdict(identity)}})
         if (water := state.water_source(path)) is not None:
             emit({"water_source": water_fields(water)})
+        plant = state.plant_registers(path)
+        if plant is not None and plant != previous_plants.get(path):
+            previous_plants[path] = plant
+            emit({"plant_registers": {**asdict(path), **plant_register_fields(plant)}})
+        elif plant is None and previous_plants.pop(path, None) is not None:
+            emit({"plant_registers_removed": asdict(path)})
         if not args.no_schedules and (calendar := state.schedule(path)) is not None:
             view = calendar_fields(calendar)
             if (path in previous or any(view.values())) and view != previous.get(path):
@@ -142,6 +150,7 @@ async def watch_all_from_args(
         timeout=args.timeout,
         schedules=not args.no_schedules,
         thermostat_targets=not args.no_thermostat_targets,
+        plant_settings=not args.no_plant_settings,
         on_change=changed,
     )
     state = result.state
@@ -164,6 +173,20 @@ async def watch_all_from_args(
         for d in state.snowmelt_devices
         if d.missing_keys != b""
     ]
+    no_plants = (
+        []
+        if args.no_plant_settings
+        else [
+            {
+                **asdict(p),
+                "missing_blocks": [
+                    {"block": b, "selector": s} for b, s in settings.missing
+                ],
+            }
+            for p, settings in state.plant_configurations
+            if settings.missing
+        ]
+    )
     no_schedule = (
         []
         if args.no_schedules
@@ -181,6 +204,7 @@ async def watch_all_from_args(
             "missing_identities": unidentified,
             "missing_mode_reports": no_mode,
             "incomplete_thermostat_targets": no_targets,
+            "incomplete_plant_settings": no_plants,
             "incomplete_snowmelt": no_snow,
             "incomplete_schedules": no_schedule,
             "status_reads": [
@@ -217,7 +241,14 @@ async def watch_all_from_args(
         not state.paths
         or (
             not args.passive
-            and bool(unidentified or no_mode or no_targets or no_snow or no_schedule)
+            and bool(
+                unidentified
+                or no_mode
+                or no_targets
+                or no_snow
+                or no_schedule
+                or no_plants,
+            )
         ),
     )
 

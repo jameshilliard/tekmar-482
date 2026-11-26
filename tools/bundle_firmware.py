@@ -30,6 +30,7 @@ def main() -> None:
         "layouts.py",
         "line.py",
         "products.py",
+        "plant.py",
         "queries.py",
         "scenes.py",
         "schedules.py",

@@ -22,9 +22,10 @@ if TYPE_CHECKING:
 
     from ._native_payloads.products import NativeProduct
     from .native_discovery import NativeDevice
+    from .native_plant_registers import PlantRegisters
     from .native_sensors import SensorObservation
     from .native_snowmelt import NativeSnowmelt
-    from .native_state import NativeClimate
+    from .native_state import NativeClimate, NativePath
     from .native_status import NativeStatusBatch
     from .raw import BridgeStream, NativeBlockBatch
 
@@ -53,6 +54,10 @@ class NativeSnapshot:
     @property
     def thermostats(self) -> tuple[NativeClimate, ...]:
         return self.observed_state().thermostats
+
+    @property
+    def plant_configurations(self) -> tuple[tuple[NativePath, PlantRegisters], ...]:
+        return self.observed_state().plant_configurations
 
     def observed_state(self) -> NativeState:
         """Project the reports from the scan without issuing further requests."""

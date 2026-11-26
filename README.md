@@ -351,11 +351,12 @@ tekmar-482 read-water 0 3 --duration 60 --tcp 192.0.2.10:3001 --json
 
 `read-water` listens for the full observation window. It asks each
 selected port for its master's loop map, identifies an addressable
-responder with block zero, and reads only that model's cataloged loop
-setup blocks within the same deadline. A master can answer immediately
-without sending a temperature. The command returns 1 if no measurement
-was heard, and prints any topology and link results it did receive.
-Use `--passive` to listen without sending anything on tN4.
+responder with block zero, and reads the loop setup, equipment banks and
+runtime registers cataloged for that plant controller within the same
+deadline. A master query does not force a temperature or output report.
+The command returns 1 if it heard no operating data; it still prints the
+setup and link results. Use `--no-plant-settings` for topology-only queries
+or `--passive` to send nothing on tN4.
 
 `read_water(stream, ports, duration=seconds)` returns immutable samples
 with the gateway timestamp. For push updates, feed each record from
@@ -370,6 +371,22 @@ repeated on another port without that port owning the loop; an unresolved
 assignment stays unlabelled. Master and plant-loop status are independent.
 DHW status exposes temperatures; the separate tank status retains raw
 readings by tank ID because their scale is not established.
+
+For example, `state.water_source(path).equipment.outputs` contains the
+latest plant reports by output subtype and reported device ID on that path.
+A staged boiler reports separate available and operating stage masks; a heat
+pump reports counts, and a modulating boiler reports actual modulation.
+The advertised count is not a physical inventory. Mixing capability reports
+are separate from measurements, and a mixing command is not a measurement.
+See the [plant output layouts](https://github.com/jameshilliard/tekmar-482-firmware/blob/master/docs/tn4-frames.md#plant-output-subtypes)
+for definitions and the fields that remain raw.
+
+`state.plant_registers(path)` and `read_water(...).plant_configurations`
+separate the equipment banks, runtime hours and missing block/selector
+pairs from operating reports. For example, on a 402, pump-hour selectors
+0 and 129 refer to the primary and DHW pumps. A zero availability mask
+advertises no instances; a missing mask or a partial hours word is not
+zero. An equipment change invalidates readings for the affected instances.
 
 ### Weekly schedules
 
@@ -517,11 +534,14 @@ installed, and fan output states are not ventilation percentages.
 
 The library equivalent is `await watch_native(stream, paths, on_change=callback)`.
 The synchronous callback receives `(path, state)`. Use
-`state.snowmelt(path)`, `state.climate(path)`, `state.schedule(path)` or `state.water_source(path)` to
+`state.snowmelt(path)`, `state.climate(path)`, `state.schedule(path)`,
+`state.water_source(path)` or `state.plant_registers(path)` to
 obtain an immutable snapshot. `source=None` (CLI: `--passive`) sends no
 requests; link ACKs remain off unless explicitly enabled on a port. A
 finite active watch lists missing identities, modes, thermostat blocks, calendar
-data and snowmelt keys and returns status 1 for incomplete coverage.
+data, plant registers and snowmelt keys and returns status 1 for incomplete
+coverage. `--no-plant-settings` skips active plant register reads without
+hiding any observed reports.
 
 `state.schedule(path).signals` retains the reported current and next phases
 per advertised system. These are not proof that a device owns a table or that

@@ -141,7 +141,9 @@ class WaterReadTests(unittest.IsolatedAsyncioTestCase):
         )
 
     async def test_query_completion_does_not_stop_capture(self) -> None:
-        task = asyncio.create_task(read_water(self.stream, [1, 3, 3], duration=0.1))
+        task = asyncio.create_task(
+            read_water(self.stream, [1, 3, 3], duration=0.1, plant_settings=False),
+        )
         async with asyncio.timeout(1):
             for port in (1, 3):
                 out = await self.tx.get()

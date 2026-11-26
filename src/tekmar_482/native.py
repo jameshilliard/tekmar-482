@@ -24,6 +24,12 @@ from ._native_payloads.line import (
     ZoneSyncAdjustment,
     group_command,
 )
+from ._native_payloads.plant import (
+    MIXING_UPDATE,
+    PLANT_OUTPUT,
+    MixingUpdate,
+    PlantOutput,
+)
 from ._native_payloads.queries import NativeStatusQuery, StatusRequest
 from ._native_payloads.scenes import SCENE_REPORT, NativeScene, SceneReport
 from ._native_payloads.schedules import (
@@ -46,6 +52,7 @@ from .units import celsius_to_degh, degh_to_celsius
 
 if TYPE_CHECKING:
     from calendar import Day
+    from collections.abc import Callable
     from datetime import datetime
     from enum import Enum
 
@@ -310,14 +317,30 @@ class NativeFrame:
             return GroupReport(self.message.payload[0], self.message.payload[1])
         return None
 
-    @property
-    def schedule_status(self) -> ScheduleStatus | None:
-        if self.message_id != SCHEDULE_STATUS:
+    def _read_payload[T](
+        self,
+        message_id: int,
+        decode: Callable[[Reader], T],
+    ) -> T | None:
+        if self.message_id != message_id:
             return None
         try:
-            return ScheduleStatus.read(Reader(self.message.payload))
+            return decode(Reader(self.message.payload))
         except ShortPayload:
             return None
+
+    @property
+    def schedule_status(self) -> ScheduleStatus | None:
+        return self._read_payload(SCHEDULE_STATUS, ScheduleStatus.read)
+
+    @property
+    def plant_output(self) -> PlantOutput | None:
+        return self._read_payload(PLANT_OUTPUT, PlantOutput.read)
+
+    @property
+    def mixing_update(self) -> MixingUpdate | None:
+        """A requested output, not a report from the controlled actuator."""
+        return self._read_payload(MIXING_UPDATE, MixingUpdate.read)
 
     @property
     def thermostat_output(self) -> FanDuctStatus | SlabStatus | HumidityStatus | None:
@@ -336,12 +359,7 @@ class NativeFrame:
     @property
     def snowmelt_report(self) -> SnowmeltReport | None:
         """Return all declared pairs in wire order; leave extensions in the frame."""
-        if self.message_id != SNOW_REPORT:
-            return None
-        try:
-            return SnowmeltReport.read(Reader(self.message.payload))
-        except ShortPayload:
-            return None
+        return self._read_payload(SNOW_REPORT, SnowmeltReport.read)
 
     @property
     def scene_report(self) -> SceneReport | None:
