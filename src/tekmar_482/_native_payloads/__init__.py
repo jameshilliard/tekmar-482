@@ -11,6 +11,7 @@ from .layouts import (
     FixedLayout,
     SnowmeltBlock as SnowmeltBlock,
 )
+from .products import identify_product
 
 Fields = dict[str, str | int | float]
 SETBACK = ("wake", "unoccupied_4", "occupied_4", "sleep", "occupied_2", "unoccupied_2", "away", "unknown")
@@ -378,6 +379,11 @@ def block_report(r: Reader) -> Fields:
             slots = range(start, start + size)
             if all(i in values for i in slots):
                 fields[name] = int.from_bytes(bytes(values[i] for i in slots), "little")
+        number, j_number = fields.get("product_number"), fields.get("j_number")
+        if isinstance(number, int):
+            product = identify_product(number, j_number if isinstance(j_number, int) else None)
+            if product is not None:
+                fields.update(model=product.model, family=product.family)
     for i, name in enumerate(control_words(block)):
         lo, hi = 2 * i, 2 * i + 1
         if lo in values and hi in values:

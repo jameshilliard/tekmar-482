@@ -1,6 +1,7 @@
 """Async Python client for the tekmar 482 gateway."""
 
 from ._native_payloads import SnowmeltBlock
+from ._native_payloads.products import NativeProduct
 from ._wire import GatewayEndpoint
 from .bridge import BridgeClient, PanelState
 from .client import Tekmar482Client
@@ -85,9 +86,18 @@ from .native import (
     NativeBlockQuery,
     NativeFrame,
     NativeMessage,
+    NativeTargets,
     ScheduleEvent,
     SnowmeltSetpoint,
     WeeklyEvent,
+)
+from .native_discovery import (
+    NativeDevice,
+    NativeDiscovery,
+    NativeIdentity,
+    NativeInventory,
+    NativeProbe,
+    discover_native,
 )
 from .packet import (
     TYPE_DISPLAY,
@@ -102,6 +112,7 @@ from .packet import (
 from .raw import (
     BridgeStream,
     CaptureGap,
+    CaptureRecord,
     FailureReason,
     InvalidCapture,
     InvalidReason,
@@ -224,6 +235,7 @@ __all__ = [
     "BridgeMode",
     "BridgeStream",
     "CaptureGap",
+    "CaptureRecord",
     "ConnectionClosedError",
     "DateTimeFields",
     "DecodedDeviceRuntime",
@@ -257,8 +269,15 @@ __all__ = [
     "ModeSettingFields",
     "NativeAddress",
     "NativeBlockQuery",
+    "NativeDevice",
+    "NativeDiscovery",
     "NativeFrame",
+    "NativeIdentity",
+    "NativeInventory",
     "NativeMessage",
+    "NativeProbe",
+    "NativeProduct",
+    "NativeTargets",
     "NativeTransmitError",
     "NullTransport",
     "Packet",
@@ -334,6 +353,7 @@ __all__ = [
     "degh_to_celsius",
     "degh_to_fahrenheit",
     "device_supports_method",
+    "discover_native",
     "dump_trace",
     "fahrenheit_to_celsius",
     "fahrenheit_to_degh",

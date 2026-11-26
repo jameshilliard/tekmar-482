@@ -13,7 +13,7 @@ from typing import TYPE_CHECKING, Any, TextIO
 from ._wire import GatewayEndpoint
 from .bridge import BridgeClient
 from .client import Tekmar482Client
-from .constants import DEFAULT_BAUDRATE
+from .constants import DEFAULT_BAUDRATE, TN4_PORTS
 from .decoding import (
     decode_degh,
     decode_network_error,
@@ -23,6 +23,7 @@ from .exceptions import TekmarError
 from .firmware import install_firmware
 from .gateway import open_gateway
 from .native import NativeAddress, NativeBlockQuery
+from .native_discovery import discover_native
 from .raw import CaptureGap, InvalidCapture, PortError, TxStatus
 from .trpc import (
     ResponseMatch,
@@ -46,6 +47,8 @@ if TYPE_CHECKING:
         GatewaySnapshot,
     )
     from .native import NativeFrame
+    from .native_discovery import NativeDevice
+    from .raw import CaptureRecord
 
 
 class CliError(Exception):
@@ -137,6 +140,8 @@ def build_parser() -> argparse.ArgumentParser:
         default=0.0,
         help="optional delay between requests in seconds",
     )
+    for scan in (discover, dump):
+        _add_scan_options(scan)
 
     monitor = subparsers.add_parser(
         "monitor",
@@ -231,7 +236,13 @@ def build_parser() -> argparse.ArgumentParser:
                 default=1 if name == "probe" else 30,
             )
         if name == "diagnostics":
-            command.add_argument("--ack-port", type=int, choices=range(5))
+            command.add_argument(
+                "--ack-port",
+                action="append",
+                type=int,
+                choices=TN4_PORTS,
+                default=[],
+            )
         if name == "send":
             command.add_argument("port", type=int, choices=range(5))
             command.add_argument(
@@ -315,6 +326,9 @@ async def run(
     """Run an already-parsed command."""
     if not args.vendor:
         return await _native(args, stdout)
+    if any(getattr(args, key, None) for key in ("passive", "probe_subnet", "ack_port")):
+        msg = "native discovery options are unavailable with --vendor"
+        raise CliError(msg)
     if args.auto_update or args.command not in {
         "gateway-info",
         "discover",
@@ -382,7 +396,7 @@ async def _native(args: argparse.Namespace, stdout: TextIO) -> int:
             )
             source = NativeAddress(args.source_subnet, args.source_node)
             async with bridge.stream(
-                ack_port=args.port if args.ack else None,
+                ack_ports=(args.port,) if args.ack else (),
                 diagnostics=False,
             ) as stream:
                 try:
@@ -442,42 +456,74 @@ async def _native_capture(
                 "revision": await bridge.revision(),
             },
         )
-    async with bridge.stream(ack_port=getattr(args, "ack_port", None)) as stream:
-        window = asyncio.timeout(duration)
-        try:
-            async with window:
-                while limit is None or frames < limit:
-                    frame = await stream.read()
-                    if isinstance(frame, CaptureGap):
-                        emit({"host_records_dropped": frame.dropped})
-                        continue
-                    if isinstance(frame, PortError):
-                        emit({"port": frame.port, "port_error": frame.reason})
-                        continue
-                    if isinstance(frame, InvalidCapture):
-                        if args.command in {"diagnostics", "dump", "monitor"}:
-                            emit(
-                                {
-                                    "invalid": frame.reason,
-                                    "port": frame.port,
-                                    "timestamp_ms": frame.timestamp_ms,
-                                    "bit_count": frame.bit_count,
-                                    "bits": frame.bits.hex(),
-                                },
-                            )
-                        continue
-                    frames += 1
-                    nodes.add((frame.port, frame.subnet, frame.node))
-                    if args.command != "discover":
-                        emit(_frame_fields(frame))
-        except TimeoutError:
-            if not window.expired():
-                raise
-    if args.command in {"discover", "dump"}:
-        emit({"observed_nodes": sorted(nodes)})
+
+    def capture(frame: CaptureRecord) -> None:
+        nonlocal frames
+        if isinstance(frame, CaptureGap):
+            emit({"host_records_dropped": frame.dropped})
+        elif isinstance(frame, PortError):
+            emit({"port": frame.port, "port_error": frame.reason})
+        elif isinstance(frame, InvalidCapture):
+            if args.command != "discover":
+                emit(
+                    {
+                        "invalid": frame.reason,
+                        "port": frame.port,
+                        "timestamp_ms": frame.timestamp_ms,
+                        "bit_count": frame.bit_count,
+                        "bits": frame.bits.hex(),
+                    },
+                )
+        else:
+            frames += 1
+            if args.command in {"discover", "dump"}:
+                nodes.add((frame.port, frame.subnet, frame.node))
+            if args.command != "discover":
+                emit(_frame_fields(frame))
+
+    summary = None
+    async with bridge.stream(ack_ports=getattr(args, "ack_port", ())) as stream:
+        if args.command in {"discover", "dump"}:
+            summary = await discover_native(
+                stream,
+                duration=duration,
+                source=None if args.passive else NativeAddress(0, 0),
+                subnets=args.probe_subnet,
+                on_record=capture,
+            )
+        else:
+            window = asyncio.timeout(duration)
+            try:
+                async with window:
+                    while limit is None or frames < limit:
+                        capture(await stream.read())
+            except TimeoutError:
+                if not window.expired():
+                    raise
+    if summary is not None:
+        emit(
+            {
+                "observed_nodes": sorted(nodes),
+                "devices": [
+                    _native_device_fields(device) for device in summary.devices
+                ],
+                "identity_probes": [
+                    {
+                        "port": p.port,
+                        "subnet": p.subnet,
+                        "tx_status": p.result.status.name
+                        if p.result is not None
+                        else None,
+                        "reason": p.result.reason if p.result is not None else None,
+                    }
+                    for p in summary.probes
+                ],
+                "host_records_dropped": summary.host_records_dropped,
+            },
+        )
     if args.command in {"diagnostics", "dump"}:
-        for summary in stream.diagnostics.values():
-            emit(asdict(summary))
+        for diagnostic in stream.diagnostics.values():
+            emit(asdict(diagnostic))
 
 
 def _frame_fields(frame: NativeFrame) -> dict[str, object]:
@@ -491,6 +537,59 @@ def _frame_fields(frame: NativeFrame) -> dict[str, object]:
         "body": frame.body.hex(),
         "fields": frame.decoded,
     }
+
+
+def _native_device_fields(device: NativeDevice) -> dict[str, object]:
+    identity = device.identity
+    product = identity.product if identity else None
+    return {
+        "port": device.port,
+        "subnet": device.address.subnet,
+        "node": device.address.node,
+        "identity": asdict(identity) if identity else None,
+        "model": product.model if product else None,
+        "family": product.family if product else None,
+        "candidate_blocks": product.candidate_blocks if product else (),
+        "reported_blocks": sorted(device.reported_blocks),
+    }
+
+
+def _add_scan_options(parser: argparse.ArgumentParser) -> None:
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument(
+        "--passive",
+        action="store_true",
+        help="send no native identity requests",
+    )
+    parser.add_argument(
+        "--ack-port",
+        action="append",
+        type=int,
+        choices=TN4_PORTS,
+        default=[],
+        help="link-ACK valid incoming frames on this port (repeatable)",
+    )
+    mode.add_argument(
+        "--probe-subnet",
+        action="append",
+        type=_probe_subnet,
+        default=[],
+        metavar="PORT:SUBNET",
+        help="also query a known quiet native subnet (repeatable)",
+    )
+
+
+def _probe_subnet(value: str) -> tuple[int, int]:
+    port, _, subnet = value.partition(":")
+    try:
+        physical = int(port, 0)
+        target = NativeAddress(int(subnet, 0), 0)
+        if physical in TN4_PORTS:
+            return physical, target.subnet
+    except ValueError:
+        pass
+    msg = "expected PORT:SUBNET with port 0..4 and subnet 0..255"
+    raise argparse.ArgumentTypeError(msg)
 
 
 def client_from_args(args: argparse.Namespace) -> Tekmar482Client:

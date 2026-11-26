@@ -224,7 +224,12 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
             sent.set()
             normal = management(2, 0, b"\0")
             assert await reader.readexactly(len(normal)) == normal
-            writer.write(serialize(Packet(1, b"\x02\x01\0")) + management(2, 3, b"\0"))
+            writer.write(
+                management(6, 3, struct.pack("<IB", 0x544BF002, 1))
+                + serialize(Packet(1, b"\x02\x01\0")),
+            )
+            assert await reader.readexactly(len(normal)) == normal
+            writer.write(management(2, 3, b"\0"))
             build = management(4, 1)
             assert await reader.readexactly(len(build)) == build
             writer.write(management(4, 4, b"unversioned"))
@@ -345,6 +350,71 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
             assert result["body"] == report.hex()
             assert result["fields"]["sensor_id"] == 5
             assert result["fields"]["slab_high_raw"] == 0x1234
+
+    async def test_cli_discovery_probes_quiet_subnet_and_preserves_ack_mask(
+        self,
+    ) -> None:
+        request = bytes.fromhex("6d70000b 000016 ffffff7f 00000000")
+        report = (
+            bytes.fromhex("6e7161c8 00001f")
+            + (101901).to_bytes(3, "little")
+            + (1145).to_bytes(2, "little")
+        )
+
+        async def app(
+            reader: asyncio.StreamReader,
+            writer: asyncio.StreamWriter,
+        ) -> None:
+            if (first := await reader.readexactly(1)) == b"?":
+                assert await reader.readexactly(5) == b"\r\nJ\r\n"
+                assert not await reader.read()
+                return
+            caps = management(1, 1)
+            assert first + await reader.readexactly(len(caps) - 1) == caps
+            writer.write(management(1, 4, bytes([1, 0, 5, 3])))
+            for command, response in (
+                (management(2, 0, b"\x01"), management(2, 3, b"\x01")),
+                (management(9, 0, b"\x12"), management(9, 3, b"\x12")),
+                (
+                    serialize(Packet(1, b"\x01\x04" + request)),
+                    serialize(Packet(1, bytes.fromhex("00040a000000") + report))
+                    + serialize(Packet(1, b"\x02\x04\0")),
+                ),
+                (management(2, 0, b"\0"), management(2, 3, b"\0")),
+            ):
+                assert await reader.readexactly(len(command)) == command
+                writer.write(response)
+            for port in range(5):
+                query = management(3, 1, bytes([port]))
+                assert await reader.readexactly(len(query)) == query
+                writer.write(management(3, 4, bytes([port]) + bytes(8)))
+
+        async with listen(app) as endpoint, asyncio.timeout(5):
+            stdout = StringIO()
+            args = build_parser().parse_args(
+                [
+                    "discover",
+                    "--probe-subnet",
+                    "4:0x16",
+                    "--ack-port",
+                    "1",
+                    "--ack-port",
+                    "4",
+                    "--duration",
+                    "0.2",
+                    "--tcp",
+                    f"{endpoint.address}:{endpoint.port}",
+                    "--json",
+                ],
+            )
+            assert await run(args, stdout=stdout) == 0
+            summary = json.loads(stdout.getvalue())
+            assert summary["observed_nodes"] == [[4, 0x16, 7]]
+            assert summary["devices"][0]["model"] == "481"
+            assert summary["devices"][0]["reported_blocks"] == [0]
+            assert summary["identity_probes"] == [
+                {"port": 4, "subnet": 0x16, "tx_status": "ACK", "reason": None},
+            ]
 
     async def test_vendor_opt_in_never_probes_rom(self) -> None:
         async def app(

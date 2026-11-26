@@ -249,7 +249,6 @@ DEVICE_FEATURES: dict[int, DeviceFeature] = {
     100103: _feature("538", DeviceKind.THERMOSTAT, heat=1),
     100101: _feature("540", DeviceKind.THERMOSTAT, heat=1, cool=1, fan=1),
     99301: _feature("541", DeviceKind.THERMOSTAT, heat=1),
-    10599181: _feature("541", DeviceKind.THERMOSTAT, heat=1),
     99302: _feature("542", DeviceKind.THERMOSTAT, heat=1),
     99401: _feature("543", DeviceKind.THERMOSTAT, heat=2),
     99203: _feature("544", DeviceKind.THERMOSTAT, heat=1, cool=1, fan=1),

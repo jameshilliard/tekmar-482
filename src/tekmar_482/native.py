@@ -71,6 +71,21 @@ class NativeAddress:
 
 
 @dataclass(frozen=True, slots=True)
+class NativeTargets:
+    """A block request can address any subset of nodes 1..31 on one subnet."""
+
+    subnet: int
+    mask: int = (1 << 31) - 1
+
+    def __post_init__(self) -> None:
+        _uint(self.subnet, 8)
+        _uint(self.mask, 31)
+        if not self.mask:
+            msg = "a block request must select at least one node"
+            raise ValueError(msg)
+
+
+@dataclass(frozen=True, slots=True)
 class NativeMessage:
     message_id: int
     source: NativeAddress
@@ -166,13 +181,16 @@ class NativeMessage:
         block_id: int,
         *,
         source: NativeAddress,
-        target: NativeAddress,
+        target: NativeAddress | NativeTargets,
         argument: int | None = None,
     ) -> Self:
+        mask = (
+            target.mask if isinstance(target, NativeTargets) else target.request_mask()
+        )
         payload = (
             _uint(block_id, 16).to_bytes(2, "little")
             + bytes([target.subnet])
-            + target.request_mask().to_bytes(4, "little")
+            + mask.to_bytes(4, "little")
         )
         if argument is not None:
             payload += _uint(argument, 32).to_bytes(4, "little")

@@ -120,6 +120,7 @@ class CaptureGap:
 
 
 type _Record = NativeFrame | InvalidCapture | PortError
+type CaptureRecord = _Record | CaptureGap
 
 
 def _valid_body(body: bytes) -> bool:
@@ -182,7 +183,7 @@ class BridgeStream(Protocol):
         *,
         source: NativeAddress,
     ) -> NativeFrame: ...
-    async def read(self) -> _Record | CaptureGap: ...
+    async def read(self) -> CaptureRecord: ...
 
 
 class RawDispatcher:

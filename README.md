@@ -50,11 +50,42 @@ async def read_frame() -> None:
         print(stream.diagnostics)
 ```
 
-`monitor` streams native frames, `discover` listens for source addresses,
-and `dump` includes panel state, frames and receiver summaries. Discovery is
-passive: a quiet device will not appear during a short scan. See the firmware's
+`monitor` streams native frames. `discover` sends one read-only block-zero
+request per observed port/subnet to identify all answering nodes, including
+quiet thermostats and plant masters. `dump` also prints the panel state,
+individual frames and receiver summaries. See the firmware's
 [frame catalog](https://github.com/jameshilliard/tekmar-482-firmware/blob/master/docs/tn4-frames.md)
 and [binary UART protocol](https://github.com/jameshilliard/tekmar-482-firmware/blob/master/docs/tpck-bridge.md).
+
+Discovery reports receive paths, **not a count of physical devices**:
+a plant controller can forward the same identity onto multiple lines.
+An unknown model or a missing reply never promotes a link ACK to an
+identity. The node lock bit does not create a second device on a path.
+Each result distinguishes the catalog's candidate blocks from those
+actually reported with supported bytes during the scan.
+
+```bash
+tekmar-482 discover --tcp 192.0.2.10:3001 --duration 45 --json
+```
+
+Use `--probe-subnet PORT:SUBNET` to include a known silent subnet, or
+`--passive` to send no identity requests. A solitary peer can need a link
+ACK to deliver its frames: `--ack-port PORT` is explicit and repeatable.
+By default the gateway does not ACK incoming Raw frames. Use a longer
+window if devices have not yet answered. Scanning does not change setpoints.
+
+```python
+from tekmar_482 import discover_native
+
+async with bridge.stream(ack_ports=(0,)) as stream:
+    result = await discover_native(stream, duration=45)
+for device in result.devices:
+    print(device.port, device.address, device.identity)
+```
+
+The scanner owns the capture consumer for the window; `on_record` can
+observe the same traffic. For an ongoing subscription, feed frames from
+your own receive loop to `NativeInventory.observe()` instead.
 
 Use `bridge.normal()` to run tRPC on the **same** custom-firmware connection:
 

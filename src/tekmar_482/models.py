@@ -7,6 +7,7 @@ from enum import StrEnum
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Self, assert_never
 
+from ._native_payloads.products import identify_product
 from .constants import (
     DEVICE_FEATURES,
     MAX_PERCENT,
@@ -131,6 +132,9 @@ class GatewayInfo:
     protocol_version: int | None = None
 
 
+_MODEL_FEATURES = {feature.model: feature for feature in DEVICE_FEATURES.values()}
+
+
 @dataclass(frozen=True, slots=True)
 class DiscoveredDevice:
     """Device discovered behind a tekmar 482 gateway."""
@@ -165,7 +169,14 @@ class DiscoveredDevice:
     def feature(self) -> DeviceFeature | None:
         if self.type_code is None:
             return None
-        return DEVICE_FEATURES.get(self.type_code)
+        if (feature := DEVICE_FEATURES.get(self.type_code)) is not None:
+            return feature
+        # Older aliases can overlap. tHA DeviceVersion is J * 100 + Z.
+        product = identify_product(
+            self.type_code,
+            self.version // 100 if self.version is not None else None,
+        )
+        return _MODEL_FEATURES.get(product.model) if product else None
 
     @property
     def kind(self) -> DeviceKind | None:
@@ -202,7 +213,7 @@ class DiscoveredDevice:
 
     @property
     def is_known_type(self) -> bool:
-        return self.type_code in DEVICE_FEATURES
+        return self.feature is not None
 
     @property
     def supports_heat_setpoint(self) -> bool:

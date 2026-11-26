@@ -20,7 +20,7 @@ from .tpck import TpckParser, serialize
 from .trpc import TrpcMethod, TrpcService
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Awaitable, Callable
+    from collections.abc import AsyncIterator, Awaitable, Callable, Iterable
 
     from ._wire import Wire
     from .raw import BridgeStream
@@ -225,12 +225,15 @@ class BridgeClient:
         self,
         *,
         diagnostics: bool = True,
-        ack_port: int | None = None,
+        ack_ports: Iterable[int] = (),
         capture_backlog: int = 512,
     ) -> AsyncIterator[BridgeStream]:
-        if ack_port is not None and ack_port not in TN4_PORTS:
-            msg = "invalid ACK port"
-            raise ValueError(msg)
+        ack_mask = 0
+        for port in ack_ports:
+            if port not in TN4_PORTS:
+                msg = f"invalid ACK port {port}"
+                raise ValueError(msg)
+            ack_mask |= 1 << port
         if not self._features & BridgeFeature.RAW:
             msg = "gateway did not advertise binary Raw support"
             raise ProtocolError(msg)
@@ -240,7 +243,7 @@ class BridgeClient:
             try:
                 await self._set_byte(
                     BridgeMethod.ACK_MASK,
-                    0 if ack_port is None else 1 << ack_port,
+                    ack_mask,
                     stream.feed,
                 )
                 async with stream.receiving(self._next_packet):
