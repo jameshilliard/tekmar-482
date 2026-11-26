@@ -11,9 +11,11 @@ from ._poll import RuntimePoll, filter_discovery_events, observe_runtime
 from .constants import (
     DEFAULT_BAUDRATE,
     MAX_PERCENT,
+    SETPOINT_GROUP_IDS,
     DeviceMode,
     ThaSetback,
     ThaValue,
+    setback_event_count,
 )
 from .exceptions import (
     ConnectionClosedError,
@@ -504,7 +506,7 @@ class Tekmar482Client:
             type_code=None if raw_type_code == ThaValue.NA_32 else raw_type_code,
             version=None if raw_version == ThaValue.NA_32 else raw_version,
             attributes=DeviceAttributes(values.get(TrpcMethod.DEVICE_ATTRIBUTES)),
-            setback_events=values.get(TrpcMethod.SETBACK_EVENTS),
+            setback_events=setback_event_count(values.get(TrpcMethod.SETBACK_EVENTS)),
         )
 
     async def discover(
@@ -703,7 +705,7 @@ class Tekmar482Client:
 
         A timeout does not establish whether the gateway applied the command.
         """
-        if group_id not in range(1, 13):
+        if group_id not in SETPOINT_GROUP_IDS:
             msg = f"Gateway setpoint group must be in 1..12: {group_id}"
             raise ValueError(msg)
         fields = SetpointGroupFields(group_id, enabled)
@@ -720,6 +722,27 @@ class Tekmar482Client:
             )
             raise TimeoutError(msg)
         return response
+
+    async def get_setpoint_group(
+        self,
+        group_id: int,
+        *,
+        timeout: float | None = 5,
+    ) -> bool | None:
+        """Read cached group activity; False does not prove a receiver exists."""
+        if group_id not in SETPOINT_GROUP_IDS:
+            msg = f"Gateway setpoint group must be in 1..12: {group_id}"
+            raise ValueError(msg)
+        reply = _require_reply(
+            await self.request_response(
+                TrpcMethod.SETPOINT_GROUP_ENABLE,
+                fields=SetpointGroupFields(group_id),
+                timeout=timeout,
+            ),
+            f"setpoint group {group_id}",
+        )
+        value = reply.require("enable")
+        return bool(value) if value in (0, 1) else None
 
     async def set_datetime(
         self,

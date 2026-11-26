@@ -8,6 +8,7 @@ from enum import IntEnum, IntFlag, StrEnum
 DEFAULT_BAUDRATE = 9600
 MAX_PERCENT = 100
 NO_SETBACK_EVENTS = 0
+SETPOINT_GROUP_IDS = range(1, 13)
 TWO_EVENT_SETBACK_SCHEDULE = 2
 FOUR_EVENT_SETBACK_SCHEDULE = 4
 
@@ -198,6 +199,19 @@ def schedule_setbacks_for_events(events: int | None) -> tuple[ThaSetback, ...] |
     if events == FOUR_EVENT_SETBACK_SCHEDULE:
         return SETBACK_4_EVENT_SETBACKS
     return None
+
+
+def setback_event_count(code: int | None) -> int | None:
+    """Decode the tHA SetbackEvents configuration byte into a daily count."""
+    return (
+        {
+            0: NO_SETBACK_EVENTS,
+            1: TWO_EVENT_SETBACK_SCHEDULE,
+            2: FOUR_EVENT_SETBACK_SCHEDULE,
+        }.get(code)
+        if code is not None
+        else None
+    )
 
 
 def _feature(

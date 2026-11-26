@@ -59,7 +59,7 @@ def observe_runtime(session: Tekmar482Session) -> Iterator[list[ReportEvent]]:
         if (
             message.method in DEVICE_FIELDS
             or message.method in GATEWAY_METHODS
-            or message.method is TrpcMethod.DEVICE_TYPE
+            or message.method in {TrpcMethod.DEVICE_TYPE, TrpcMethod.SETBACK_EVENTS}
         ):
             events.append((message, command))
 

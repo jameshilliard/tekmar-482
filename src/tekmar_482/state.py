@@ -6,7 +6,7 @@ from dataclasses import dataclass, replace
 from enum import Enum, auto
 from typing import TYPE_CHECKING
 
-from .constants import ThaSetback
+from .constants import ThaSetback, setback_event_count
 from .exceptions import ProtocolError
 from .models import (
     AvailableInfo,
@@ -169,8 +169,17 @@ class Tekmar482State:
     """Mutable runtime state for a discovered tekmar 482 topology."""
 
     def __init__(self, discovery: DiscoveryResult, data: AvailableInfo) -> None:
-        self.discovery = discovery
         self.data = data
+        self.discovery = self._snapshot_metadata(discovery)
+
+    def _snapshot_metadata(self, discovery: DiscoveryResult) -> DiscoveryResult:
+        updates = {s.info.address: s.info for s in self.data.devices}
+        devices = tuple(updates.get(d.address, d) for d in discovery.devices)
+        return (
+            discovery
+            if devices == discovery.devices
+            else replace(discovery, devices=devices)
+        )
 
     @property
     def discovery_devices(self) -> dict[int, DiscoveredDevice]:
@@ -251,6 +260,8 @@ class Tekmar482State:
         if updated == self.data:
             return MessageApplyResult.UNCHANGED
         self.data = updated
+        if message.method is TrpcMethod.SETBACK_EVENTS:
+            self.discovery = self._snapshot_metadata(self.discovery)
         return MessageApplyResult.CHANGED
 
 
@@ -317,6 +328,25 @@ def apply_message(
 
     if method in GATEWAY_METHODS:
         return _apply_gateway_message(data, method, message)
+
+    if method is TrpcMethod.SETBACK_EVENTS:
+        address = message.get("address")
+        if "events" not in message.body or not any(
+            s.info.address == address for s in data.devices
+        ):
+            return None
+        count = setback_event_count(message.get("events"))
+        return replace(
+            data,
+            devices=tuple(
+                DeviceSnapshot(
+                    replace(s.runtime, info=replace(s.info, setback_events=count)),
+                )
+                if s.info.address == address and s.info.setback_events != count
+                else s
+                for s in data.devices
+            ),
+        )
 
     if method not in DEVICE_VALUE_METHODS:
         return None

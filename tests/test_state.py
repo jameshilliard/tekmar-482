@@ -64,6 +64,22 @@ def _state() -> Tekmar482State:
 
 
 class StateTest(unittest.TestCase):
+    def test_schedule_master_reports_update_metadata_without_losing_runtime(
+        self,
+    ) -> None:
+        state = _state()
+        for code, expected in [(1, 2), (2, 4), (0, 0), (3, None), (255, None)]:
+            msg = TrpcPacket.create(
+                method=TrpcMethod.SETBACK_EVENTS,
+                service=TrpcService.REPORT,
+                fields={"address": 1201, "events": code},
+            )
+            state.apply_message(msg)
+            runtime = state.runtime(1201)
+            assert runtime is not None and runtime.info.setback_events == expected
+            assert state.discovery.devices[0] == runtime.info
+            assert not state.apply_message(msg)
+
     def test_fan_percent_step_is_model_specific_and_raw_values_survive(self) -> None:
         for code, expected in [
             (99201, 70),

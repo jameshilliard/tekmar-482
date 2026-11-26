@@ -580,6 +580,27 @@ class ClientDiscoveryTest(unittest.IsolatedAsyncioTestCase):
             assert await client.set_setpoint_group(1, enabled=True) == right
         transport.assert_complete()
 
+    async def test_get_group_reads_the_cache_not_a_report_or_a_neighbor(self) -> None:
+        method = TrpcMethod.SETPOINT_GROUP_ENABLE
+        request = request_step(method, group_id=12).sent
+        wrong = response(method, group_id=1, enable=1)
+        unsolicited = report(method, group_id=12, enable=1)
+        transport = TraceReplayTransport(
+            [
+                TraceStep(
+                    request,
+                    (wrong, unsolicited, response(method, group_id=12, enable=value)),
+                )
+                for value in (0, 1, 255)
+            ],
+        )
+        async with Tekmar482Client(transport) as client:
+            for expected in (False, True, None):
+                assert await client.get_setpoint_group(12) is expected
+            with self.assertRaises(ValueError):
+                await client.get_setpoint_group(13)
+        transport.assert_complete()
+
     async def test_request_response_serializes_transactions(self) -> None:
         transport = BlockingTransport()
         client = Tekmar482Client(transport)
@@ -691,7 +712,7 @@ class ClientDiscoveryTest(unittest.IsolatedAsyncioTestCase):
         assert device.model == "540"
         assert device.kind == "thermostat"
         assert device.version == 202405
-        assert device.setback_events == 7
+        assert device.setback_events is None
         assert device.attributes.zone_heating is True
         assert device.attributes.zone_cooling is True
         assert device.attributes.slab_setpoint is False
@@ -1057,6 +1078,7 @@ class ClientDiscoveryTest(unittest.IsolatedAsyncioTestCase):
 
         device = snapshot.devices[0]
         assert device.info.address == 1001
+        assert device.info.setback_events == 4
         assert device.values["current_temperature"] == 1550
         assert device.values["active_demand"] == 1
         assert device.values["setback_state"] == 7

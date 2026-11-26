@@ -288,10 +288,19 @@ thermostat mode; a targeted mode read can still proceed. Neither write is retrie
 With setbacks disabled or not yet known, writes to different slots of the
 same setpoint on one device keep their submission order. With setbacks
 enabled, a write to an independent slot can proceed.
-`set_setpoint_group()` waits for a matching group report. Firmware 06 sends
-these reports only when reporting is enabled; it does not directly acknowledge
+`get_setpoint_group(group_id)` reads recent activity without transmitting
+on tN4. An idle group does not identify an installed device. For an observed
+snowmelt zone, `NativeMessage.request_snowmelt_status()` can request its
+melt and storm group IDs (keys 0x25/0x26) in Raw mode without changing them.
+
+`set_setpoint_group()` waits for a matching group report. Stock firmware
+06 and custom Normal mode report only when reporting is enabled; neither directly acknowledges
 the write. A timeout does not prove the command failed, and a matching report
 does not prove that a snowmelt slab is heating.
+
+`DiscoveredDevice.setback_events` is a daily event count (0, 2 or 4),
+or `None` if unknown. Raw tRPC packets keep the configuration code (0, 1
+or 2). A schedule-master report updates metadata without an inventory walk.
 
 ## Push controller
 

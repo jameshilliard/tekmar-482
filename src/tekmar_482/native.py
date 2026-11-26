@@ -8,6 +8,7 @@ from enum import IntEnum
 from typing import TYPE_CHECKING, Self
 
 from ._native_payloads import decode_payload
+from .constants import SETPOINT_GROUP_IDS
 
 if TYPE_CHECKING:
     from calendar import Day
@@ -83,6 +84,33 @@ class NativeMessage:
             body[_HEADER:],
             header >> 30,
         )
+
+    @classmethod
+    def setpoint_group(
+        cls,
+        group_id: int,
+        *,
+        enabled: bool,
+        source: NativeAddress,
+    ) -> Self:
+        """Build a native group update for a single Raw port; no destination node."""
+        if group_id not in SETPOINT_GROUP_IDS:
+            msg = f"Setpoint group must be in 1..12: {group_id}"
+            raise ValueError(msg)
+        return cls(0x21F, source, bytes([group_id, int(enabled)]))
+
+    @classmethod
+    def request_snowmelt_status(
+        cls,
+        *,
+        source: NativeAddress,
+        zone_type: int,
+        zone_id: int,
+        keys: bytes,
+    ) -> Self:
+        """Request ordered status keys from a native snowmelt zone on one line."""
+        destination = _uint(zone_id, 5) << 3 | _uint(zone_type, 3)
+        return cls(0x17F, source, bytes([destination, _uint(len(keys), 6)]) + keys)
 
     @classmethod
     def request_block(

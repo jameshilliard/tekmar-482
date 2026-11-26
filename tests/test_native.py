@@ -12,6 +12,41 @@ from tekmar_482 import (
 
 
 class NativeTests(unittest.TestCase):
+    def test_snowmelt_status_request_keeps_order_and_is_not_a_group_update(
+        self,
+    ) -> None:
+        source = NativeAddress(0, 0)
+        request = NativeMessage.request_snowmelt_status(
+            source=source,
+            zone_type=2,
+            zone_id=5,
+            keys=bytes.fromhex("25262222"),
+        )
+        assert request.to_bytes() == bytes.fromhex("57f00006 2a04 25262222")
+        assert request.decoded["keys_hex"] == "25262222"
+        with self.assertRaises(ValueError):
+            NativeMessage.request_snowmelt_status(
+                source=source,
+                zone_type=2,
+                zone_id=32,
+                keys=b"",
+            )
+        with self.assertRaises(ValueError):
+            NativeMessage.request_snowmelt_status(
+                source=source,
+                zone_type=0,
+                zone_id=0,
+                keys=bytes(62),
+            )
+
+    def test_raw_group_update_is_not_an_addressed_block(self) -> None:
+        source = NativeAddress(0, 0)
+        update = NativeMessage.setpoint_group(12, enabled=True, source=source)
+        assert update.to_bytes() == bytes.fromhex("61f00002 0c01")
+        for invalid in (0, 13):
+            with self.assertRaises(ValueError):
+                NativeMessage.setpoint_group(invalid, enabled=False, source=source)
+
     def test_header_boundaries_and_unrecognized_payload(self) -> None:
         payload = bytes(range(63))
         body = bytes.fromhex("ffffffff") + payload

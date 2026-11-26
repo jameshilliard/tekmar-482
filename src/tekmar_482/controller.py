@@ -109,7 +109,6 @@ class Tekmar482Controller:
         self.include_setpoint_groups = include_setpoint_groups
         self.setback_enable = setback_enable
         self.mode_refresh_burst_window = max(0.0, mode_refresh_burst_window)
-        self.discovery: DiscoveryResult | None = None
         self.state: Tekmar482State | None = None
         self.last_error: BaseException | None = None
         self._state_callbacks: set[StateCallback] = set()
@@ -134,6 +133,11 @@ class Tekmar482Controller:
         self._active_device_writes = 0
         self._writes_idle = asyncio.Event()
         self._writes_idle.set()
+
+    @property
+    def discovery(self) -> DiscoveryResult | None:
+        """Return discovery metadata with the latest observed schedule configuration."""
+        return self.state.discovery if self.state is not None else None
 
     @property
     def data(self) -> AvailableInfo | None:
@@ -291,7 +295,7 @@ class Tekmar482Controller:
             state.invalidate_devices(
                 self._addresses_changed_since(self._inventory_revision),
             )
-            self.state, self.discovery = state, state.discovery
+            self.state = state
             self._ready_generation = generation
             self._inventory_confirmed = True
             self.last_error = None
@@ -326,7 +330,7 @@ class Tekmar482Controller:
         async with self._refresh_lock:
             state = await self._read_state(self.discovery)
             changed = state.data != self.data
-            self.state, self.discovery = state, state.discovery
+            self.state = state
             if changed:
                 self._notify_state()
             return state.data
@@ -432,7 +436,7 @@ class Tekmar482Controller:
                 self._reporting_paused = False
             if state.data.gateway.reporting_enabled is False:
                 self._reporting_disabled()
-            self.state, self.discovery = state, state.discovery
+            self.state = state
             self._inventory_revision = revision
             self._inventory_confirmed = True
             self._notify_state()
