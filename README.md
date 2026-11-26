@@ -56,6 +56,19 @@ passive: a quiet device will not appear during a short scan. See the firmware's
 [frame catalog](https://github.com/jameshilliard/tekmar-482-firmware/blob/master/docs/tn4-frames.md)
 and [binary UART protocol](https://github.com/jameshilliard/tekmar-482-firmware/blob/master/docs/tpck-bridge.md).
 
+Use `bridge.normal()` to run tRPC on the **same** custom-firmware connection:
+
+```python
+async with bridge.normal() as client:
+    addresses = await client.get_inventory_addresses()
+```
+
+Normal and Raw sessions take exclusive turns on the link. The Normal client
+is valid only inside its context. A cold gateway needs time to hear devices;
+its inventory is not the same as the list of all native frame sources. See
+[Normal method coverage](https://github.com/jameshilliard/tekmar-482-firmware/blob/master/docs/normal-mode.md)
+before using other vendor client methods on custom firmware.
+
 For an addressed native read, use the physical port and wire address
 from a frame observed on that line. These are not tRPC decimal addresses:
 

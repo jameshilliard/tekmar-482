@@ -12,6 +12,7 @@ from unittest.mock import patch
 
 from tekmar_482 import (
     BridgeClient,
+    ConnectionClosedError,
     FirmwareBundle,
     GatewayEndpoint,
     NativeFrame,
@@ -158,6 +159,37 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
             assert stream.tx_result == (0, "ACK")
             assert stream.diagnostics[0].invalid_dropped == 1
             assert set(stream.diagnostics) == set(range(5))
+
+    async def test_normal_inventory_borrows_the_negotiated_link(self) -> None:
+        async def app(
+            reader: asyncio.StreamReader,
+            writer: asyncio.StreamWriter,
+        ) -> None:
+            mode = management(2, 0, bytes(1))
+            assert await reader.readexactly(len(mode)) == mode
+            writer.write(management(6, 3, struct.pack("<IB", 0x544BF002, 1)))
+            assert await reader.readexactly(len(mode)) == mode
+            writer.write(management(2, 3, bytes(1)))
+            walk = serialize(Packet(6, bytes.fromhex("01670100000000")))
+            assert await reader.readexactly(len(walk)) == walk
+            for address in (23, 1102, 0):
+                frame = serialize(Packet(6, struct.pack("<BIH", 4, 0x167, address)))
+                writer.write(frame[:3])
+                await writer.drain()
+                writer.write(frame[3:])
+            build = management(4, 1)
+            assert await reader.readexactly(len(build)) == build
+            writer.write(management(4, 4, b"unversioned"))
+
+        async with listen(app) as endpoint, endpoint.connect() as wire:
+            bridge = BridgeClient(wire)
+            async with bridge.normal() as client:
+                with self.assertRaises(ProtocolError):
+                    await bridge.revision()
+                assert await client.get_inventory_addresses() == (23, 1102)
+            with self.assertRaises(ConnectionClosedError):
+                await client.open()
+            assert await bridge.revision() is None
 
     async def test_vendor_opt_in_never_probes_rom(self) -> None:
         async def app(

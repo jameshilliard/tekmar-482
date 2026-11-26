@@ -10,6 +10,7 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
+from .client import Tekmar482Client
 from .exceptions import ConnectionClosedError, ProtocolError
 from .management import BridgeFeature, BridgeMethod, BridgeMode
 from .native import NativeFrame, NativeMessage
@@ -195,10 +196,9 @@ class BridgeClient:
             TrpcService.RESPONSE_UPDATE if update else TrpcService.RESPONSE_REQUEST
         )
         key = method.to_bytes(4, "little")
+        request = serialize(Packet(TYPE_TRPC, bytes([service]) + key + body))
         async with asyncio.timeout(5):
-            await self._wire.write(
-                serialize(Packet(TYPE_TRPC, bytes([service]) + key + body)),
-            )
+            await self._wire.write(request)
             while True:
                 packet = await self.next_packet()
                 if packet.type != TYPE_TRPC:
@@ -216,6 +216,14 @@ class BridgeClient:
                     == bytes([response]) + BridgeMethod.ERROR.to_bytes(4, "little")
                     and payload[:4] == key
                 ):
+                    if payload[4:] == b"\x01" and method in {
+                        BridgeMethod.MODE,
+                        BridgeMethod.ENTER_UPDATE,
+                    }:
+                        # Busy explicitly rejects the transition before it takes effect.
+                        await asyncio.sleep(0.025)
+                        await self._wire.write(request)
+                        continue
                     msg = f"bridge management rejection: {payload[4:].hex()}"
                     raise ProtocolError(msg)
 
@@ -297,6 +305,15 @@ class BridgeClient:
             raise ProtocolError(msg)
 
     @asynccontextmanager
+    async def normal(self) -> AsyncIterator[Tekmar482Client]:
+        """Borrow the negotiated link for one exclusive Normal-mode tRPC session."""
+        async with self._transaction():
+            await self._mode(BridgeMode.NORMAL)
+            transport = _NormalTransport(self, self._wire)
+            async with Tekmar482Client(transport) as client:
+                yield client
+
+    @asynccontextmanager
     async def stream(
         self,
         *,
@@ -343,3 +360,36 @@ class BridgeClient:
                             stream.diagnostics[p] = PortDiagnostic(p, valid, invalid)
                 finally:
                     stream.close()
+
+
+class _NormalTransport:
+    """The session borrows the existing decoder and never reopens the physical link."""
+
+    def __init__(self, bridge: BridgeClient, wire: Wire) -> None:
+        self._bridge = bridge
+        self._wire = wire
+        self._closed = False
+
+    @property
+    def is_open(self) -> bool:
+        return not self._closed and not self._wire.writer.is_closing()
+
+    async def open(self) -> None:
+        if not self.is_open:
+            msg = "Normal session has ended"
+            raise ConnectionClosedError(msg)
+
+    async def close(self) -> None:
+        self._closed = True
+
+    async def read_packet(self, timeout: float | None = None) -> Packet | None:
+        await self.open()
+        try:
+            async with asyncio.timeout(timeout):
+                return await self._bridge.next_packet()
+        except TimeoutError:
+            return None
+
+    async def write_packet(self, packet: Packet) -> None:
+        await self.open()
+        await self._wire.write(serialize(packet))
