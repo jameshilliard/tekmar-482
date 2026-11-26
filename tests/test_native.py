@@ -8,6 +8,7 @@ from tekmar_482 import (
     NativeFrame,
     NativeMessage,
     ScheduleEvent,
+    ScheduleProfile,
     SnowmeltBlock,
     SnowmeltSetpoint,
     WeeklyEvent,
@@ -242,7 +243,10 @@ class NativeTests(unittest.TestCase):
 
     def test_single_week_edit_and_readback_vector(self) -> None:
         frame = NativeFrame(2, 4, bytes.fromhex("6e7128ca13007f00018f9024ff06"))
-        week = WeeklyEvent.from_frame(frame)
+        with self.assertRaisesRegex(ValueError, "identify"):
+            WeeklyEvent.from_frame(frame)
+        profile = ScheduleProfile.from_identification({"product_number": 105102})
+        week = WeeklyEvent.from_frame(frame, profile=profile)
         assert week.target == NativeAddress(0x12, 0x23)
         assert week.port == 2 and week.event is ScheduleEvent.SLEEP
         assert week.time_on(Day.MONDAY) == time(0)

@@ -6,6 +6,7 @@ from enum import Enum, IntEnum, auto
 
 from .layouts import H_UNAVAILABLE, MULTI_WEEK
 from .scenes import SCENE_RESPONSE_FIELDS, SceneResponse
+from .schedules import DailyEvents, ScheduleBinding, ScheduleCycle, ScheduleProfile, SINGLE_WEEK, SETUP_BLOCK
 
 
 class WritableBlock(IntEnum):
@@ -198,6 +199,7 @@ class BlockPatch:
 
     block: WritableBlock
     edits: tuple[tuple[_Slot, int], ...]
+    schedule: ScheduleProfile | None = None
 
     @classmethod
     def from_fields(cls, block: int, values: Mapping[NativeField, int]) -> "BlockPatch":
@@ -219,6 +221,12 @@ class BlockPatch:
                 raise ValueError("unknown scene response setting")
             if field is F.SCENES_ENABLED and value not in (0, 1):
                 raise ValueError("scenes_enabled must be zero or one")
+            if field in (F.HEATING_SCHEDULE_ID, F.COOLING_SCHEDULE_ID) and value not in range(len(ScheduleBinding)):
+                raise ValueError("unknown native schedule binding")
+            if field is F.NUM_DAILY_EVENTS and value not in range(len(DailyEvents)):
+                raise ValueError("unknown native daily event count code")
+            if field is F.SCHEDULE_CYCLING_RATE and value not in range(len(ScheduleCycle)):
+                raise ValueError("unknown native schedule cycling code")
             if block == 0x5a and value:
                 raise ValueError("only a reset to zero is documented for tank runtime")
             if block in (0x05, 0x06, 0x07) and value == 0xff:
@@ -230,9 +238,20 @@ class BlockPatch:
             edits.append((slot, value))
         return cls(WritableBlock(block), tuple(edits))
 
+    def for_schedule(self, profile: ScheduleProfile) -> "BlockPatch":
+        """Resolve logical weekdays only after the addressed owner is identified."""
+        if self.block in SINGLE_WEEK:
+            layout = _LAYOUTS[self.block]
+            edits = tuple((layout.slots[profile.wire_day(self.block, slot.offset)], value)
+                          for slot, value in self.edits)
+            return BlockPatch(self.block, edits, profile)
+        return BlockPatch(self.block, self.edits, profile)
+
     def apply(self, support: int, body: bytes) -> bytes:
         """Produce positional update data without changing or synthesizing siblings."""
         width = _LAYOUTS[self.block].size
+        if self.block == SETUP_BLOCK and len(body) == 5 and support < 0x20:
+            body += b"\x00"  # SW 11 0F writer always emits zero for the sixth byte.
         if self.block == 0x2e and len(body) == 6 and not support & 0xc0:
             width = 6  # Some floor controls have no fourth word.
         if len(body) != width or support >> width:
@@ -244,7 +263,10 @@ class BlockPatch:
             if support & slot.support != slot.support:
                 raise ValueError(f"device does not report all bytes of {slot.field.label}")
             slot.put(data, value)
-        return bytes(data)
+        result = bytes(data)
+        if self.schedule and self.block == SETUP_BLOCK:
+            self.schedule.check_setup_edit(support, body, result)
+        return result
 
     def matches(self, support: int, body: bytes) -> bool | None:
         """Compare only edited bits. Missing or ambiguous readback is not a mismatch."""

@@ -29,6 +29,7 @@ def main() -> None:
         "products.py",
         "queries.py",
         "scenes.py",
+        "schedules.py",
         "writes.py",
     ):
         data = (SOURCE / "tools" / "payloads" / name).read_bytes()

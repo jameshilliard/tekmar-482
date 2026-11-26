@@ -7,7 +7,8 @@ from dataclasses import dataclass
 from enum import StrEnum
 from typing import TYPE_CHECKING
 
-from .native import NativeMessage
+from ._native_payloads.schedules import SETUP_BLOCK, SINGLE_WEEK, ScheduleProfile
+from .native import NativeBlockQuery, NativeMessage
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
@@ -35,8 +36,47 @@ class NativeWriteResult:
     readback: NativeBlockBatch | None = None
 
 
-async def write_verified_block(
+@dataclass(frozen=True, slots=True)
+class NativeBlockEditor:
+    """Callbacks borrowed only while the dispatcher owns the physical port."""
+
+    source: NativeAddress
+    read: Callable[[NativeBlockQuery], Awaitable[NativeBlockBatch]]
+    send: Callable[[NativeMessage], Awaitable[TxResult]]
+    timeout: float
+
+    async def write(
+        self,
+        query: NativeBlockQuery,
+        patch: BlockPatch,
+        *,
+        preview: bool,
+        profile: ScheduleProfile | None = None,
+        before: NativeFrame | None = None,
+    ) -> NativeWriteResult:
+        if query.block_id in SINGLE_WEEK or query.block_id == SETUP_BLOCK:
+            if profile is None:
+                identity = (
+                    await self.read(NativeBlockQuery(query.target, 0))
+                ).require_report()
+                profile = ScheduleProfile.from_identification(identity.decoded)
+            patch = patch.for_schedule(profile)
+        if before is None:
+            before = (await self.read(query)).require_report()
+        return await _write_verified_block(
+            patch,
+            before,
+            source=self.source,
+            read=lambda: self.read(query),
+            send=self.send,
+            timeout=self.timeout,
+            preview=preview,
+        )
+
+
+async def _write_verified_block(
     patch: BlockPatch,
+    before: NativeFrame,
     *,
     source: NativeAddress,
     read: Callable[[], Awaitable[NativeBlockBatch]],
@@ -44,7 +84,6 @@ async def write_verified_block(
     timeout: float,
     preview: bool,
 ) -> NativeWriteResult:
-    before = (await read()).require_report()
     payload = before.message.payload
     body = patch.apply(payload[2], payload[3:])
     proposed = NativeMessage.update_block(
@@ -53,7 +92,7 @@ async def write_verified_block(
         source=source,
         target=before.message.source,
     )
-    if body == payload[3:]:
+    if patch.matches(payload[2], payload[3:]) is True:
         return NativeWriteResult(NativeWriteStatus.UNCHANGED, before, proposed)
     if preview:
         return NativeWriteResult(NativeWriteStatus.PREVIEW, before, proposed)

@@ -14,8 +14,9 @@ from ._native_payloads.writes import BlockPatch
 from .constants import TN4_PORTS
 from .exceptions import ConnectionClosedError, ProtocolError, TekmarError
 from .native import NativeFrame, NativeMessage
+from .native_schedule import edit_schedule_time
 from .native_status import StatusCollector
-from .native_write import write_verified_block
+from .native_write import NativeBlockEditor
 from .packet import TYPE_TN4
 
 if TYPE_CHECKING:
@@ -23,7 +24,8 @@ if TYPE_CHECKING:
 
     from ._native_payloads.queries import NativeStatusQuery
     from ._native_payloads.writes import NativeField
-    from .native import NativeAddress, NativeBlockQuery
+    from .native import NativeAddress, NativeBlockQuery, NativeTargets
+    from .native_schedule import ScheduleChange, ScheduleTarget
     from .native_status import NativeStatusBatch
     from .native_write import NativeWriteResult
     from .packet import Packet
@@ -275,6 +277,16 @@ class BridgeStream(Protocol):
         preview: bool = False,
     ) -> NativeWriteResult: ...
     async def read(self) -> CaptureRecord: ...
+    async def write_schedule_time(
+        self,
+        port: int,
+        target: ScheduleTarget,
+        change: ScheduleChange,
+        *,
+        source: NativeAddress,
+        timeout: float = 20,
+        preview: bool = False,
+    ) -> NativeWriteResult: ...
 
 
 class RawDispatcher:
@@ -385,15 +397,40 @@ class RawDispatcher:
         preview: bool = False,
     ) -> NativeWriteResult:
         """Read, optionally update once, then verify. The timeout is per exchange."""
-        if port not in TN4_PORTS or query.target.request_mask().bit_count() != 1:
+        patch = BlockPatch.from_fields(query.block_id, changes)
+        async with self._editor(port, query.target, source, timeout) as editor:
+            return await editor.write(query, patch, preview=preview)
+
+    async def write_schedule_time(
+        self,
+        port: int,
+        target: ScheduleTarget,
+        change: ScheduleChange,
+        *,
+        source: NativeAddress,
+        timeout: float = 20,
+        preview: bool = False,
+    ) -> NativeWriteResult:
+        """Verify ownership and grouping before updating one display event."""
+        async with self._editor(port, target.address, source, timeout) as editor:
+            return await edit_schedule_time(editor, target, change, preview=preview)
+
+    @asynccontextmanager
+    async def _editor(
+        self,
+        port: int,
+        target: NativeAddress | NativeTargets,
+        source: NativeAddress,
+        timeout: float,
+    ) -> AsyncIterator[NativeBlockEditor]:
+        if port not in TN4_PORTS or target.request_mask().bit_count() != 1:
             msg = "expected a single destination on a physical port"
             raise ValueError(msg)
         if not timeout > 0:
             msg = "block write timeout must be positive"
             raise ValueError(msg)
-        patch = BlockPatch.from_fields(query.block_id, changes)
 
-        async def read() -> NativeBlockBatch:
+        async def read(query: NativeBlockQuery) -> NativeBlockBatch:
             return await self._collect_blocks(port, query, source, timeout)
 
         async def send(message: NativeMessage) -> TxResult:
@@ -404,14 +441,7 @@ class RawDispatcher:
             if port in self._pending or port in self._waiters:
                 msg = f"native operation already in progress on port {port}"
                 raise NativePortBusyError(msg)
-            return await write_verified_block(
-                patch,
-                source=source,
-                read=read,
-                send=send,
-                timeout=timeout,
-                preview=preview,
-            )
+            yield NativeBlockEditor(source, read, send, timeout)
 
     async def _collect_blocks(
         self,

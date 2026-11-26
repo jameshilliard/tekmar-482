@@ -14,6 +14,12 @@ from ._native_payloads.scenes import NativeScene, SceneResponse
 from ._native_payloads.writes import NativeField, WritableBlock
 from ._wire import GatewayEndpoint
 from .bridge import BridgeClient
+from .cli_schedule import (
+    add_schedule_commands,
+    schedule_change,
+    schedule_fields,
+    schedule_target,
+)
 from .cli_status import add_status_commands, read_status_from_args
 from .client import Tekmar482Client
 from .constants import DEFAULT_BAUDRATE, TN4_PORTS
@@ -28,6 +34,7 @@ from .gateway import open_gateway
 from .native import NativeAddress, NativeBlockQuery
 from .native_discovery import NativeDevice, discover_native
 from .native_scene import SceneSelection, SceneSendIssue, write_scene_response
+from .native_schedule import read_weekly_schedule
 from .native_snapshot import read_native_snapshot
 from .native_write import NativeWriteStatus
 from .raw import CaptureGap, InvalidCapture, PortError, TxStatus
@@ -219,6 +226,11 @@ def build_parser() -> argparse.ArgumentParser:
 
     _add_block_commands(subparsers, dump)
     _add_scene_commands(subparsers)
+    add_schedule_commands(
+        subparsers,
+        _common_parent(default_timeout=20),
+        _add_native_target,
+    )
     add_status_commands(subparsers, _common_parent(default_timeout=20), _int_value)
     for name in (
         "panel",
@@ -552,6 +564,8 @@ async def _native(args: argparse.Namespace, stdout: TextIO) -> int:
             "read-device",
             "write-block",
             "scene-response",
+            "read-schedule",
+            "write-schedule",
         }:
             return await _native_addressed(bridge, args, emit)
         elif args.command == "read-status":
@@ -657,7 +671,7 @@ async def _native_addressed(
         diagnostics=False,
     ) as stream:
         if args.command == "read-device":
-            await read_native_snapshot(
+            snapshot = await read_native_snapshot(
                 stream,
                 [NativeDevice(args.port, address)],
                 source=source,
@@ -666,8 +680,32 @@ async def _native_addressed(
                 on_block=lambda b: emit(_batch_fields(b)),
                 on_status=lambda s: emit(_status_fields(s)),
             )
+            for week in snapshot.schedule_directory.schedules:
+                emit({"weekly_schedule": schedule_fields(week)})
             return 0
-        if args.command == "scene-response":
+        if args.command == "read-schedule":
+            week = await read_weekly_schedule(
+                stream,
+                args.port,
+                schedule_target(address, args),
+                source=source,
+                timeout=args.timeout,
+            )
+            emit(schedule_fields(week))
+            binding = week.config.binding
+            return int(
+                binding is None or (binding.owns_table and not week.table_complete),
+            )
+        if args.command == "write-schedule":
+            result = await stream.write_schedule_time(
+                args.port,
+                schedule_target(address, args),
+                schedule_change(args),
+                source=source,
+                timeout=args.timeout,
+                preview=not args.confirm,
+            )
+        elif args.command == "scene-response":
             result = await write_scene_response(
                 stream,
                 args.port,
@@ -841,7 +879,7 @@ async def _dump_blocks(
             capture(await stream.read())
 
     async def sample() -> None:
-        await read_native_snapshot(
+        snapshot = await read_native_snapshot(
             stream,
             devices,
             timeout=timeout,
@@ -850,6 +888,8 @@ async def _dump_blocks(
             on_block=lambda b: emit(_batch_fields(b)),
             on_status=lambda s: emit(_status_fields(s)),
         )
+        for week in snapshot.schedule_directory.schedules:
+            emit({"weekly_schedule": schedule_fields(week)})
 
     tasks = (asyncio.create_task(listen()), asyncio.create_task(sample()))
     try:

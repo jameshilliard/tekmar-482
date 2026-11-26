@@ -10,19 +10,13 @@ from typing import TYPE_CHECKING, Self
 from ._native_payloads.scenes import NativeScene, SceneResponse
 from ._native_payloads.writes import NativeField, WritableBlock
 from .constants import TN4_PORTS
-from .native import NativeBlockQuery, NativeMessage
+from .native import NativeBlockQuery, NativeMessage, require_enum
 from .raw import NativePortBusyError, TxResult, TxStatus
 
 if TYPE_CHECKING:
     from .native import NativeAddress, NativeFrame
     from .native_write import NativeWriteResult
     from .raw import BridgeStream
-
-
-def _require_enum(value: object, kind: type[Enum]) -> None:
-    if not isinstance(value, kind):
-        msg = f"expected a {kind.__name__}"
-        raise TypeError(msg)
 
 
 class SceneSendIssue(Enum):
@@ -51,7 +45,7 @@ class SceneSelection:
     source: NativeAddress
 
     def __post_init__(self) -> None:
-        _require_enum(self.scene, NativeScene)
+        require_enum(self.scene, NativeScene)
         if (
             not self.ports
             or len(set(self.ports)) != len(self.ports)
@@ -158,8 +152,8 @@ async def write_scene_response(
     preview: bool = False,
 ) -> NativeWriteResult:
     """Change one configurable response using a fresh full block and readback."""
-    _require_enum(scene, NativeScene)
-    _require_enum(response, SceneResponse)
+    require_enum(scene, NativeScene)
+    require_enum(response, SceneResponse)
     if (field := scene.response_field) is None:
         msg = f"scene {scene.value} has a fixed response"
         raise ValueError(msg)

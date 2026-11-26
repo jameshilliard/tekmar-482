@@ -12,6 +12,7 @@ from ._native_payloads.queries import NativeStatusQuery, SnowmeltRole, StatusReq
 from .constants import TN4_PORTS
 from .native import NativeAddress, NativeBlockQuery, NativeTargets
 from .native_discovery import NativeInventory
+from .native_schedule import ScheduleDirectory
 from .raw import RejectReason, TxStatus
 
 if TYPE_CHECKING:
@@ -29,6 +30,11 @@ _HOST = NativeAddress(0, 0)
 class NativeSnapshot:
     blocks: tuple[NativeBlockBatch, ...]
     statuses: tuple[NativeStatusBatch, ...]
+
+    @property
+    def schedule_directory(self) -> ScheduleDirectory:
+        """Build calendar tables and system membership without additional I/O."""
+        return ScheduleDirectory.from_batches(self.blocks)
 
 
 @dataclass(slots=True)

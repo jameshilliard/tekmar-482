@@ -9,6 +9,13 @@ from ._native_payloads.queries import (
     StatusRequest,
 )
 from ._native_payloads.scenes import NativeScene, SceneReport, SceneResponse
+from ._native_payloads.schedules import (
+    DailyEvents,
+    ScheduleBinding,
+    ScheduleCycle,
+    ScheduleEvent,
+    ScheduleProfile,
+)
 from ._native_payloads.writes import NativeField, WritableBlock
 from ._wire import GatewayEndpoint
 from .bridge import BridgeClient, PanelState
@@ -95,7 +102,6 @@ from .native import (
     NativeFrame,
     NativeMessage,
     NativeTargets,
-    ScheduleEvent,
     SnowmeltSetpoint,
     WeeklyEvent,
 )
@@ -113,6 +119,17 @@ from .native_scene import (
     SceneSendIssue,
     SceneSetup,
     write_scene_response,
+)
+from .native_schedule import (
+    NativeWeeklySchedule,
+    ScheduleChange,
+    ScheduleChannel,
+    ScheduleConfiguration,
+    ScheduleDirectory,
+    ScheduleRow,
+    ScheduleTarget,
+    SystemSchedule,
+    read_weekly_schedule,
 )
 from .native_snapshot import NativeSnapshot, read_native_devices, read_native_snapshot
 from .native_status import NativeStatusBatch, read_snowmelt_status
@@ -257,6 +274,7 @@ __all__ = [
     "CaptureGap",
     "CaptureRecord",
     "ConnectionClosedError",
+    "DailyEvents",
     "DateTimeFields",
     "DecodedDeviceRuntime",
     "DecodedNamedValue",
@@ -306,6 +324,7 @@ __all__ = [
     "NativeStatusQuery",
     "NativeTargets",
     "NativeTransmitError",
+    "NativeWeeklySchedule",
     "NativeWriteResult",
     "NativeWriteStatus",
     "NullTransport",
@@ -327,7 +346,16 @@ __all__ = [
     "SceneSelection",
     "SceneSendIssue",
     "SceneSetup",
+    "ScheduleBinding",
+    "ScheduleChange",
+    "ScheduleChannel",
+    "ScheduleConfiguration",
+    "ScheduleCycle",
+    "ScheduleDirectory",
     "ScheduleEvent",
+    "ScheduleProfile",
+    "ScheduleRow",
+    "ScheduleTarget",
     "SerialxTpckTransport",
     "SetbackPercentFields",
     "SetbackSetpointFields",
@@ -343,6 +371,7 @@ __all__ = [
     "SnowmeltRuntime",
     "SnowmeltSetpoint",
     "StatusRequest",
+    "SystemSchedule",
     "Tekmar482Client",
     "Tekmar482Controller",
     "Tekmar482DeviceHandle",
@@ -409,6 +438,7 @@ __all__ = [
     "read_native_devices",
     "read_native_snapshot",
     "read_snowmelt_status",
+    "read_weekly_schedule",
     "require_device_support",
     "response_service_for",
     "schedule_setbacks_for_events",

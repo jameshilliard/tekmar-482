@@ -260,28 +260,63 @@ number of oldest records dropped by the host; set `capture_backlog` on
 `bridge.stream()` to change the default of 512 records. Gateway drop counts
 are separate and available in `stream.diagnostics` after a normal exit.
 
-For a matched, complete weekly event report:
+### Weekly schedules
+
+Read an addressed device's assignment and the event times it actually
+owns. A zone schedule belongs to the device; a system schedule belongs
+to its master, not its members. The 033 timer can own up to four
+separate system schedules. For example:
+
+```bash
+tekmar-482 read-schedule 2 0x12 3 --tcp 192.0.2.10:3001 --json
+tekmar-482 read-schedule 2 0x12 3 --channel cool --tcp 192.0.2.10:3001
+tekmar-482 read-schedule 1 0x14 5 --system 2 --tcp 192.0.2.10:3001
+tekmar-482 write-schedule 2 0x12 3 occupied monday 07:30 --tcp 192.0.2.10:3001
+```
+
+`write-schedule` previews by default. Use the **displayed** event name;
+in a two-event schedule Occupied is the Wake wire row, Unoccupied is
+the Sleep row. Use a local ten-minute time to add or change an event,
+or `disabled` to remove it. A change covers every day in the device's
+24-hour, 5-2, 5-1-1 or 7-day grouping. With `--confirm` the client
+reads the owner, updates only the selected fields and verifies by a
+fresh addressed read. It does not activate a schedule or change a
+thermostat's mode as a side effect.
 
 ```python
 from calendar import Day
 from datetime import time
 
-from tekmar_482 import WeeklyEvent
+from tekmar_482 import ScheduleChange, ScheduleEvent, ScheduleTarget, read_weekly_schedule
 
-week = WeeklyEvent.from_frame(report)
-print(week.event.name, week.time_on(Day.MONDAY))
-change = week.with_time(Day.MONDAY, time(6, 30))
-update = change.update(source)  # Construct only; nothing is sent here.
-readback = change.request(source)
+target = ScheduleTarget(peer)
+week = await read_weekly_schedule(stream, port, target, source=source)
+for row in week.rows:
+    print(row.display_event.name, row.days)  # Monday first; None means unknown.
+change = ScheduleChange(ScheduleEvent.OCCUPIED, Day.MONDAY, time(7, 30))
+preview = await stream.write_schedule_time(port, target, change, source=source, preview=True)
 ```
 
-Each block is one event across seven days, not seven complete schedules.
-Use `None` for a disabled event. Edits preserve the other day bytes and
-the indexed schedule selector. Sparse or extended reports are available
-through `frame.decoded` but cannot be used to construct a whole-week edit.
-After an intentional write, read the same block back and compare it with
-the intended change. Neither the local transmit echo nor a link ACK
-confirms the setting.
+Calendar rows retain raw ten-minute slots (144 = disabled), including unknown
+codes. Missing times and conflicting timer headers mark a table incomplete. `dump` and
+`read-device` also assemble calendars from the block replies they already
+received. Given a native snapshot, `snapshot.schedule_directory.system(2,
+ports=(0, 1))` returns observed masters and members within those lines;
+`owner` is absent if there is no master or more than one distinct master.
+The library never forwards a member edit to a guessed owner.
+
+For low-level work `WeeklyEvent.from_frame(report, profile=week.config.profile)`
+parses a complete row and preserves its indexed header. Early 552/557
+revisions use a different weekday order, so a single-schedule row requires
+identification before it can be interpreted as calendar days. Plain
+`frame.decoded` shows the nominal wire slots, not a revision-corrected calendar.
+Named weekday edits through `write-block` also identify their target first.
+Use setup block `0x0f` to assign a capable device its own zone schedule
+(`heating_schedule_id=1`) or a shared role. These changes are separate from
+editing event times; the client refuses setup rewrites that could silently
+demote a master. See the [native schedule reference](https://github.com/jameshilliard/tekmar-482-firmware/blob/master/docs/tn4-frames.md#weekly-schedules).
+
+### Snowmelt
 
 On an identified snowmelt controller, use `SnowmeltBlock` for addressed
 configuration, including melt/storm group IDs, runtimes and slab targets.

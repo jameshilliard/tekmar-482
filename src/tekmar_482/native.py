@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field, replace
 from datetime import time
-from enum import IntEnum
 from typing import TYPE_CHECKING, Self
 
 from ._native_payloads import (
@@ -16,12 +15,14 @@ from ._native_payloads import (
 )
 from ._native_payloads.queries import NativeStatusQuery, StatusRequest
 from ._native_payloads.scenes import SCENE_REPORT, NativeScene, SceneReport
+from ._native_payloads.schedules import ScheduleEvent, ScheduleProfile
 from .constants import SETPOINT_GROUP_IDS, TN4_PORTS
 from .units import celsius_to_degh, degh_to_celsius
 
 if TYPE_CHECKING:
     from calendar import Day
     from datetime import datetime
+    from enum import Enum
 
 _HEADER = 4
 _MAX_PAYLOAD = 63
@@ -35,6 +36,13 @@ _SINGLE = 0x10
 _MULTI = 0x38
 _DAYS = 7
 _DISABLED = 144
+_UNIDENTIFIED_SCHEDULE = ScheduleProfile(None, None)
+
+
+def require_enum(value: object, kind: type[Enum]) -> None:
+    if not isinstance(value, kind):
+        msg = f"expected a {kind.__name__}"
+        raise TypeError(msg)
 
 
 def _uint(value: int, width: int) -> int:
@@ -396,11 +404,28 @@ class SnowmeltSetpoint:
         )
 
 
-class ScheduleEvent(IntEnum):
-    WAKE = 0
-    UNOCCUPIED = 1
-    OCCUPIED = 2
-    SLEEP = 3
+def schedule_slot(value: time | None) -> int:
+    """Encode a ten-minute local time, or the device's disabled-event value."""
+    if value is None:
+        return _DISABLED
+    if (
+        value.tzinfo is not None
+        or value.second
+        or value.microsecond
+        or value.minute % 10
+    ):
+        msg = "expected a local time on a ten-minute boundary"
+        raise ValueError(msg)
+    return value.hour * 6 + value.minute // 10
+
+
+def schedule_time(raw: int) -> time | None:
+    if raw == _DISABLED:
+        return None
+    if not 0 <= raw < _DISABLED:
+        msg = f"undefined schedule time byte {raw:#04x}"
+        raise ValueError(msg)
+    return time(raw // 6, raw % 6 * 10)
 
 
 @dataclass(frozen=True, slots=True)
@@ -412,6 +437,7 @@ class WeeklyEvent:
     event: ScheduleEvent
     days: bytes
     selector: int | None = None
+    profile: ScheduleProfile = _UNIDENTIFIED_SCHEDULE
 
     def __post_init__(self) -> None:
         if len(self.days) != _DAYS:
@@ -419,9 +445,15 @@ class WeeklyEvent:
             raise ValueError(msg)
         if self.selector is not None:
             _uint(self.selector, 8)
+        self.profile.wire_day(self.block_id, 0)
 
     @classmethod
-    def from_frame(cls, frame: NativeFrame) -> Self:
+    def from_frame(
+        cls,
+        frame: NativeFrame,
+        *,
+        profile: ScheduleProfile = _UNIDENTIFIED_SCHEDULE,
+    ) -> Self:
         message = frame.message
         block = int.from_bytes(message.payload[:2], "little")
         multi = block in range(_MULTI, _MULTI + len(ScheduleEvent))
@@ -434,12 +466,14 @@ class WeeklyEvent:
         if len(message.payload) != 3 + width or message.payload[2] != (1 << width) - 1:
             msg = "cannot edit an incomplete or extended weekly event block"
             raise ValueError(msg)
+        wire_days = message.payload[-_DAYS:]
         return cls(
             frame.port,
             message.source,
             ScheduleEvent(block & 3),
-            message.payload[-_DAYS:],
+            bytes(wire_days[profile.wire_day(block, i)] for i in range(_DAYS)),
             message.payload[3] if multi else None,
+            profile,
         )
 
     @property
@@ -447,28 +481,11 @@ class WeeklyEvent:
         return (_SINGLE if self.selector is None else _MULTI) + self.event
 
     def time_on(self, day: Day) -> time | None:
-        raw = self.days[day]
-        if raw == _DISABLED:
-            return None
-        if raw > _DISABLED:
-            msg = f"undefined schedule time byte {raw:#04x}"
-            raise ValueError(msg)
-        return time(raw // 6, raw % 6 * 10)
+        return schedule_time(self.days[day])
 
     def with_time(self, day: Day, value: time | None) -> Self:
-        raw = _DISABLED
-        if value is not None:
-            if (
-                value.tzinfo is not None
-                or value.second
-                or value.microsecond
-                or value.minute % 10
-            ):
-                msg = "expected a local time on a ten-minute boundary"
-                raise ValueError(msg)
-            raw = value.hour * 6 + value.minute // 10
         days = bytearray(self.days)
-        days[day] = raw
+        days[day] = schedule_slot(value)
         return replace(self, days=bytes(days))
 
     def request(self, source: NativeAddress) -> NativeMessage:
@@ -481,9 +498,12 @@ class WeeklyEvent:
 
     def update(self, source: NativeAddress) -> NativeMessage:
         prefix = b"" if self.selector is None else bytes([self.selector])
+        wire = bytearray(_DAYS)
+        for day, raw in enumerate(self.days):
+            wire[self.profile.wire_day(self.block_id, day)] = raw
         return NativeMessage.update_block(
             self.block_id,
-            prefix + self.days,
+            prefix + bytes(wire),
             source=source,
             target=self.target,
         )

@@ -14,6 +14,7 @@ from .layouts import (
 )
 from .products import identify_product
 from .scenes import SCENE_REPORT, SCENE_RESPONSE_FIELDS, SceneReport, SceneResponse
+from .schedules import DAY_NAMES, SINGLE_WEEK, DailyEvents, ScheduleBinding, ScheduleCycle, ScheduleEvent
 
 Fields = dict[str, str | int | float]
 SETBACK = ("wake", "unoccupied_4", "occupied_4", "sleep", "occupied_2", "unoccupied_2", "away", "unknown")
@@ -240,13 +241,10 @@ def block_request(r: Reader) -> Fields:
     return fields
 
 
-DAYS = ("monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday")
-EVENTS = ("wake", "unoccupied", "occupied", "sleep")
 SCHEDULE_SETUP = (
     "heating_schedule_id", "cooling_schedule_id", "schedule_cycling_rate",
     "num_daily_events", "optimum_start_operation", "rtc_setback_enable",
 )
-SINGLE_WEEK = range(0x10, 0x14)
 CONTROL_APPS = ("setpoint", "hot_tub", "dhw", "floor", "pool")
 CONTROL_SETUP = ("application_mode", "mode_configuration", "run_mode_configuration",
                  "relay_two_sampling", "relay_two_start_time", "relay_two_duration",
@@ -343,14 +341,22 @@ def block_fields(block: int, index: int, value: int) -> Fields:
     if block == 3 and index < 3:
         return {("mode_setting", "heating_cph", "air_group_id")[index]: value}
     if block == 15 and index < len(SCHEDULE_SETUP):
-        return {SCHEDULE_SETUP[index]: value}
-    if block in SINGLE_WEEK and index < len(DAYS):
-        return event_time(DAYS[index], value)
+        name = SCHEDULE_SETUP[index]
+        fields: Fields = {name: value}
+        if index in (0, 1) and value in range(len(ScheduleBinding)):
+            fields[name + "_name"] = ScheduleBinding(value).name.lower()
+        if index == 2 and value in range(len(ScheduleCycle)):
+            fields[name + "_name"] = ScheduleCycle(value).name.lower()
+        if index == 3 and value in range(len(DailyEvents)):
+            fields["daily_event_count"] = len(DailyEvents(value).events)
+        return fields
+    if block in SINGLE_WEEK and index < len(DAY_NAMES):
+        return event_time(DAY_NAMES[index], value)
     if block in MULTI_WEEK:
         if index == 0:
             return {"schedule_id": value & 7, "master_flag": value >> 3 & 1,
                     "schedule_cycling_rate": value >> 4 & 3, "num_daily_events": value >> 6}
-        return event_time(DAYS[index - 1], value)
+        return event_time(DAY_NAMES[index - 1], value)
     return {f"byte{index + 1}_raw": value}
 
 
@@ -358,7 +364,7 @@ def block_metadata(block: int) -> Fields:
     if 0x28 <= block <= 0x31:
         return {"control_application": CONTROL_APPS[(block - 0x28) // 2]}
     if block in SINGLE_WEEK or block in MULTI_WEEK:
-        return {"event": EVENTS[block & 3]}
+        return {"event": ScheduleEvent(block & 3).name.lower()}
     return {}
 
 
