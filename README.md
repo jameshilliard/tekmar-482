@@ -167,8 +167,11 @@ An editable Git checkout has no flash image. To build the release locally,
 initialize the submodule with `git submodule update --init firmware`, install
 GNU Arm binutils and the firmware's pinned Rust toolchain, and run
 `uv build --sdist`. The build stages the image only while creating the archive.
-For routine physical testing use the firmware's [SRAM trial procedure](https://github.com/jameshilliard/tekmar-482-firmware/blob/master/docs/interfaces.md#stream-decoded-frames);
-the flash installer is for persistent deployment.
+Use the flash installer for development hardware and persistent deployment.
+To test a local revision, run the bundled CLI directly from the sdist
+(tested with uv 0.11.20):
+`uvx --from 'dist/tekmar_482-0.1.0.tar.gz[serial]' tekmar-482 update --serial "$PORT"`.
+An already-current custom build is not rewritten.
 
 ```bash
 # A custom dev image is running. This may replace an unversioned build.

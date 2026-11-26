@@ -37,6 +37,9 @@ if TYPE_CHECKING:
         Awaitable[None],
     ]
 
+# Sector numbers for consecutive 4 KiB pages in the LPC2146 flash window.
+_PAGE_SECTORS = tuple(range(8)) + (8,) * 8
+
 
 @asynccontextmanager
 async def listen(handler: Handler) -> AsyncIterator[GatewayEndpoint]:
@@ -80,7 +83,8 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         image[0x1FC:0x200] = b"\xff" * 4
         image[0x100:0x130] = b"TK48REV\x00" + b"1" * 40
         (resources / "_images").mkdir()
-        (resources / "_images/bridge.bin").write_bytes(image)
+        self.image_path = resources / "_images/bridge.bin"
+        self.image_path.write_bytes(image)
         self.enterContext(patch("tekmar_482.firmware.files", return_value=resources))
 
     async def page_data(
@@ -459,6 +463,17 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
     async def test_rom_auto_programs_and_verifies_boot(self) -> None:
         await self.check_auto_program(None)
 
+    async def test_full_flash_window_and_first_oversize_byte(self) -> None:
+        # Distinct page contents detect a misplaced copy within the large sector.
+        image = bytearray(b"".join(bytes([n]) * 4096 for n in range(16)))
+        header = self.image_path.read_bytes()
+        image[: len(header)] = header
+        self.image_path.write_bytes(image)
+        await self.check_auto_program(None)
+        self.image_path.write_bytes(image + b"\x00")
+        with self.assertRaisesRegex(ProtocolError, "invalid bundled flash image"):
+            FirmwareBundle.load()
+
     async def test_different_build_auto_programs_and_verifies_boot(self) -> None:
         await self.check_auto_program("f" * 40)
 
@@ -514,12 +529,13 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
                     assert (
                         prepared
                         == tuple(map(int, args))
-                        == (0, len(expected) // page - 1)
+                        == (0, _PAGE_SECTORS[len(expected) // page - 1])
                     )
                     prepared = None
                 elif op == b"C":
                     addr, source, length = map(int, args)
-                    assert prepared == (addr // page, addr // page)
+                    sector = _PAGE_SECTORS[addr // page]
+                    assert prepared == (sector, sector)
                     assert source == 0x40001000 and length == page
                     programmed[addr : addr + page] = staged
                     copied.append(addr)
