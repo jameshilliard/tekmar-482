@@ -130,8 +130,10 @@ line. It sends a startup probe on quiet ports and queries for a master
 on link-up. It does not continuously scan. Raw sessions initiate neither
 probe, and Raw receive ACK remains opt-in. Normal mode yields to a winning
 sender and can reattempt a pending operation; neither mode replays a write
-just because its ACK was missing. For differences in setting reads and
-electrical fault handling see the
+just because its ACK was missing. Normal mode drives a six-bit error flag
+on a bad frame or a missing ACK for its own send. Raw mode never emits that
+flag, even on ports selected for receive ACKs. For fault handling and
+remaining differences from stock, see the
 [bus compatibility notes](https://github.com/jameshilliard/tekmar-482-firmware/blob/master/docs/normal-mode.md#bus-compatibility).
 
 The CLI `request` command uses Normal mode on custom firmware by default.
