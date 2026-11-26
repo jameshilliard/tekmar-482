@@ -87,6 +87,15 @@ prove the write failed; read before retrying. For a quiet device use
 `timeout=12` to allow the gateway's ten-second transaction to finish.
 Stock firmware uses its original write-echo matching.
 
+`await client.get_outdoor_temperature_celsius()` returns the selected
+network temperature, or `None` if there is no source. An unanswered read
+raises `TimeoutError`. To provide a fallback source, call
+`await client.set_outdoor_temperature_celsius(value)` with a fresh sample
+before four minutes elapse. A network sensor takes priority: the Update
+reply's `temp` is the selected value in degH, not necessarily the supplied
+value. An unsent update superseded by a newer sample returns `None`.
+The client does not refresh an old sample on its own.
+
 `set_humidity_min()` controls humidification and `set_humidity_max()`
 controls dehumidification; measuring RH does not imply either is enabled.
 The low-level fan client uses the device's wire units. On a discovered

@@ -688,6 +688,7 @@ class ReplySelector:
                 TrpcMethod.DATE_TIME,
             }
         return self.slot is not None or self.method in (
+            TrpcMethod.OUTDOOR_TEMP,
             TrpcMethod.MODE_SETTING,
             TrpcMethod.DEVICE_ATTRIBUTES,
             TrpcMethod.HUMIDITY_SET_MIN,

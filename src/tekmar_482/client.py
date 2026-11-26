@@ -57,7 +57,7 @@ from .trpc import (
     TrpcService,
     TrpcServiceId,
 )
-from .units import celsius_to_dege, celsius_to_degh
+from .units import celsius_to_dege, celsius_to_degh, degh_to_celsius
 
 if TYPE_CHECKING:
     from collections.abc import (
@@ -74,6 +74,7 @@ if TYPE_CHECKING:
     from .transport import PacketTransport
 
 _REPORTING_ACK_TIMEOUT = 5
+_OUTDOOR_LIMIT = 0x0BEA  # Exclusive bound in J1196J's host sample handler.
 
 _REJECTED_CLOCK = DateTimeFields(
     year=ThaValue.NA_16,
@@ -703,6 +704,47 @@ class Tekmar482Client:
     async def request_outdoor_temperature(self) -> TrpcPacket:
         """Request the gateway outdoor temperature."""
         return await self.request(TrpcMethod.OUTDOOR_TEMP)
+
+    async def get_outdoor_temperature_celsius(
+        self,
+        *,
+        timeout: float | None = 5,
+    ) -> float | None:
+        """Read the selected network value; None means no source, not a timeout."""
+        reply = _require_reply(
+            await self.request_response(TrpcMethod.OUTDOOR_TEMP, timeout=timeout),
+            "OutdoorTemp",
+        )
+        return degh_to_celsius(reply.require("temp"))
+
+    async def set_outdoor_temperature(
+        self,
+        temp: int,
+        *,
+        timeout: float | None = 5,
+    ) -> TrpcPacket | None:
+        """Supply a four-minute local sample (degH); the reply is the network value."""
+        if not 0 <= temp < _OUTDOOR_LIMIT:
+            msg = f"OutdoorTemp update must be in 0..{_OUTDOOR_LIMIT - 1}: {temp}"
+            raise ValueError(msg)
+        return await self.coalesced_update_response(
+            TrpcMethod.OUTDOOR_TEMP,
+            coalesce_key=TrpcMethod.OUTDOOR_TEMP,
+            fields={"temp": temp},
+            timeout=timeout,
+        )
+
+    async def set_outdoor_temperature_celsius(
+        self,
+        celsius: float,
+        *,
+        timeout: float | None = 5,
+    ) -> TrpcPacket | None:
+        """Supply one outdoor sample; the caller owns the refresh schedule."""
+        return await self.set_outdoor_temperature(
+            celsius_to_degh(celsius),
+            timeout=timeout,
+        )
 
     async def request_setpoint_group(self, group_id: int) -> TrpcPacket:
         """Request a setpoint group enable state."""

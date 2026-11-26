@@ -40,6 +40,40 @@ def report(method: TrpcMethodId, **fields: int) -> TrpcPacket:
 
 
 class SessionTest(unittest.IsolatedAsyncioTestCase):
+    async def test_outdoor_source_is_not_an_echo_of_the_host_temperature(self) -> None:
+        transport = BlockingWriteTransport()
+        method = TrpcMethod.OUTDOOR_TEMP
+        async with Tekmar482Client(transport) as client, asyncio.timeout(2):
+            for invalid in (-1, 0xBEA, 0xFFFF):
+                with self.assertRaises(ValueError):
+                    await client.set_outdoor_temperature(invalid)
+            assert not transport.written
+            query = asyncio.create_task(client.get_outdoor_temperature_celsius())
+            assert (await transport.next_write()).data == bytes.fromhex(
+                "01170100000000",
+            )
+            old = asyncio.create_task(client.set_outdoor_temperature(0xBE9))
+            await asyncio.sleep(0)
+            new = asyncio.create_task(client.set_outdoor_temperature_celsius(0))
+            assert await old is None
+            transport.release_write()
+            transport.queue_packet(response(method, temp=0xFFFF).to_packet())
+            assert await query is None
+            assert (await transport.next_write()).data == bytes.fromhex(
+                "00170100009204",
+            )
+            transport.release_write()
+            actual = update_response(method, temp=1250)
+            transport.queue_packet(actual.to_packet())
+            assert await new == actual
+            query = asyncio.create_task(client.get_outdoor_temperature_celsius())
+            await transport.next_write()
+            transport.release_write()
+            transport.queue_packet(response(method, temp=1170).to_packet())
+            assert await query == 0
+            with self.assertRaises(TimeoutError):
+                await client.get_outdoor_temperature_celsius(timeout=0.01)
+
     async def test_version_marker_does_not_retire_custom_bus_read(self) -> None:
         transport = BlockingWriteTransport()
         method = TrpcMethod.MODE_SETTING
