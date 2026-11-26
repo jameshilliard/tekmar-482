@@ -1,0 +1,193 @@
+"""Hydronic status and loop assignments from the 483 SW 11 native layouts."""
+
+from collections.abc import Mapping
+from dataclasses import dataclass
+from enum import Enum
+
+from .codec import Fields, Reader, fahrenheit, status_flags, temp
+
+MASTER_PRESENT = 0x3ff
+MASTER_STATUS = 0x3cf
+PLANT_LOOP_STATUS = 0x3ce
+DHW_STATUS = 0x23f
+TANK_STATUS = 0x173
+SETUP_SLOTS = {0x33: range(1, 5), 0x34: range(5, 8)}
+
+
+class LoopKind(str, Enum):
+    BOILER = "boiler"
+    MIX = "mix"
+    TANK = "tank"
+    UNLINKED = "unlinked"
+    UNKNOWN = "unknown"
+
+
+@dataclass(frozen=True, slots=True)
+class HeatSource:
+    raw: int
+
+    @property
+    def kind(self) -> LoopKind:
+        if not self.raw:
+            return LoopKind.UNLINKED
+        return (LoopKind.MIX, LoopKind.TANK, LoopKind.UNKNOWN, LoopKind.BOILER)[self.raw >> 4 & 3]
+
+    @property
+    def loop(self) -> int:
+        return self.raw & 15
+
+    @property
+    def mode(self) -> int:
+        return self.raw >> 6
+
+
+@dataclass(frozen=True, slots=True)
+class LoopAssignment:
+    slot: int
+    subnet: int
+    heat_source: HeatSource | None = None  # None for the positional MasterPresent layout.
+
+    @property
+    def kind(self) -> LoopKind:
+        if self.heat_source is not None:
+            return self.heat_source.kind
+        return LoopKind.MIX if self.slot else LoopKind.BOILER
+
+    @property
+    def mix_number(self) -> int | None:
+        if self.kind is not LoopKind.MIX:
+            return None
+        return self.heat_source.loop if self.heat_source is not None else self.slot
+
+@dataclass(frozen=True, slots=True)
+class LoopSetupSlot:
+    slot: int
+    subnet: int | None
+    heat_source: HeatSource | None
+
+    @classmethod
+    def from_block(cls, block: int, fields: Mapping[str, object]) -> tuple["LoopSetupSlot", ...]:
+        slots = []
+        for n in SETUP_SLOTS[block]:
+            subnet, source = (fields.get(f"bus{n}_{k}") for k in ("subnet", "heat_source_id"))
+            if isinstance(subnet, int) or isinstance(source, int):
+                slots.append(cls(n, subnet if isinstance(subnet, int) else None,
+                                 HeatSource(source) if isinstance(source, int) else None))
+        return tuple(slots)
+
+
+@dataclass(frozen=True, slots=True)
+class LoopTopology:
+    announced: tuple[int, ...] = ()  # Zero slots retain their position but do not advertise a loop.
+    setup1: tuple[LoopSetupSlot, ...] | None = None
+    setup2: tuple[LoopSetupSlot, ...] | None = None
+
+    def assignment_for(self, subnet: int) -> LoopAssignment | None:
+        """Only label the sender's own bus, never every subnet advertised on a port."""
+        if setup := (self.setup1 or ()) + (self.setup2 or ()):
+            exact_setup = tuple(s for s in setup if s.subnet == subnet)
+            candidates = exact_setup or tuple(s for s in setup if s.subnet is not None and s.subnet & 7 == subnet & 7)
+            if len(candidates) == 1:
+                slot = candidates[0]
+                if slot.subnet is not None and slot.heat_source is not None:
+                    return LoopAssignment(slot.slot, slot.subnet, slot.heat_source)
+            return None
+        slots = tuple(LoopAssignment(i, s) for i, s in enumerate(self.announced) if s)
+        exact = tuple(s for s in slots if s.subnet == subnet)
+        matches = exact or tuple(s for s in slots if s.subnet & 7 == subnet & 7)
+        return matches[0] if len(matches) == 1 else None
+
+
+@dataclass(frozen=True, slots=True)
+class LoopStatus:
+    supply_raw: int
+    return_raw: int
+    target_raw: int
+    mode: int
+    loop_output_pct: int
+    pump_output_pct: int
+    flags: int
+    dhw_supply_raw: int | None
+
+    @classmethod
+    def read(cls, r: Reader, *, master: bool) -> "LoopStatus":
+        supply, ret, packed = r.word(), r.word(), r.word()
+        loop, pump, flags = r.take(3)
+        dhw = r.word() if master and len(r.remaining) >= 2 else None
+        return cls(supply, ret, packed & 0x1fff, packed >> 13, loop, pump, flags, dhw)
+
+    @property
+    def supply_f(self) -> float | None:
+        return fahrenheit(self.supply_raw)
+
+    @property
+    def return_f(self) -> float | None:
+        return fahrenheit(self.return_raw)
+
+    @property
+    def target_f(self) -> float | None:
+        return fahrenheit(self.target_raw)
+
+    @property
+    def dhw_supply_f(self) -> float | None:
+        return fahrenheit(self.dhw_supply_raw)
+
+    def fields(self) -> Fields:
+        modes = ("neither", "heating", "heating_cooling_disallowed", "cooling", "cooling_heating_disallowed")
+        b = self.flags
+        result = temp("supply_temp", self.supply_raw) | temp("return_temp", self.return_raw) | temp("target_temp", self.target_raw)
+        result.update(heat_cool_mode=self.mode, mode_name=modes[self.mode] if self.mode < len(modes) else "unknown",
+                      loop_output_pct=self.loop_output_pct, pump_output_pct=self.pump_output_pct,
+                      setback_status=b & 7, weather_shutdown=b >> 3 & 1, operating_on_max=b >> 4 & 1,
+                      operating_on_min=b >> 5 & 1, output_limited=b >> 6 & 1, reserved=b >> 7)
+        if self.dhw_supply_raw is not None:
+            result.update(temp("dhw_supply_temp", self.dhw_supply_raw))
+        return result
+
+
+@dataclass(frozen=True, slots=True)
+class DhwStatus:
+    flags: int
+    output: int
+    target_raw: int
+    tank_raw: int
+
+    @classmethod
+    def read(cls, r: Reader) -> "DhwStatus":
+        flags, output, target, tank = r.take(4)
+        return cls(flags, output, target, tank)
+
+    @property
+    def target_f(self) -> float | None:
+        return fahrenheit(self.target_raw, deg_e=True)
+
+    @property
+    def tank_f(self) -> float | None:
+        return fahrenheit(self.tank_raw, deg_e=True)
+
+    @property
+    def demand(self) -> bool:
+        return bool(self.output & 4)
+
+    def fields(self) -> Fields:
+        b = self.output
+        return (status_flags(self.flags) | {"actuator_status": b & 3, "demand_status": int(self.demand),
+                "heat_cool_mode": b >> 3 & 3, "operating_mode": b >> 5}
+                | temp("target_temp", self.target_raw, deg_e=True) | temp("tank_temp", self.tank_raw, deg_e=True))
+
+
+@dataclass(frozen=True, slots=True)
+class TankStatus:
+    tank_id: int
+    pump_output_pct: int
+    tank_raw: int
+    target_raw: int
+
+    @classmethod
+    def read(cls, r: Reader) -> "TankStatus":
+        tank_id, pump, tank, target = r.take(4)
+        return cls(tank_id, pump, tank, target)
+
+    def fields(self) -> Fields:
+        return {"tank_id": self.tank_id, "pump_output_pct": self.pump_output_pct,
+                "tank_temp_raw": self.tank_raw, "target_temp_raw": self.target_raw}

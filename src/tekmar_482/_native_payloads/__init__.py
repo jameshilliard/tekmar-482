@@ -2,6 +2,7 @@
 
 from collections.abc import Callable
 
+from .codec import Fields, Reader, SETBACK, ShortPayload, status_flags, temp
 from .layouts import (
     BLOCK_SELECTORS as BLOCK_SELECTORS,
     FIXED_BLOCKS,
@@ -16,47 +17,7 @@ from .line import ACCESS_STATUS, CLOCK_REPORT, GROUP_REPORT, GROUP_UPDATE, ZONE_
 from .products import identify_product
 from .scenes import SCENE_REPORT, SCENE_RESPONSE_FIELDS, SceneReport, SceneResponse
 from .schedules import DAY_NAMES, SINGLE_WEEK, DailyEvents, ScheduleBinding, ScheduleCycle, ScheduleEvent
-
-Fields = dict[str, str | int | float]
-SETBACK = ("wake", "unoccupied_4", "occupied_4", "sleep", "occupied_2", "unoccupied_2", "away", "unknown")
-
-
-class ShortPayload(ValueError):
-    pass
-
-
-class Reader:
-    def __init__(self, data: bytes):
-        self.data = data
-        self.pos = 0
-
-    def take(self, n: int) -> bytes:
-        end = self.pos + n
-        if end > len(self.data):
-            raise ShortPayload(f"need_{end}_bytes_have_{len(self.data)}")
-        field = self.data[self.pos:end]
-        self.pos = end
-        return field
-
-    def byte(self) -> int:
-        return self.take(1)[0]
-
-    def word(self) -> int:
-        return int.from_bytes(self.take(2), "little")
-
-    @property
-    def remaining(self) -> bytes:
-        return self.data[self.pos:]
-
-
-def temp(name: str, raw: int, *, deg_e: bool = False) -> Fields:
-    fields: Fields = {name + "_raw": raw}
-    # Preserve the special value rather than turning a missing sensor into a reading.
-    if raw in ((0xff,) if deg_e else H_UNAVAILABLE):
-        fields[name] = "unavailable"
-    elif raw != 0:
-        fields[name + "_f"] = round(raw * 0.9 + 32 if deg_e else (raw - 850) / 10, 1)
-    return fields
+from .water import DHW_STATUS, MASTER_PRESENT, MASTER_STATUS, PLANT_LOOP_STATUS, TANK_STATUS, DhwStatus, HeatSource, LoopStatus, TankStatus
 
 
 def subnet(value: int) -> Fields:
@@ -107,12 +68,6 @@ def io_change(r: Reader) -> Fields:
             "type_id": kind, "io_value": r.word()}
 
 
-def status_flags(value: int) -> Fields:
-    setback = (value >> 1) & 7
-    return {"enabled": value & 1, "setback_state": setback, "setback_name": SETBACK[setback],
-            "optimum_start": (value >> 4) & 3, "priority": value >> 6}
-
-
 def setpoint(r: Reader) -> Fields:
     flags = status_flags(r.byte())
     b = r.byte()
@@ -125,14 +80,6 @@ def setpoint(r: Reader) -> Fields:
     return fields | {"aux_relay_status": aux & 3, "requested_enable_status": (aux >> 2) & 3,
                      "actual_enable_status": (aux >> 4) & 3, "reserved": aux >> 6,
                      "status_excuse1": excuse1, "status_excuse2": excuse2}
-
-
-def dhw(r: Reader) -> Fields:
-    fields = status_flags(r.byte())
-    b, target, tank = r.take(3)
-    return (fields | {"actuator_status": b & 3, "demand_status": (b >> 2) & 1,
-                      "heat_cool_mode": (b >> 3) & 3, "operating_mode": b >> 5}
-            | temp("target_temp", target, deg_e=True) | temp("tank_temp", tank, deg_e=True))
 
 
 PLANT_TYPES = (
@@ -287,6 +234,11 @@ def fixed_value(block: int, name: str, value: int) -> Fields:
     elif block in (0x33, 0x34) and name.endswith("_subnet"):
         prefix = name.removesuffix("_subnet")
         fields.update(bits(value, (prefix + "_water_bus", 0, 7), (prefix + "_water_control", 3, 31)))
+    elif block in (0x33, 0x34) and name.endswith("_heat_source_id"):
+        prefix = name.removesuffix("_id")
+        source = HeatSource(value)
+        return {**fields, prefix + "_kind": source.kind.value, prefix + "_loop": source.loop,
+                prefix + "_mode": source.mode}
     elif block == 0x37 and value < 9:
         fields["override_state_name"] = (*SETBACK[:7], "auto_4", "auto_2")[value]
     elif (block == SnowmeltBlock.APPLICATION_MODE and name == "application_mode"
@@ -474,23 +426,6 @@ def air_member(r: Reader) -> Fields:
             | temp("remote_temperature", remote))
 
 
-def master(r: Reader, *, dhw_supply: bool = True) -> Fields:
-    supply, ret, mode_target = r.word(), r.word(), r.word()
-    loop, pump, b = r.take(3)
-    fields = (temp("supply_temp", supply) | temp("return_temp", ret)
-              | temp("target_temp", mode_target & 0x1fff))
-    mode = mode_target >> 13
-    modes = ("neither", "heating", "heating_cooling_disallowed", "cooling", "cooling_heating_disallowed")
-    fields.update(heat_cool_mode=mode, mode_name=modes[mode] if mode < len(modes) else "unknown",
-                  loop_output_pct=loop, pump_output_pct=pump,
-                  setback_status=b & 7, weather_shutdown=(b >> 3) & 1,
-                  operating_on_max=(b >> 4) & 1, operating_on_min=(b >> 5) & 1,
-                  output_limited=(b >> 6) & 1, reserved=b >> 7)
-    if dhw_supply and r.remaining:
-        fields.update(temp("dhw_supply_temp", r.word()))
-    return fields
-
-
 def network_error(r: Reader) -> Fields:
     code, value = r.take(2)
     return {"code": code, "instance": value & 63, "priority": value >> 6}
@@ -587,7 +522,7 @@ def master_present(r: Reader) -> Fields:
 DECODERS: dict[int, tuple[str, Callable[[Reader], Fields]]] = {
     ZONE_ADJUSTMENT: ("ZoneSynchAdjustment", octets("synch_cycle", "purging", "target_mode")),
     0x011: ("ZoneSynchQuery", octets()),
-    0x173: ("TankStatus", octets("tank_id", "pump_output_pct", "tank_temp_raw", "target_temp_raw")),
+    TANK_STATUS: ("TankStatus", lambda r: TankStatus.read(r).fields()),
     0x17f: ("SnowmeltZoneStatusRequest", snow_request),
     0x1f3: ("IORequestResponse", io_change),
     0x1f4: ("IORequest", octets("subnet_id", "node_id", "channel_id")),
@@ -628,15 +563,15 @@ DECODERS: dict[int, tuple[str, Callable[[Reader], Fields]]] = {
     0x3af: ("EndOverrideOff", target_selection),
     0x3b7: ("EndOverrideOn", target_selection),
     0x3bf: ("StartOverrideOff", target_selection),
-    0x3ce: ("PlantLoopStatus", lambda r: master(r, dhw_supply=False)),
+    PLANT_LOOP_STATUS: ("PlantLoopStatus", lambda r: LoopStatus.read(r, master=False).fields()),
     0x3e7: ("TakingAddress", lambda r: {"previous_subnet": r.byte()} | bits(
         r.byte(), ("previous_node", 0, 31), ("locked", 5, 1))),
     0x3ef: ("AddressTaken", octets()),
-    0x3ff: ("MasterPresent", master_present),
+    MASTER_PRESENT: ("MasterPresent", master_present),
     0x17e: ("SnowmeltZoneStatus", snowmelt),
     0x1f2: ("IOChangeReport", io_change),
     0x22f: ("SetpointStatus", setpoint),
-    0x23f: ("DHWStatus", dhw),
+    DHW_STATUS: ("DHWStatus", lambda r: DhwStatus.read(r).fields()),
     0x24f: ("PlantOutputStatus", plant),
     0x2d7: ("BlockRequest", block_request),
     0x2df: ("BlockUpdate", block_update),
@@ -648,7 +583,7 @@ DECODERS: dict[int, tuple[str, Callable[[Reader], Fields]]] = {
     0x367: ("StageHeatDemand", stage),
     0x36f: ("AirGroupMemberStatus", air_member),
     0x3c7: ("RelayStatusHeartbeat", lambda r: subnet(r.byte())),
-    0x3cf: ("MasterStatus", master),
+    MASTER_STATUS: ("MasterStatus", lambda r: LoopStatus.read(r, master=True).fields()),
     0x3d7: ("NetworkError", network_error),
     0x3df: ("NetworkInitRequest", lambda _: {}),
     0x3f7: ("MasterQuery", lambda _: {}),

@@ -25,6 +25,7 @@ def main() -> None:
     args = parser.parse_args()
     for name in (
         "__init__.py",
+        "codec.py",
         "layouts.py",
         "line.py",
         "products.py",
@@ -32,6 +33,7 @@ def main() -> None:
         "scenes.py",
         "schedules.py",
         "sensors.py",
+        "water.py",
         "writes.py",
     ):
         data = (SOURCE / "tools" / "payloads" / name).read_bytes()

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import asdict
 from typing import TYPE_CHECKING
 
 from ._native_payloads.queries import NativeStatusQuery, StatusRequest
@@ -13,8 +14,10 @@ if TYPE_CHECKING:
     import argparse
     from collections.abc import Callable
 
+    from ._native_payloads.water import DhwStatus, LoopStatus, TankStatus
     from .native_sensors import SensorObservation
     from .native_status import NativeStatusBatch
+    from .native_water import WaterSample, WaterSource
     from .raw import BridgeStream
 
 
@@ -62,11 +65,66 @@ def sensor_fields(device: SensorObservation) -> dict[str, object]:
     }
 
 
+def _sample_fields[T: (LoopStatus, DhwStatus, TankStatus)](
+    sample: WaterSample[T] | None,
+) -> dict[str, object] | None:
+    if sample is None:
+        return None
+    result: dict[str, object] = {
+        "timestamp_ms": sample.timestamp_ms,
+        **sample.value.fields(),
+    }
+    if sample.extension:
+        result["extension_hex"] = sample.extension.hex()
+    return result
+
+
+def water_fields(source: WaterSource) -> dict[str, object]:
+    assignment = source.assignment
+    identity = source.identity
+    return {
+        "port": source.port,
+        "subnet": source.address.subnet,
+        "node": source.address.node,
+        "identity": asdict(identity) if identity is not None else None,
+        "model": identity.product.model if identity and identity.product else None,
+        "topology": asdict(source.topology),
+        "assignment": {
+            "from": "setup" if assignment.heat_source is not None else "master_present",
+            "slot": assignment.slot,
+            "subnet": assignment.subnet,
+            "kind": assignment.kind.value,
+            "mix_number": assignment.mix_number,
+        }
+        if assignment is not None
+        else None,
+        "master_status": _sample_fields(source.master),
+        "plant_loop_status": _sample_fields(source.plant),
+        "dhw_status": _sample_fields(source.dhw),
+        "tank_statuses": [_sample_fields(s) for s in source.tanks],
+    }
+
+
 def add_status_commands(
     subparsers: argparse._SubParsersAction[argparse.ArgumentParser],
     common: argparse.ArgumentParser,
     number: Callable[[str], int],
 ) -> None:
+    water = subparsers.add_parser(
+        "read-water",
+        parents=[common],
+        help="listen for boiler, mixing and tank measurements on selected ports",
+    )
+    water.add_argument("ports", nargs="+", type=int, choices=TN4_PORTS)
+    water.add_argument(
+        "--duration",
+        type=float,
+        default=30,
+        help="capture window in seconds",
+    )
+    water.add_argument("--passive", action="store_true", help="do not send MasterQuery")
+    water.add_argument("--source-subnet", type=number, default=0)
+    water.add_argument("--source-node", type=number, default=0)
     cmd = subparsers.add_parser(
         "read-status",
         help="request live status directly from the native bus",

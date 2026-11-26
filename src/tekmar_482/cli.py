@@ -28,7 +28,12 @@ from .cli_schedule import (
     schedule_fields,
     schedule_target,
 )
-from .cli_status import add_status_commands, read_status_from_args, sensor_fields
+from .cli_status import (
+    add_status_commands,
+    read_status_from_args,
+    sensor_fields,
+    water_fields,
+)
 from .client import Tekmar482Client
 from .constants import DEFAULT_BAUDRATE, TN4_PORTS
 from .decoding import (
@@ -45,6 +50,7 @@ from .native_scene import write_scene_response
 from .native_schedule import read_weekly_schedule
 from .native_sensors import read_thermostat_sensors
 from .native_snapshot import read_native_snapshot
+from .native_water import WaterMonitor, read_water
 from .native_write import NativeWriteStatus
 from .raw import CaptureGap, InvalidCapture, PortError, TxStatus
 from .trpc import (
@@ -603,6 +609,30 @@ async def _native(args: argparse.Namespace, stdout: TextIO) -> int:
                 answer = await read_status_from_args(stream, args)
                 emit(_status_fields(answer))
                 return int(not answer.answered)
+        elif args.command == "read-water":
+            async with bridge.stream(diagnostics=False) as stream:
+                water = await read_water(
+                    stream,
+                    args.ports,
+                    duration=args.duration,
+                    timeout=args.timeout,
+                    source=None
+                    if args.passive
+                    else NativeAddress(args.source_subnet, args.source_node),
+                )
+            emit(
+                {
+                    "water_sources": [water_fields(s) for s in water.sources],
+                    "master_queries": [
+                        _status_fields(q)["status_read"] for q in water.master_queries
+                    ],
+                    "block_reads": [
+                        _batch_fields(b)["block_read"] for b in water.block_reads
+                    ],
+                    "host_records_dropped": water.dropped,
+                },
+            )
+            return int(not any(s.has_measurements for s in water.sources))
         elif args.command == "send":
             async with bridge.stream(diagnostics=False) as stream:
                 try:
@@ -793,6 +823,7 @@ async def _native_capture(
     limit = getattr(args, "limit", None)
     nodes: set[tuple[int, int, int]] = set()
     frames = 0
+    water = WaterMonitor()
     if (duration is not None and duration <= 0) or (limit is not None and limit < 1):
         msg = "duration and frame limit must be positive"
         raise CliError(msg)
@@ -806,6 +837,8 @@ async def _native_capture(
 
     def capture(frame: CaptureRecord) -> None:
         nonlocal frames
+        if args.command == "dump":
+            water.observe(frame)
         if isinstance(frame, CaptureGap):
             emit({"host_records_dropped": frame.dropped})
         elif isinstance(frame, PortError):
@@ -869,12 +902,13 @@ async def _native_capture(
             },
         )
     if args.command in {"diagnostics", "dump"}:
-        for diagnostic in stream.diagnostics.values():
-            emit(asdict(diagnostic))
+        _emit_capture_summary(stream, water, emit)
     if args.command == "dump" and not args.passive and summary and summary.devices:
         # A discovery deadline can cancel a probe before its TxResult. The
         # previous stream has drained that send before we reuse its port.
         async with bridge.stream(ack_ports=args.ack_port) as scan:
+            # A new session must not inherit the previous loop mapping.
+            water = WaterMonitor()
             await _dump_blocks(
                 scan,
                 summary.devices,
@@ -884,8 +918,18 @@ async def _native_capture(
                 emit,
                 include_line_status=getattr(args, "line_status", True),
             )
-        for diagnostic in scan.diagnostics.values():
-            emit(asdict(diagnostic))
+        _emit_capture_summary(scan, water, emit)
+
+
+def _emit_capture_summary(
+    stream: BridgeStream,
+    water: WaterMonitor,
+    emit: Callable[[object], None],
+) -> None:
+    for diagnostic in stream.diagnostics.values():
+        emit(asdict(diagnostic))
+    if sources := water.sources:
+        emit({"water_sources": [water_fields(s) for s in sources]})
 
 
 async def _dump_blocks(

@@ -282,6 +282,34 @@ updates, pass every record from `stream.read()` to a
 source's identity. A capture gap clears its observations; an address move
 invalidates the affected paths. Start a new monitor on reconnect.
 
+### Boiler, mixing and tank status
+
+```bash
+tekmar-482 read-water 0 3 --duration 60 --tcp 192.0.2.10:3001 --json
+```
+
+`read-water` listens for the full observation window. It asks each
+selected port for its master's loop map, identifies an addressable
+responder with block zero, and reads only that model's cataloged loop
+setup blocks within the same deadline. A master can answer immediately
+without sending a temperature. The command returns 1 if no measurement
+was heard, and prints any topology and link results it did receive.
+Use `--passive` to listen without sending anything on tN4.
+
+`read_water(stream, ports, duration=seconds)` returns immutable samples
+with the gateway timestamp. For push updates, feed each record from
+`stream.read()` to a `WaterMonitor` instead. Start a new monitor on each
+Raw session. The monitor clears observations on a capture gap and discards
+samples for a reassigned loop. It does not poll. The native `dump` command
+includes the water sources it heard in each continuous capture window.
+
+Each source is a physical port, full subnet and node. Prefer an explicit
+loop setup over the master's advertised boiler/mix name. A report can be
+repeated on another port without that port owning the loop; an unresolved
+assignment stays unlabelled. Master and plant-loop status are independent.
+DHW status exposes temperatures; the separate tank status retains raw
+readings by tank ID because their scale is not established.
+
 ### Weekly schedules
 
 Read an addressed device's assignment and the event times it actually

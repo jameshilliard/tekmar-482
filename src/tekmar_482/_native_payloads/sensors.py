@@ -4,6 +4,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from enum import IntEnum
 
+from .codec import fahrenheit as _fahrenheit
 from .layouts import H_UNAVAILABLE
 from .products import NativeProduct
 
@@ -50,12 +51,6 @@ def _int(fields: Mapping[str, object], name: str) -> int | None:
 
 def _role(raw: int | None) -> SensorRole | None:
     return SensorRole(raw) if raw is not None and raw in range(len(SensorRole)) else None
-
-
-def _fahrenheit(raw: int | None) -> float | None:
-    if raw is None or raw == 0 or raw in H_UNAVAILABLE:
-        return None
-    return (raw - 850) / 10
 
 
 def _status_role(model: str, z: int | None, slot: SensorSlot, raw: int | None,

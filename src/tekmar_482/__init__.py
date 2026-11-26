@@ -31,6 +31,16 @@ from ._native_payloads.sensors import (
     SensorSlot,
     ThermostatSensors,
 )
+from ._native_payloads.water import (
+    DhwStatus,
+    HeatSource,
+    LoopAssignment,
+    LoopKind,
+    LoopSetupSlot,
+    LoopStatus,
+    LoopTopology,
+    TankStatus,
+)
 from ._native_payloads.writes import NativeField, WritableBlock
 from ._wire import GatewayEndpoint
 from .bridge import BridgeClient, PanelState
@@ -160,6 +170,7 @@ from .native_sensors import (
 )
 from .native_snapshot import NativeSnapshot, read_native_devices, read_native_snapshot
 from .native_status import NativeStatusBatch, read_snowmelt_status
+from .native_water import WaterMonitor, WaterRead, WaterSample, WaterSource, read_water
 from .native_write import NativeWriteResult, NativeWriteStatus
 from .packet import (
     TYPE_DISPLAY,
@@ -320,6 +331,7 @@ __all__ = [
     "DeviceRuntime",
     "DeviceSnapshot",
     "DeviceValue",
+    "DhwStatus",
     "DiscoveredDevice",
     "DiscoveryResult",
     "EnableFields",
@@ -331,10 +343,16 @@ __all__ = [
     "GatewayRuntime",
     "GatewaySnapshot",
     "GroupReport",
+    "HeatSource",
     "InvalidCapture",
     "InvalidReason",
     "InventoryDrainTimeoutError",
     "LineBroadcast",
+    "LoopAssignment",
+    "LoopKind",
+    "LoopSetupSlot",
+    "LoopStatus",
+    "LoopTopology",
     "MessageApplyResult",
     "MethodSpec",
     "ModeSettingFields",
@@ -413,6 +431,7 @@ __all__ = [
     "SnowmeltSetpoint",
     "StatusRequest",
     "SystemSchedule",
+    "TankStatus",
     "Tekmar482Client",
     "Tekmar482Controller",
     "Tekmar482DeviceHandle",
@@ -442,6 +461,10 @@ __all__ = [
     "UnknownFieldError",
     "UnknownMethodError",
     "UnknownServiceError",
+    "WaterMonitor",
+    "WaterRead",
+    "WaterSample",
+    "WaterSource",
     "WeeklyEvent",
     "WritableBlock",
     "ZoneSyncAdjustment",
@@ -484,6 +507,7 @@ __all__ = [
     "read_native_snapshot",
     "read_snowmelt_status",
     "read_thermostat_sensors",
+    "read_water",
     "read_weekly_schedule",
     "require_device_support",
     "response_service_for",
