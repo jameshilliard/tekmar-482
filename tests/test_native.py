@@ -12,6 +12,15 @@ from tekmar_482 import (
 
 
 class NativeTests(unittest.TestCase):
+    def test_display_address_excludes_non_device_nodes(self) -> None:
+        assert NativeAddress(0, 24).tha_address(0) == 1
+        assert NativeAddress(0, 23).tha_address(0) == 2
+        assert NativeAddress(0x17, 33).tha_address(4) == 4724
+        for node in (0, 25, 31, 32, 63):
+            assert NativeAddress(1, node).tha_address(1) is None
+        with self.assertRaises(ValueError):
+            NativeAddress(0, 1).tha_address(5)
+
     def test_snowmelt_status_request_keeps_order_and_is_not_a_group_update(
         self,
     ) -> None:

@@ -123,7 +123,10 @@ def is_runtime_message(message: TrpcPacket) -> bool:
 
 def is_topology_message(message: TrpcPacket) -> bool:
     """Return whether a message indicates device inventory may have changed."""
-    return is_runtime_message(message) and message.method == TrpcMethod.TAKING_ADDRESS
+    return (
+        message.service is TrpcService.REPORT
+        and message.method is TrpcMethod.TAKING_ADDRESS
+    )
 
 
 def device_supports_method(device: DiscoveredDevice, method: TrpcMethod) -> bool:

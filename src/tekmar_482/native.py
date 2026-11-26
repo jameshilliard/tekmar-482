@@ -8,7 +8,7 @@ from enum import IntEnum
 from typing import TYPE_CHECKING, Self
 
 from ._native_payloads import decode_payload
-from .constants import SETPOINT_GROUP_IDS
+from .constants import SETPOINT_GROUP_IDS, TN4_PORTS
 
 if TYPE_CHECKING:
     from calendar import Day
@@ -48,6 +48,16 @@ class NativeAddress:
             msg = "node zero cannot be selected by an addressed block request"
             raise ValueError(msg)
         return 1 << (index - 1)
+
+    def tha_address(self, port: int) -> int | None:
+        """Return the display address for a device node, not evidence of inventory."""
+        if port not in TN4_PORTS:
+            msg = f"No physical tN4 port {port}"
+            raise ValueError(msg)
+        node = self.node & 31
+        if node not in range(1, 25):
+            return None
+        return port * 1000 + (self.subnet & 7) * 100 + 25 - node
 
 
 @dataclass(frozen=True, slots=True)

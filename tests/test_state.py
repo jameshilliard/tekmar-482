@@ -296,13 +296,14 @@ class StateTest(unittest.TestCase):
         assert not state.apply_message(message)
 
     def test_topology_message_detection(self) -> None:
-        assert is_topology_message(
-            TrpcPacket.create(
-                service=TrpcService.REPORT,
-                method=TrpcMethod.TAKING_ADDRESS,
-                fields={"old_address": 0, "new_address": 1201},
-            ),
-        )
+        for service in TrpcService:
+            with self.subTest(service=service):
+                packet = TrpcPacket.create(
+                    service=service,
+                    method=TrpcMethod.TAKING_ADDRESS,
+                    fields={"old_address": 1, "new_address": 2},
+                )
+                assert is_topology_message(packet) == (service is TrpcService.REPORT)
 
     def test_generic_runtime_view_for_unknown_kind(self) -> None:
         device = DiscoveredDevice(address=1201)

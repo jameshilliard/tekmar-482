@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from enum import IntEnum, IntFlag, StrEnum
 
 DEFAULT_BAUDRATE = 9600
+TN4_PORTS = range(5)
 MAX_PERCENT = 100
 NO_SETBACK_EVENTS = 0
 SETPOINT_GROUP_IDS = range(1, 13)

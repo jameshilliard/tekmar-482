@@ -11,6 +11,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 from .client import Tekmar482Client
+from .constants import TN4_PORTS
 from .exceptions import ConnectionClosedError, ProtocolError
 from .management import BridgeFeature, BridgeMethod, BridgeMode
 from .native import NativeFrame, NativeMessage
@@ -23,7 +24,6 @@ if TYPE_CHECKING:
 
     from ._wire import Wire
 
-_PORTS = range(5)
 _DEFAULT_BAUD = 9600
 _RAW_HEADER = 2
 _INVALID_SERVICE = 4
@@ -90,7 +90,7 @@ class BridgeStream:
         if self._closed or port in self._pending:
             msg = f"raw session closed or send already in progress on port {port}"
             raise ProtocolError(msg)
-        if port not in _PORTS or not valid_body(body):
+        if port not in TN4_PORTS or not valid_body(body):
             msg = "expected a physical port and complete native frame"
             raise ValueError(msg)
         self._pending.add(port)
@@ -98,7 +98,11 @@ class BridgeStream:
 
     def consume(self, packet: Packet) -> NativeFrame | InvalidCapture | None:
         data = packet.data
-        if packet.type != TYPE_TN4 or len(data) < _RAW_HEADER or data[1] not in _PORTS:
+        if (
+            packet.type != TYPE_TN4
+            or len(data) < _RAW_HEADER
+            or data[1] not in TN4_PORTS
+        ):
             msg = "unexpected raw packet type, length or port"
             raise ProtocolError(msg)
         kind, port = data[:2]
@@ -239,7 +243,7 @@ class BridgeClient:
                 len(data) != _CAPABILITIES.size
                 or data[:1] != b"\x01"
                 or data[1] > 1
-                or data[2] != len(_PORTS)
+                or data[2] != len(TN4_PORTS)
             ):
                 msg = "invalid binary bridge capabilities"
                 raise ProtocolError(msg)
@@ -283,7 +287,7 @@ class BridgeClient:
             before = _COUNTERS.unpack(await self._call(BridgeMethod.COUNTERS))
             await asyncio.sleep(duration)
             after = _COUNTERS.unpack(await self._call(BridgeMethod.COUNTERS))
-            seen = sum(1 << i for i in _PORTS if before[2 + i] != after[2 + i])
+            seen = sum(1 << i for i in TN4_PORTS if before[2 + i] != after[2 + i])
             return (
                 (after[0] - before[0]) & _TICK_MASK,
                 (after[1] - before[1]) & _TICK_MASK,
@@ -334,7 +338,7 @@ class BridgeClient:
         ack_port: int | None = None,
         tx: tuple[int, bytes] | None = None,
     ) -> AsyncIterator[BridgeStream]:
-        if ack_port is not None and ack_port not in _PORTS:
+        if ack_port is not None and ack_port not in TN4_PORTS:
             msg = "invalid ACK port"
             raise ValueError(msg)
         if not self._features & BridgeFeature.RAW:
@@ -363,7 +367,7 @@ class BridgeClient:
                 try:
                     await self._mode(BridgeMode.NORMAL, stream.consume)
                     if diagnostics:
-                        for p in _PORTS:
+                        for p in TN4_PORTS:
                             port, valid, invalid = _DROPS.unpack(
                                 await self._call(BridgeMethod.STATS, bytes([p])),
                             )

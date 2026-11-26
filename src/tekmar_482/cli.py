@@ -405,6 +405,9 @@ async def _native_capture(
                                     "id": frame.message_id,
                                     "subnet": frame.subnet,
                                     "node": frame.node,
+                                    "tha_address": frame.message.source.tha_address(
+                                        frame.port,
+                                    ),
                                     "body": frame.body.hex(),
                                     "fields": frame.decoded,
                                 },
