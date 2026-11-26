@@ -1,6 +1,11 @@
 [build-system]
 requires = ["uv_build>=0.9.11"]
-build-backend = "uv_build"
+build-backend = "tools.sdist_backend"
+backend-path = ["."]
+
+[tool.uv.build-backend]
+source-exclude = ["/firmware", "/.gitmodules"]
+source-include = ["tools/__init__.py", "tools/sdist_backend.py", "tools/bundle_firmware.py"]
 
 [project]
 name = "tekmar-482"
@@ -47,6 +52,8 @@ dev = [
 
 [tool.ruff]
 target-version = "py314"
+extend-exclude = ["firmware", "_native_records.py", "_native_payloads.py"]
+force-exclude = true
 
 [tool.ruff.lint]
 select = ["ALL"]

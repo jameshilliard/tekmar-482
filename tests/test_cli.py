@@ -83,7 +83,9 @@ class CliTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_cli_gateway_info_json(self) -> None:
         parser = build_parser()
-        args = parser.parse_args(["gateway-info", "--tcp", "127.0.0.1:3001", "--json"])
+        args = parser.parse_args(
+            ["gateway-info", "--vendor", "--tcp", "127.0.0.1:3001", "--json"],
+        )
         transport = TraceReplayTransport(
             [
                 request_step(
@@ -117,6 +119,7 @@ class CliTest(unittest.IsolatedAsyncioTestCase):
                 "request",
                 "DeviceType",
                 "address=1001",
+                "--vendor",
                 "--tcp",
                 "127.0.0.1:3001",
                 "--json",
@@ -149,7 +152,7 @@ class CliTest(unittest.IsolatedAsyncioTestCase):
     async def test_cli_monitor_limit_text(self) -> None:
         parser = build_parser()
         args = parser.parse_args(
-            ["monitor", "--tcp", "127.0.0.1:3001", "--limit", "1"],
+            ["monitor", "--vendor", "--tcp", "127.0.0.1:3001", "--limit", "1"],
         )
         transport = NullTransport()
         transport.queue_packet(response("ProtocolVersion", version=3).to_packet())
@@ -169,6 +172,7 @@ class CliTest(unittest.IsolatedAsyncioTestCase):
         args = parser.parse_args(
             [
                 "dump",
+                "--vendor",
                 "--tcp",
                 "127.0.0.1:3001",
                 "--json",

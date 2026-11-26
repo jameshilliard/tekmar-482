@@ -10,6 +10,8 @@ from collections.abc import Callable, Sequence
 from dataclasses import asdict
 from typing import TYPE_CHECKING, Any, TextIO
 
+from ._wire import GatewayEndpoint
+from .bridge import BridgeClient
 from .client import Tekmar482Client
 from .constants import DEFAULT_BAUDRATE
 from .decoding import (
@@ -19,6 +21,8 @@ from .decoding import (
     decoded_to_dict,
 )
 from .exceptions import TekmarError
+from .firmware import install_firmware
+from .gateway import open_gateway
 from .trpc import (
     ResponseMatch,
     TrpcCommand,
@@ -57,6 +61,11 @@ def build_parser() -> argparse.ArgumentParser:
         description="Inspect and communicate with a tekmar 482 gateway.",
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
+    parser.add_argument(
+        "--vendor",
+        action="store_true",
+        help="use the original vendor tRPC firmware",
+    )
     common = _common_parent()
 
     subparsers.add_parser(
@@ -69,6 +78,12 @@ def build_parser() -> argparse.ArgumentParser:
         "discover",
         parents=[common],
         help="discover gateway metadata and attached device information",
+    )
+    discover.add_argument(
+        "--duration",
+        type=float,
+        default=30,
+        help="native discovery listening window",
     )
     discover.add_argument(
         "--manage-reporting",
@@ -95,6 +110,12 @@ def build_parser() -> argparse.ArgumentParser:
         "dump",
         parents=[common],
         help="request all available read-only gateway and device information",
+    )
+    dump.add_argument(
+        "--duration",
+        type=float,
+        default=30,
+        help="native dump listening window",
     )
     dump.add_argument(
         "--include-setbacks",
@@ -170,16 +191,53 @@ def build_parser() -> argparse.ArgumentParser:
         help="wait for a matching response; default is true for Request service",
     )
 
+    for name in (
+        "panel",
+        "led-test",
+        "probe",
+        "diagnostics",
+        "send",
+        "install",
+        "update",
+    ):
+        command = subparsers.add_parser(name, parents=[common])
+        if name in ("diagnostics", "probe"):
+            command.add_argument(
+                "--duration",
+                type=float,
+                default=1 if name == "probe" else 30,
+            )
+        if name == "diagnostics":
+            command.add_argument("--ack-port", type=int, choices=range(5))
+        if name == "send":
+            command.add_argument("port", type=int, choices=range(5))
+            command.add_argument(
+                "body",
+                help="native header and payload in hexadecimal",
+            )
+        if name == "install":
+            command.add_argument("--confirm", action="store_true", required=True)
+            command.add_argument(
+                "--from-rom",
+                action="store_true",
+                help="already in unsynchronized ROM ISP",
+            )
     return parser
 
 
 def _common_parent() -> argparse.ArgumentParser:
     parent = argparse.ArgumentParser(add_help=False)
+    parent.add_argument("--vendor", action="store_true", default=argparse.SUPPRESS)
+    parent.add_argument(
+        "--auto-update",
+        action="store_true",
+        help="install the bundled build if the custom gateway revision differs",
+    )
     transport = parent.add_mutually_exclusive_group(required=True)
     transport.add_argument(
         "--tcp",
         metavar="HOST:PORT",
-        help="raw TCP stream carrying binary TPCK frames",
+        help="transparent TCP-to-serial bridge",
     )
     transport.add_argument(
         "--serial",
@@ -214,7 +272,13 @@ def main(argv: Sequence[str] | None = None) -> int:
         return asyncio.run(run(args))
     except KeyboardInterrupt:
         return 130
-    except (argparse.ArgumentTypeError, CliError, TekmarError, OSError) as err:
+    except (
+        argparse.ArgumentTypeError,
+        CliError,
+        TekmarError,
+        OSError,
+        ValueError,
+    ) as err:
         sys.stderr.write(f"error: {err}\n")
         return 2
 
@@ -226,6 +290,17 @@ async def run(
     stdout: TextIO = sys.stdout,
 ) -> int:
     """Run an already-parsed command."""
+    if not args.vendor:
+        return await _native(args, stdout)
+    if args.auto_update or args.command not in {
+        "gateway-info",
+        "discover",
+        "dump",
+        "monitor",
+        "request",
+    }:
+        msg = "this operation is not available with --vendor"
+        raise CliError(msg)
     factory = client_factory or client_from_args
     async with factory(args) as client:
         if args.command == "gateway-info":
@@ -242,6 +317,110 @@ async def run(
             msg = f"unsupported command: {args.command}"
             raise CliError(msg)
     return 0
+
+
+async def _native(args: argparse.Namespace, stdout: TextIO) -> int:
+    endpoint = (
+        GatewayEndpoint.tcp(*parse_host_port(args.tcp), baudrate=args.baudrate)
+        if args.tcp
+        else GatewayEndpoint.serial(args.serial, baudrate=args.baudrate)
+    )
+
+    def emit(value: object) -> None:
+        stdout.write((json.dumps(value) if args.json else str(value)) + "\n")
+
+    if args.command == "request":
+        msg = "tRPC request requires --vendor; use send for a native tN4 frame"
+        raise CliError(msg)
+    if args.command in {"install", "update"}:
+        changed = await install_firmware(
+            endpoint,
+            from_rom=getattr(args, "from_rom", False),
+        )
+        emit({"updated": changed})
+        return 0
+    async with open_gateway(endpoint, auto_update=args.auto_update) as bridge:
+        if not isinstance(bridge, BridgeClient):
+            msg = "expected native firmware"
+            raise CliError(msg)
+        if args.command == "gateway-info":
+            emit({"firmware": "custom", "revision": await bridge.revision()})
+        elif args.command == "panel":
+            emit(asdict(await bridge.panel()))
+        elif args.command == "led-test":
+            await bridge.test_leds()
+        elif args.command == "probe":
+            emit({"timers_mask_timestamps": await bridge.probe(duration=args.duration)})
+        else:
+            await _native_capture(bridge, args, emit)
+    return 0
+
+
+async def _native_capture(
+    bridge: BridgeClient,
+    args: argparse.Namespace,
+    emit: Callable[[object], None],
+) -> None:
+    sending = args.command == "send"
+    tx = (args.port, bytes.fromhex(args.body)) if sending else None
+    duration = 10 if sending else args.duration
+    limit = getattr(args, "limit", None)
+    nodes: set[tuple[int, int, int]] = set()
+    frames = 0
+    if (duration is not None and duration <= 0) or (limit is not None and limit < 1):
+        msg = "duration and frame limit must be positive"
+        raise CliError(msg)
+    if args.command == "dump":
+        emit(
+            {
+                "panel": asdict(await bridge.panel()),
+                "revision": await bridge.revision(),
+            },
+        )
+    async with bridge.stream(tx=tx, ack_port=getattr(args, "ack_port", None)) as stream:
+        window = asyncio.timeout(duration)
+        try:
+            async with window:
+                while limit is None or frames < limit:
+                    frame = await stream.read()
+                    if frame is not None:
+                        frames += 1
+                        nodes.add((frame.port, frame.subnet, frame.node))
+                        if args.command != "discover":
+                            emit(
+                                {
+                                    "port": frame.port,
+                                    "start_us": frame.start_us,
+                                    "id": frame.message_id,
+                                    "subnet": frame.subnet,
+                                    "node": frame.node,
+                                    "trailer": frame.trailer,
+                                    "crc": frame.crc,
+                                    "body": frame.body.hex(),
+                                    "fields": frame.decoded,
+                                },
+                            )
+                    if sending and stream.tx_result:
+                        break
+        except TimeoutError:
+            if not window.expired():
+                raise
+    if args.command in {"discover", "dump"}:
+        emit({"observed_nodes": sorted(nodes)})
+    if args.command in {"diagnostics", "dump"}:
+        for summary in stream.diagnostics.values():
+            values = asdict(summary)
+            values["rejected_body"] = (
+                summary.rejected_body.hex() if summary.rejected_body else None
+            )
+            emit(values)
+        if stream.ack_summary:
+            emit({"ack_summary": stream.ack_summary})
+    if sending:
+        emit({"tx_result": stream.tx_result})
+        if not stream.tx_result or stream.tx_result[1] != "ACK":
+            msg = "transmission was not acknowledged"
+            raise CliError(msg)
 
 
 def client_from_args(args: argparse.Namespace) -> Tekmar482Client:

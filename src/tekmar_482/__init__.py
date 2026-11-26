@@ -1,5 +1,7 @@
 """Async Python client for the tekmar 482 gateway."""
 
+from ._wire import GatewayEndpoint
+from .bridge import BridgeClient, BridgeStream, NativeFrame, PanelState, PortDiagnostic
 from .client import Tekmar482Client
 from .constants import (
     DEFAULT_BAUDRATE,
@@ -51,6 +53,8 @@ from .exceptions import (
     UnknownMethodError,
     UnknownServiceError,
 )
+from .firmware import FirmwareBundle, install_firmware
+from .gateway import open_gateway
 from .models import (
     AvailableInfo,
     AvailableRuntime,
@@ -188,6 +192,8 @@ __all__ = [
     "AddressSetbackPayload",
     "AvailableInfo",
     "AvailableRuntime",
+    "BridgeClient",
+    "BridgeStream",
     "ConnectionClosedError",
     "DateTimeFields",
     "DecodedDeviceRuntime",
@@ -207,6 +213,8 @@ __all__ = [
     "DiscoveryResult",
     "EnableFields",
     "FieldSpec",
+    "FirmwareBundle",
+    "GatewayEndpoint",
     "GatewayInfo",
     "GatewayRuntime",
     "GatewaySnapshot",
@@ -214,9 +222,12 @@ __all__ = [
     "MessageApplyResult",
     "MethodSpec",
     "ModeSettingFields",
+    "NativeFrame",
     "NullTransport",
     "Packet",
     "PacketTransport",
+    "PanelState",
+    "PortDiagnostic",
     "ProtocolError",
     "RawTcpTpckTransport",
     "ReportSubscription",
@@ -281,6 +292,7 @@ __all__ = [
     "fahrenheit_to_celsius",
     "fahrenheit_to_degh",
     "freeze_fields",
+    "install_firmware",
     "is_runtime_message",
     "is_topology_message",
     "load_trace",
@@ -288,6 +300,7 @@ __all__ = [
     "method_id",
     "method_name",
     "method_spec",
+    "open_gateway",
     "require_device_support",
     "response_service_for",
     "schedule_setbacks_for_events",

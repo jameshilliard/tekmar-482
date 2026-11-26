@@ -1,5 +1,8 @@
 # Firmware 06 compatibility
 
+This page covers stock tRPC. For the custom bridge, see the firmware project's
+[native tN4 frame reference](https://github.com/jameshilliard/tekmar-482-firmware/blob/master/docs/tn4-frames.md).
+
 Reviewed image: `101702_482_J1196J.hex` (SHA-256
 `659e5a10e39137485614db0a3174c4e85dcf1a1ef206470ae47bc6111e2522ba`).
 This image reports protocol version 3. Addresses below are code offsets

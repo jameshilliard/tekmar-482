@@ -1,0 +1,3 @@
+[submodule "firmware"]
+	path = firmware
+	url = https://github.com/jameshilliard/tekmar-482-firmware.git

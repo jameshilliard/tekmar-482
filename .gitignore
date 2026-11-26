@@ -8,4 +8,9 @@ dist/
 *.egg-info/
 __pycache__/
 *.py[cod]
+*.bin
+*.elf
+*.hex
+*.whl
+*.tar.gz
 

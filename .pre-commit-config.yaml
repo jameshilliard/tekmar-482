@@ -1,4 +1,11 @@
 repos:
+  - repo: local
+    hooks:
+      - id: no-build-artifacts
+        name: refuse compiled firmware and distribution artifacts
+        language: fail
+        entry: Build release artifacts from source; do not commit them.
+        files: '(?i)\.(bin|elf|hex|whl|tar\.gz)$'
   - repo: https://github.com/pre-commit/pre-commit-hooks
     rev: v6.0.0
     hooks:
@@ -20,5 +27,7 @@ repos:
     hooks:
       - id: mypy
         args: []
+        # The copied wire auditor is checked through its adjacent typed stub.
+        exclude: ^src/tekmar_482/_native_records\.py$
         additional_dependencies:
           - serialx==1.8.1

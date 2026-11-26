@@ -1,0 +1,32 @@
+name: Distributions
+on: [push, pull_request]
+
+permissions:
+  contents: read
+
+jobs:
+  package:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          submodules: true
+      - uses: astral-sh/setup-uv@v8.2.0
+      - name: Install Arm binutils
+        run: sudo apt-get update && sudo apt-get install -y binutils-arm-none-eabi
+      - name: Verify host decoders against the submodule
+        run: python3 tools/bundle_firmware.py --check
+      - name: Build source distribution including the pinned flash image
+        run: uv build --sdist
+      - name: Verify distribution contents
+        run: python3 -m tools.check_distributions dist
+      - name: Install from the sdist without the firmware toolchain or checkout
+        working-directory: ${{ runner.temp }}
+        run: |
+          uv run --isolated --no-project --with "$GITHUB_WORKSPACE"/dist/*.tar.gz python -c \
+            'import sys; from tekmar_482 import FirmwareBundle; assert FirmwareBundle.load().revision == sys.argv[1]' \
+            "$(git -C "$GITHUB_WORKSPACE/firmware" rev-parse HEAD)"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: python-sdist
+          path: dist/*.tar.gz

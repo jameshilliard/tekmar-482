@@ -2,10 +2,12 @@
 
 `tekmar-482` is an asyncio Python client for the tekmar 482 tN4 gateway.
 
-The package talks directly to the gateway's tHA/tRPC protocol over binary TPCK
-framing. It supports:
+The default protocol is the [custom native tN4 bridge](https://github.com/jameshilliard/tekmar-482-firmware).
+For the original vendor firmware, explicitly select `--vendor` in the CLI or
+`vendor=True` in `open_gateway()`. The library does not silently try the other
+protocol or install an image when identification fails. Both protocols support:
 
-- Raw TCP streams carrying TPCK frames, suitable for ser2net-style bridges
+- Raw TCP streams, suitable for transparent ser2net-style serial bridges
 - Local RS-232 adapters through the optional `serial` extra
 - serialx URLs such as `socket://host:port` and `rfc2217://host:port` when the
   optional `serial` extra is installed
@@ -29,7 +31,73 @@ uv sync --dev
 uv run pre-commit install
 ```
 
-## Example
+## Native bridge
+
+```python
+from tekmar_482 import BridgeClient, GatewayEndpoint, open_gateway
+
+async def read_frame() -> None:
+    endpoint = GatewayEndpoint.tcp("192.0.2.10", 3001)
+    async with open_gateway(endpoint) as bridge:
+        assert isinstance(bridge, BridgeClient)
+        print(await bridge.panel())
+        async with bridge.stream() as stream:
+            while (frame := await stream.read()) is None:
+                pass
+            print(frame.port, frame.message_id, frame.decoded)
+        print(stream.diagnostics)
+```
+
+`monitor` streams native frames, `discover` listens for source addresses,
+and `dump` includes panel state, frames and receiver summaries. Discovery is
+passive: a quiet device will not appear during a short scan. See the firmware's
+[frame catalog](https://github.com/jameshilliard/tekmar-482-firmware/blob/master/docs/tn4-frames.md)
+and [UART command reference](https://github.com/jameshilliard/tekmar-482-firmware/blob/master/docs/interfaces.md).
+
+### Installation and updates
+
+Only the **source distribution (sdist)** is released. Its build compiles
+the 12 MHz LPC2146 flash image from the pinned public submodule. Installing
+from the sdist retains that image without requiring Rust, Git, or a runtime
+firmware download. Installing the Python package does **not** flash a gateway.
+Stop any other serial client before programming.
+
+An editable Git checkout has no flash image. To build the release locally,
+initialize the submodule with `git submodule update --init firmware`, install
+GNU Arm binutils and the firmware's pinned Rust toolchain, and run
+`uv build --sdist`. The build stages the image only while creating the archive.
+For routine physical testing use the firmware's [SRAM trial procedure](https://github.com/jameshilliard/tekmar-482-firmware/blob/master/docs/interfaces.md#stream-decoded-frames);
+the flash installer is for persistent deployment.
+
+```bash
+# A custom dev image is running. This may replace an unversioned build.
+tekmar-482 install --confirm --serial /dev/ttyUSB0
+# For initial conversion from stock, enter ROM ISP with the hardware Test
+# button first; only use this on the supported LPC2146 board.
+tekmar-482 install --confirm --from-rom --serial /dev/ttyUSB0
+# Install the bundled build unless the running custom build matches it.
+tekmar-482 update --serial /dev/ttyUSB0
+```
+
+Use `auto_update=True` or `--auto-update` to check on connection. If an
+identified custom build does not match the revision stamped in the bundled
+binary, the updater replaces it, including newer, forked and unversioned
+builds. It never converts a running stock device. **A default custom
+connection to a 482 already in ROM ISP automatically installs the bundled
+firmware**, even without `--auto-update`. ROM cannot identify the previous
+application or the board from its MCU ID: select only a compatible 482.
+`--vendor` never probes or programs ROM. Flashing verifies the ROM part ID, page checksums,
+flash compare and the booted build ID. The first 64 bytes are hidden by ROM
+remapping during compare. Do not interrupt power. After an interruption,
+use physical ISP entry and the explicit installer; it does not retry an
+ambiguous flash operation. No stock backup is required. To return to stock,
+use the vendor's firmware matching your hardware lot and its update procedure.
+When using a TCP serial bridge, set `--baudrate` to its actual UART rate.
+
+## Vendor client
+
+The following tRPC API and push controller are for stock firmware, not the
+native frame stream. `Tekmar482Client` is the low-level vendor-only client.
 
 ```python
 import asyncio
@@ -311,7 +379,7 @@ tekmar-482 discover --tcp 192.0.2.10:3001 --json
 tekmar-482 dump --tcp 192.0.2.10:3001 --json
 tekmar-482 dump --serial /dev/serial/by-id/usb-adapter
 tekmar-482 monitor --tcp 192.0.2.10:3001
-tekmar-482 request DeviceType address=1001 --tcp 192.0.2.10:3001 --json
+tekmar-482 --vendor request DeviceType address=1001 --tcp 192.0.2.10:3001 --json
 ```
 
 Generic request/response calls and CLI requests awaiting a reply match the
