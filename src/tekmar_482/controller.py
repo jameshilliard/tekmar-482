@@ -30,6 +30,7 @@ from .state import (
 from .trpc import (
     AddressFields,
     SetpointGroupFields,
+    TrpcCommand,
     TrpcMethod,
     TrpcPacket,
     TrpcService,
@@ -41,7 +42,6 @@ if TYPE_CHECKING:
 
     from .client import Tekmar482Client
     from .session import ReportSubscription
-    from .trpc import TrpcCommand
 
 StateCallback = Callable[[AvailableInfo], None]
 TopologyCallback = Callable[[TrpcPacket], None]
@@ -703,12 +703,19 @@ class Tekmar482Controller:
                 self._group_deadlines.pop(group, None)
 
     async def _request_mode(self, address: int) -> None:
-        response = await self.client.request_response(
-            TrpcMethod.MODE_SETTING,
-            publish_match=True,
-            timeout=self.poll_timeout,
-            fields=AddressFields(address),
-        )
+        session = self.client.session
+        command = TrpcCommand.request(TrpcMethod.MODE_SETTING, AddressFields(address))
+        with session.connection_scope():
+            if session.needs_cache_sync(command):
+                await self.client.request_response(
+                    TrpcMethod.PROTOCOL_VERSION,
+                    timeout=self.poll_timeout,
+                )
+            response = await session.request_response(
+                command,
+                publish_match=True,
+                timeout=self.poll_timeout,
+            )
         if response is None:
             msg = f"Timed out refreshing tekmar 482 mode for {address}"
             raise TimeoutError(msg)

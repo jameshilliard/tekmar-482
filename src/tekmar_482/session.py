@@ -16,7 +16,7 @@ from .exceptions import ConnectionClosedError, InventoryDrainTimeoutError, Proto
 from .packet import TYPE_TRPC
 from .trpc import (
     AddressFields,
-    DeviceReplySelector,
+    ReplySelector,
     ResponseMatch,
     TrpcCommand,
     TrpcMethod,
@@ -172,13 +172,13 @@ class Tekmar482Session:
         self._inventory_address = 0
         self._inventory_drained.set()
         self._pending: list[_PendingRequest] = []
-        self._write_order: dict[object, DeviceReplySelector] = {}
+        self._write_order: dict[object, ReplySelector] = {}
         self._writes_changed = asyncio.Event()
         self._setbacks_enabled = False
-        self._unconfirmed_echoes: dict[DeviceReplySelector, _UnconfirmedEcho] = {}
+        self._unconfirmed_echoes: dict[ReplySelector, _UnconfirmedEcho] = {}
         self._tracked_replies: dict[
             asyncio.Future[TrpcPacket],
-            DeviceReplySelector,
+            ReplySelector,
         ] = {}
         self._message_backlog: list[TrpcPacket] = []
         self._packet_backlog: list[Packet] = []
@@ -344,8 +344,16 @@ class Tekmar482Session:
             return None
 
     async def write_packet(self, packet: Packet) -> None:
-        """Write one packet to the transport."""
+        """Write original bytes, tracking decodable tRPC commands like send()."""
         self._raise_if_unavailable()
+        if packet.type == TYPE_TRPC:
+            try:
+                message = TrpcPacket.from_packet(packet)
+            except ProtocolError:
+                pass
+            else:
+                await self._write_unconfirmed(message, packet)
+                return
         await self.transport.write_packet(packet)
 
     async def read_message(self, timeout: float | None = None) -> TrpcPacket | None:
@@ -401,15 +409,18 @@ class Tekmar482Session:
 
     async def write_message(self, message: TrpcPacket) -> None:
         """Write one tRPC message."""
+        await self.write_packet(message.to_packet())
+
+    async def _write_unconfirmed(self, message: TrpcPacket, packet: Packet) -> None:
         generation = self._generation
-        selector = self._message_selector(message)
+        selector = self._tracked_selector(message)
         with self._write_turn(selector) as turn:
             while True:
                 async with self._transaction_lock:
                     self._check_generation(generation)
                     self._raise_if_unavailable()
                     if not self._write_blocked(turn):
-                        await self._write_message_unlocked(message, selector)
+                        await self._write_message_unlocked(message, selector, packet)
                         return
                     changed = self._writes_changed
                 await changed.wait()
@@ -417,10 +428,10 @@ class Tekmar482Session:
     async def _write_message_unlocked(
         self,
         message: TrpcPacket,
-        unconfirmed: DeviceReplySelector | None,
+        unconfirmed: ReplySelector | None,
+        packet: Packet,
     ) -> None:
         self._raise_if_unavailable()
-        packet = message.to_packet()
         if (
             message.method is TrpcMethod.SETBACK_ENABLE
             and message.service is TrpcService.UPDATE
@@ -440,7 +451,7 @@ class Tekmar482Session:
             # Register before transport I/O: the reply can arrive during drain.
             self._track_unconfirmed(unconfirmed, message)
         LOGGER.debug("Sending tekmar 482 tRPC %s", message)
-        await self.write_packet(packet)
+        await self.transport.write_packet(packet)
 
     async def wait_for_inventory_drain(self, *, timeout: float | None) -> None:
         """Wait for an earlier walk, distinguishing a lost terminator from busy I/O."""
@@ -523,7 +534,7 @@ class Tekmar482Session:
     @contextmanager
     def _write_turn(
         self,
-        target: DeviceReplySelector | None,
+        target: ReplySelector | None,
     ) -> Iterator[object | None]:
         if target is None or target.service is not TrpcService.RESPONSE_UPDATE:
             yield None
@@ -657,7 +668,7 @@ class Tekmar482Session:
         self._check_generation(generation)
         self._raise_if_unavailable()
         with self._write_turn(
-            self._command_selector(command),
+            self._tracked_selector(command),
         ) as turn:
             if (
                 previous := self._coalesced_updates.pop(coalesce_key, None)
@@ -819,18 +830,18 @@ class Tekmar482Session:
     async def _dispatch_message(self, message: TrpcPacket) -> None:
         LOGGER.debug("Received tekmar 482 tRPC %s", message)
         async with self._condition:
-            if message.method is TrpcMethod.SETBACK_ENABLE and message.service in {
-                TrpcService.REPORT,
-                TrpcService.RESPONSE_REQUEST,
-                TrpcService.RESPONSE_UPDATE,
-            }:
-                self._observe_setbacks(enabled=message.get("enable") == 1)
             echo = self._take_detached_echo(message)
             if echo is not None:
                 self._wake_writers()
                 self._condition.notify_all()
                 if echo is _DetachedEcho.ABANDONED:
                     return
+            if message.method is TrpcMethod.SETBACK_ENABLE and message.service in {
+                TrpcService.REPORT,
+                TrpcService.RESPONSE_REQUEST,
+                TrpcService.RESPONSE_UPDATE,
+            }:
+                self._observe_setbacks(enabled=message.get("enable") == 1)
             if (
                 message.service == TrpcService.RESPONSE_REQUEST
                 and message.method == TrpcMethod.DEVICE_INVENTORY
@@ -864,16 +875,20 @@ class Tekmar482Session:
 
     def _track_unconfirmed(
         self,
-        selector: DeviceReplySelector,
+        selector: ReplySelector,
         message: TrpcPacket,
     ) -> None:
-        if selector not in self._unconfirmed_echoes:
-            self._unconfirmed_echoes[selector] = _UnconfirmedEcho(
-                command=TrpcCommand.update(message.method_id, message.body)
-                if message.service is TrpcService.UPDATE
-                else None,
-            )
-        entry = self._unconfirmed_echoes[selector]
+        command = (
+            TrpcCommand.update(message.method_id, message.body)
+            if message.service is TrpcService.UPDATE
+            else None
+        )
+        entry = self._unconfirmed_echoes.setdefault(
+            selector,
+            _UnconfirmedEcho(command=command),
+        )
+        if command != entry.command:
+            entry.command = None
         entry.count += 1
         # A named and a CURRENT command can produce identical echoes. Once
         # ambiguous, neither becomes attributable just because one echo arrived.
@@ -932,7 +947,7 @@ class Tekmar482Session:
         generation = self._generation
         try:
             with self._write_turn(
-                self._command_selector(command),
+                self._tracked_selector(command),
             ) as turn:
                 return await self._ordered_exchange(
                     command,
@@ -986,6 +1001,31 @@ class Tekmar482Session:
             for future, old in self._tracked_replies.items()
         )
 
+    def needs_cache_sync(self, command: TrpcCommand) -> bool:
+        """Whether an earlier inline cache read could answer this command."""
+        return self._inline_cache_read(self._tracked_selector(command)) and (
+            self._waiting_for_echo(ResponseMatch.for_command(command))
+        )
+
+    def _inline_cache_read(self, selector: ReplySelector | None) -> bool:
+        return (
+            selector is not None
+            and selector.service is TrpcService.RESPONSE_REQUEST
+            and selector.slot is None
+            and selector.method not in self.readback_methods
+        )
+
+    def _retire_inline_reads(self) -> None:
+        # A matched ProtocolVersion request passed the same dispatcher and
+        # UART FIFO. Deferred device jobs, writes and walks are not covered.
+        for future, selector in tuple(self._tracked_replies.items()):
+            if future.cancelled() and self._inline_cache_read(selector):
+                del self._tracked_replies[future]
+        for selector in tuple(self._unconfirmed_echoes):
+            if self._inline_cache_read(selector):
+                del self._unconfirmed_echoes[selector]
+        self._wake_writers()
+
     async def _exchange_unlocked(
         self,
         command: TrpcCommand,
@@ -1007,13 +1047,21 @@ class Tekmar482Session:
         )
         async with self._condition:
             self._pending.append(pending)
-            if (selector := self._command_selector(command)) is not None:
+            if (selector := self._tracked_selector(command)) is not None:
                 self._tracked_replies[future] = selector
 
         try:
             async with asyncio.timeout(timeout):
                 await self._send_unlocked(command, generation, on_sending)
-                return await future
+                reply = await future
+                if (
+                    command.service == TrpcService.REQUEST
+                    and command.method == TrpcMethod.PROTOCOL_VERSION
+                    and reply.service is TrpcService.RESPONSE_REQUEST
+                    and reply.method is TrpcMethod.PROTOCOL_VERSION
+                ):
+                    self._retire_inline_reads()
+                return reply
         except asyncio.CancelledError:
             future.cancel()
             raise
@@ -1041,21 +1089,22 @@ class Tekmar482Session:
             on_sending()
         await self._write_message_unlocked(
             message,
-            self._message_selector(message) if unconfirmed else None,
+            self._tracked_selector(command) if unconfirmed else None,
+            message.to_packet(),
         )
         return message
 
-    def _command_selector(self, command: TrpcCommand) -> DeviceReplySelector | None:
-        return DeviceReplySelector.for_command(
-            command,
-            readback=command.method in self.readback_methods,
-        )
-
-    def _message_selector(self, message: TrpcPacket) -> DeviceReplySelector | None:
-        return DeviceReplySelector.for_message(
-            message,
+    def _tracked_selector(
+        self,
+        message: TrpcCommand | TrpcPacket,
+    ) -> ReplySelector | None:
+        selector = ReplySelector.from_fields(
+            message.service_id,
+            message.method_id,
+            message.fields if isinstance(message, TrpcCommand) else message.body,
             readback=message.method_id in self.readback_methods,
         )
+        return selector if selector is not None and selector.tracks_reply else None
 
     async def _remove_pending(self, pending: _PendingRequest) -> None:
         async with self._condition:

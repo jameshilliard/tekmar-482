@@ -158,7 +158,7 @@ class ClientDiscoveryTest(unittest.IsolatedAsyncioTestCase):
                 await client.request_response(method, fields={"address": 2101})
                 == expected
             )
-            assert await client.read_message(timeout=0.1) == late
+            assert await client.read_message(timeout=0.01) is None
         transport.assert_complete()
 
     async def test_gateway_poll_cannot_continue_on_a_reopened_connection(self) -> None:

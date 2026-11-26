@@ -58,6 +58,10 @@ These are firmware behaviors, not a list of recommended commands.
 - Mode and setpoint write replies describe the gateway cache, not an
   independent confirmation from the thermostat. There is no transaction ID.
   An echo cannot confirm two commands, and a timed-out write is not retried.
+- The stock mode request (`0x93b4`) emits its cached response before returning
+  to the dispatcher. ProtocolVersion (`0xab18`) uses the same serialized
+  send path (`0xbe80`). Its solicited response marks a boundary for preceding
+  inline cache reads, not for native bus operations still in progress.
 - Group IDs are 1 through 12. The update handler at `0x97b0` submits a bus
   command without a direct reply. The group-status callback updates the cache
   even when reporting is off, but checks the reporting flag (`0x234c`) before

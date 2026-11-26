@@ -729,6 +729,10 @@ class ControllerTest(unittest.IsolatedAsyncioTestCase):
                 *start,
                 request_step(mode, address=1201),
                 request_step(
+                    TrpcMethod.PROTOCOL_VERSION,
+                    response=response(TrpcMethod.PROTOCOL_VERSION, version=3),
+                ),
+                request_step(
                     mode,
                     address=1201,
                     response=response(mode, address=1201, mode=1),

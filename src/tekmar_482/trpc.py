@@ -634,76 +634,64 @@ class TrpcCommand:
 
 
 @dataclass(frozen=True, slots=True)
-class DeviceReplySelector:
-    """Identify a device reply that must not be credited to a later exchange."""
+class ReplySelector:
+    """Wire fields that can distinguish a command's reply from another reply."""
 
     service: TrpcService
     method: int
-    address: int
+    address: int | None
     slot: int | None
     echo: tuple[str, int] | None
 
     @classmethod
-    def for_command(
+    def from_fields(
         cls,
-        command: TrpcCommand,
+        service: TrpcServiceId,
+        method: TrpcMethodId,
+        fields: TrpcFieldMap,
         *,
-        readback: bool = False,
+        readback: bool,
     ) -> Self | None:
-        if (
-            command.method not in _SETBACK_INDEXED_METHODS
-            and command.method != TrpcMethod.MODE_SETTING
-            and command.method
-            not in {
-                TrpcMethod.DEVICE_ATTRIBUTES,
-                TrpcMethod.HUMIDITY_SET_MIN,
-                TrpcMethod.HUMIDITY_SET_MAX,
-            }
-        ):
+        spec = method_spec(method)
+        reply = response_service_for(service)
+        if spec is None or reply is None:
             return None
-        return cls.for_message(command.to_message(), readback=readback)
+        sent = spec.normalize_fields(fields)
+        # Inventory takes a starting address, not an echoed address.
+        address = (
+            sent.get("address", 0)
+            if "address" in spec.field_names and method != TrpcMethod.DEVICE_INVENTORY
+            else None
+        )
+        slot = sent.get("setback", 0) if method in _SETBACK_INDEXED_METHODS else None
+        key = None
+        if method == TrpcMethod.SETPOINT_GROUP_ENABLE:
+            key = "group_id"
+        elif service == TrpcService.UPDATE and not readback:
+            if method == TrpcMethod.MODE_SETTING:
+                key = "mode"
+            elif slot is not None:
+                key = _echo_field(method)
+        echo = (key, sent.get(key, 0)) if key is not None else None
+        return cls(reply, method, address, slot, echo)
 
-    @classmethod
-    def for_message(cls, message: TrpcPacket, *, readback: bool = False) -> Self | None:
-        service = response_service_for(message.service_id)
-        if message.method in {
+    @property
+    def tracks_reply(self) -> bool:
+        """Identify single reads and device writes with attributable responses."""
+        if self.service is TrpcService.RESPONSE_REQUEST:
+            # Inventory has its own stream terminator. The other methods do
+            # not supply a reading (NullMethod is also a generic error reply).
+            return self.method not in {
+                TrpcMethod.DEVICE_INVENTORY,
+                TrpcMethod.NULL_METHOD,
+                TrpcMethod.TAKING_ADDRESS,
+                TrpcMethod.DATE_TIME,
+            }
+        return self.slot is not None or self.method in (
+            TrpcMethod.MODE_SETTING,
             TrpcMethod.DEVICE_ATTRIBUTES,
             TrpcMethod.HUMIDITY_SET_MIN,
             TrpcMethod.HUMIDITY_SET_MAX,
-        } and (
-            service is TrpcService.RESPONSE_UPDATE
-            or service is TrpcService.RESPONSE_REQUEST
-        ):
-            return cls(
-                service,
-                message.method_id,
-                message.body.get("address", 0),
-                None,
-                None,
-            )
-        if message.method is TrpcMethod.MODE_SETTING and (
-            service is TrpcService.RESPONSE_UPDATE
-            or (readback and service is TrpcService.RESPONSE_REQUEST)
-        ):
-            return cls(
-                service,
-                message.method_id,
-                message.body.get("address", 0),
-                None,
-                None if readback else ("mode", message.body.get("mode", 0)),
-            )
-        if service is None or message.method_id not in _SETBACK_INDEXED_METHODS:
-            return None
-        echo = None
-        if service is TrpcService.RESPONSE_UPDATE and not readback:
-            key = _echo_field(message.method_id)
-            echo = (key, message.body.get(key, 0))
-        return cls(
-            service,
-            message.method_id,
-            message.body.get("address", 0),
-            message.body.get("setback", 0),
-            echo,
         )
 
     def can_satisfy(self, match: ResponseMatch) -> bool:
@@ -715,7 +703,8 @@ class DeviceReplySelector:
             and (match.address is None or self.address == match.address)
             and self.address == match.fields.get("address", self.address)
             and (
-                slot is None
+                self.slot is None
+                or slot is None
                 or self.slot == slot
                 or ThaSetback.CURRENT in (self.slot, slot)
             )
@@ -725,7 +714,7 @@ class DeviceReplySelector:
             )
         )
 
-    def overlaps(self, other: DeviceReplySelector) -> bool:
+    def overlaps(self, other: ReplySelector) -> bool:
         """Return whether a single firmware echo could satisfy either selector."""
         return (
             self.service == other.service
@@ -739,7 +728,7 @@ class DeviceReplySelector:
 
     def shares_write_target(
         self,
-        other: DeviceReplySelector,
+        other: ReplySelector,
         *,
         setbacks_enabled: bool,
     ) -> bool:
@@ -764,7 +753,8 @@ class DeviceReplySelector:
             and message.get("address") == self.address
             and (self.echo is None or message.get(self.echo[0]) == self.echo[1])
             and (
-                slot == self.slot
+                self.slot is None
+                or slot == self.slot
                 or (self.slot == ThaSetback.CURRENT and slot in ThaSetback)
             )
         )
@@ -830,29 +820,20 @@ class ResponseMatch:
             and command.service in {TrpcService.REQUEST, TrpcService.UPDATE}
             and spec is not None
         ):
-            sent = spec.normalize_fields(command.fields)
+            selector = ReplySelector.from_fields(
+                command.service,
+                method,
+                command.fields,
+                readback=readback,
+            )
             predicates = spec.normalize_fields(freeze_fields(fields))
-            # The inventory address starts a walk; it is not an echoed selector.
-            if (
-                address is None
-                and "address" not in predicates
-                and "address" in spec.field_names
-                and method != TrpcMethod.DEVICE_INVENTORY
-            ):
-                address = sent.get("address", 0)
-            if method == TrpcMethod.SETPOINT_GROUP_ENABLE:
-                predicates.setdefault("group_id", sent.get("group_id", 0))
-            if (
-                method == TrpcMethod.MODE_SETTING
-                and command.service == TrpcService.UPDATE
-                and not readback
-            ):
-                predicates.setdefault("mode", sent.get("mode", 0))
-            if method in _SETBACK_INDEXED_METHODS:
-                predicates.setdefault("setback", sent.get("setback", 0))
-                if command.service == TrpcService.UPDATE and not readback:
-                    key = _echo_field(method)
-                    predicates.setdefault(key, sent.get(key, 0))
+            if selector is not None:
+                if address is None and "address" not in predicates:
+                    address = selector.address
+                if selector.slot is not None:
+                    predicates.setdefault("setback", selector.slot)
+                if selector.echo is not None:
+                    predicates.setdefault(*selector.echo)
             fields = predicates
 
         return cls.create(

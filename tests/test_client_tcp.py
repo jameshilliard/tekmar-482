@@ -31,10 +31,10 @@ class ClientTcpTest(unittest.IsolatedAsyncioTestCase):
                 first = asyncio.create_task(
                     client.set_latest_heat_setpoint_celsius(1201, 21),
                 )
-                first_frame = await writes.get()
                 raw.cancel()
                 with self.assertRaises(asyncio.CancelledError):
                     await raw
+                first_frame = await writes.get()
                 protocol.resume_writing()
                 first_result = await first
                 assert first_result is not None

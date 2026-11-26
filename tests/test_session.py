@@ -40,6 +40,110 @@ def report(method: TrpcMethodId, **fields: int) -> TrpcPacket:
 
 
 class SessionTest(unittest.IsolatedAsyncioTestCase):
+    async def test_version_marker_does_not_retire_custom_bus_read(self) -> None:
+        transport = BlockingWriteTransport()
+        method = TrpcMethod.MODE_SETTING
+        query = TrpcCommand.request(method, {"address": 1})
+        marker = TrpcCommand.request(TrpcMethod.PROTOCOL_VERSION)
+        async with (
+            Tekmar482Session(
+                transport,
+                readback_methods=frozenset({method}),
+            ) as session,
+            asyncio.timeout(2),
+        ):
+            transport.release_write()
+            assert await session.request_response(query, timeout=0.01) is None
+            assert await transport.next_write() == query.to_message().to_packet()
+            retry = asyncio.create_task(session.request_response(query))
+            sync = asyncio.create_task(session.request_response(marker))
+            assert await transport.next_write() == marker.to_message().to_packet()
+            transport.release_write()
+            version = response(marker.method, version=3)
+            transport.queue_packet(version.to_packet())
+            assert await sync == version
+            assert await session.request_response(query, timeout=0.01) is None
+            assert len(transport.written) == 2
+            transport.queue_packet(response(method, address=1, mode=0).to_packet())
+            assert await transport.next_write() == query.to_message().to_packet()
+            transport.release_write()
+            fresh = response(method, address=1, mode=1)
+            transport.queue_packet(fresh.to_packet())
+            assert await retry == fresh
+
+    async def test_raw_short_request_keeps_wire_bytes_and_owns_one_reply(self) -> None:
+        transport = BlockingWriteTransport()
+        query = TrpcCommand.request(TrpcMethod.PROTOCOL_VERSION)
+        packet = query.to_message().to_packet()
+        short = Packet(packet.type, packet.data[:-2])  # Header-only gateway request.
+        async with Tekmar482Session(transport) as session, asyncio.timeout(2):
+            transport.release_write()
+            await session.write_packet(short)
+            assert await transport.next_write() == short
+            assert await session.request_response(query, timeout=0.01) is None
+            assert transport.written == [short]
+            old = response(query.method, version=2)
+            transport.queue_packet(old.to_packet())
+            assert await session.read_message() == old
+            retry = asyncio.create_task(session.request_response(query))
+            assert await transport.next_write() == packet
+            transport.release_write()
+            fresh = response(query.method, version=3)
+            transport.queue_packet(fresh.to_packet())
+            assert await retry == fresh
+
+    async def test_retry_consumes_only_its_own_read_reply(self) -> None:
+        for method, target, value in (
+            (TrpcMethod.CURRENT_TEMPERATURE, {"address": 1}, "temp"),
+            (TrpcMethod.SETBACK_STATE, {"address": 1}, "setback"),
+            (TrpcMethod.MODE_SETTING, {"address": 1}, "mode"),
+            (TrpcMethod.SETPOINT_GROUP_ENABLE, {"group_id": 1}, "enable"),
+            (TrpcMethod.NETWORK_ERROR, {}, "error"),
+        ):
+            with self.subTest(method=method):
+                transport = BlockingWriteTransport()
+                query = TrpcCommand.request(method, target)
+                old = response(method, **target, **{value: 1})
+                fresh = response(method, **target, **{value: 0})
+                async with (
+                    Tekmar482Session(transport) as session,
+                    session.reports() as reports,
+                    asyncio.timeout(2),
+                ):
+                    transport.release_write()
+                    assert await session.request_response(query, timeout=0.01) is None
+                    assert (
+                        await transport.next_write() == query.to_message().to_packet()
+                    )
+                    retry = asyncio.create_task(session.request_response(query))
+                    # An independent target can still use the wire.
+                    other = (
+                        TrpcCommand.request(method, dict.fromkeys(target, 2))
+                        if target
+                        else TrpcCommand.request(TrpcMethod.REPORTING_STATE)
+                    )
+                    unrelated = asyncio.create_task(session.request_response(other))
+                    assert (
+                        await transport.next_write() == other.to_message().to_packet()
+                    )
+                    transport.release_write()
+                    answer = response(other.method, **other.fields)
+                    transport.queue_packet(answer.to_packet())
+                    assert await unrelated == TrpcPacket.from_packet(answer.to_packet())
+                    pushed = report(method, **old.body)
+                    transport.queue_packet(pushed.to_packet())
+                    assert await reports.next_event() == (pushed, None)
+                    assert len(transport.written) == 2
+                    transport.queue_packet(old.to_packet())
+                    assert (
+                        await transport.next_write() == query.to_message().to_packet()
+                    )
+                    transport.release_write()
+                    transport.queue_packet(fresh.to_packet())
+                    assert await retry == fresh
+                    assert not list(reports.drain())
+                    assert session.message_backlog_count == 1  # Only the pushed report.
+
     async def test_moved_devices_no_wait_echo_is_drained_not_published(self) -> None:
         transport = BlockingWriteTransport()
         method = TrpcMethod.HEAT_SETPOINT
@@ -101,6 +205,20 @@ class SessionTest(unittest.IsolatedAsyncioTestCase):
                     ),
                 )
             echo = update_response(method, address=1201, setpoint=44, setback=6)
+            for _ in range(2):
+                transport.queue_packet(echo.to_packet())
+                assert await reports.next_event() == (echo, None)
+
+    async def test_no_wait_readbacks_do_not_guess_which_value_was_sent(self) -> None:
+        transport = NullTransport()
+        method = TrpcMethod.MODE_SETTING
+        session = Tekmar482Session(transport, readback_methods=frozenset({method}))
+        async with session, session.reports() as reports, asyncio.timeout(2):
+            for mode in (1, 0):
+                await session.send(
+                    TrpcCommand.update(method, {"address": 1, "mode": mode}),
+                )
+            echo = update_response(method, address=1, mode=0)
             for _ in range(2):
                 transport.queue_packet(echo.to_packet())
                 assert await reports.next_event() == (echo, None)

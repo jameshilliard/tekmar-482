@@ -242,13 +242,20 @@ refer to the same setpoint.
 
 For requests and setpoint writes, the exchange timeout starts when the command
 takes the wire, not while it is queued. It covers the transport write and any
-required acknowledgment. For indexed setpoint and fan reads, the budget also
-covers draining an earlier unanswered read with an overlapping selector. A
-`CURRENT` reply can name any slot, so it overlaps every slot at that address
-for that method. Other reads can proceed. If the old reply never arrives,
-reopen the connection before retrying the overlapping read.
-A timed-out write may already have been applied;
-the library does not retry it automatically.
+required acknowledgment. If a previous read timed out or was cancelled, an
+indistinguishable retry waits for the old reply within that budget. The
+session compares method and response service, device address or group ID,
+and schedule slot when applicable. A `CURRENT` reply can name any slot.
+Unrelated reads can proceed, and unsolicited reports are still delivered.
+
+For an inline, non-indexed cache read whose reply never arrived, a successful
+`await client.request_response(TrpcMethod.PROTOCOL_VERSION)` establishes that
+the gateway has finished sending any earlier cache reply. The controller does
+this before retrying a stock mode read. It does **not** establish completion of
+a custom firmware bus read, an indexed exchange, an inventory walk, or a
+write. Those need their own reply, terminator, or a fresh session on a known
+quiescent gateway. A timed-out write may already have been applied; the
+library does not retry it automatically.
 
 `Tekmar482Client` uses a `Tekmar482Session` internally. The session owns the
 single packet reader for the serial/TCP stream, matches request/response calls,
