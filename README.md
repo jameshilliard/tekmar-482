@@ -668,6 +668,20 @@ triggers an operating-state read, not an optimistic mode change.
 
 ### Line announcements
 
+**Network faults.** `watch-native --passive` reports native `3D7` alarms and
+explicit clears without sending a query. `dump` includes the last report
+per source for each continuous capture window. In Python,
+`state.fault_report(path)` is `None` until that source has reported. Otherwise
+`report.fault` exposes the exact word, code, six-bit instance, two-bit
+priority and, where documented, circuit state or descriptor detail. A clear
+has `report.fault.is_clear` set; it does not clear another source. Equal
+reports refresh the receive timestamp without generating a change. A gap
+or address reassignment makes the affected observation unknown, not clear.
+
+Normal-mode `NetworkError` carries the same two bytes but no source.
+`decode_network_error(word).fault` exposes their native interpretation;
+the last Normal-mode word is not a list of all faults on the installation.
+
 These commands preview the exact native frame offline. Sending requires
 `--confirm`, a transport and an explicit list of physical ports:
 

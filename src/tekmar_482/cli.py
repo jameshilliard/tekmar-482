@@ -28,6 +28,7 @@ from .cli_line import (
 )
 from .cli_native_watch import (
     calendar_fields,
+    fault_fields,
     io_fields,
     setpoint_fields,
     snow_fields,
@@ -1090,6 +1091,8 @@ def _emit_capture_summary(
         emit(asdict(diagnostic))
     if sources := observed.water_sources:
         emit({"water_sources": [water_fields(s) for s in sources]})
+    if reports := observed.fault_reports:
+        emit({"network_fault_reports": [fault_fields(report) for report in reports]})
     _emit_io(observed, emit, passive=True)
     for control in observed.setpoint_controls:
         emit({"setpoint_control": setpoint_fields(control)})

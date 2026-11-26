@@ -659,6 +659,7 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         observed = bytes.fromhex("6e7161c4 770001 13")
         rx_identity = serialize(Packet(1, prefix + identity))
         rx_other = serialize(Packet(1, prefix + observed))
+        rx_fault = serialize(Packet(1, prefix + bytes.fromhex("7d7161c2 8fe1")))
         result = serialize(Packet(1, bytes([2, 3, 0])))
         mode = management(2, 0, b"\x01"), management(2, 3, b"\x01")
         stop = management(2, 0, b"\0"), management(2, 3, b"\0")
@@ -693,7 +694,7 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
                     (management(7, 1), management(7, 4, bytes(28))),
                     (management(4, 1), management(4, 4, b"1" * 40)),
                     mode,
-                    (ack[0], ack[1] + rx_identity + rx_other),
+                    (ack[0], ack[1] + rx_identity + rx_other + rx_fault),
                 ]
                 if not passive:
                     steps.append((request(0, (1 << 31) - 1), result))
@@ -749,6 +750,14 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
                 )
                 out = StringIO()
                 assert await run(args, stdout=out) == 0
+                faults = [
+                    f
+                    for line in out.getvalue().splitlines()
+                    for f in json.loads(line).get("network_fault_reports", [])
+                ]
+                assert [(f["port"], f["node"], f["raw"]) for f in faults] == [
+                    (3, 7, 0xE18F),
+                ]
                 telemetry = [
                     json.loads(line)["status_read"]
                     for line in out.getvalue().splitlines()

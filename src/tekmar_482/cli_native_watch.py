@@ -22,7 +22,7 @@ if TYPE_CHECKING:
     from .native_plant_registers import PlantRegisters
     from .native_setpoint import NativeSetpointControl
     from .native_snowmelt import NativeSnowmelt, SnowmeltChannel
-    from .native_state import NativeState
+    from .native_state import NativeFaultReport, NativeState
     from .native_watch import NativeWatchResult
     from .raw import BridgeStream
 
@@ -51,6 +51,17 @@ def setpoint_fields(control: NativeSetpointControl) -> dict[str, object]:
         if frame
         else None,
         "live_readings": asdict(readings) if readings else None,
+    }
+
+
+def fault_fields(report: NativeFaultReport) -> dict[str, object]:
+    return {
+        **asdict(report.path),
+        **report.fault.fields(),
+        "raw": report.fault.raw,
+        "received_ms": report.frame.timestamp_ms,
+        "body": report.frame.body.hex(),
+        "extension_hex": report.extension.hex(),
     }
 
 
@@ -155,6 +166,19 @@ async def snow_group_from_args(
     )
 
 
+def _emit_fault(
+    path: NativePath,
+    fault: NativeFaultReport | None,
+    previous: dict[NativePath, NativeFaultReport],
+    emit: Callable[[object], None],
+) -> None:
+    if fault is not None and previous.get(path) != fault:
+        previous[path] = fault
+        emit({"network_fault": fault_fields(fault)})
+    elif fault is None and previous.pop(path, None) is not None:
+        emit({"network_fault_unknown": asdict(path)})
+
+
 async def watch_all_from_args(
     stream: BridgeStream,
     args: argparse.Namespace,
@@ -164,8 +188,10 @@ async def watch_all_from_args(
     previous_plants: dict[NativePath, PlantRegisters] = {}
     previous_setpoints: dict[NativePath, NativeSetpointControl] = {}
     previous_io: dict[NativePath, tuple[str | None, tuple[IoDirectory, ...]]] = {}
+    previous_faults: dict[NativePath, NativeFaultReport] = {}
 
     def changed(path: NativePath, state: NativeState) -> None:
+        _emit_fault(path, state.fault_report(path), previous_faults, emit)
         identity = state.identity(path)
         model = identity.product.model if identity and identity.product else None
         if dirs := state.io_for(path):

@@ -5,6 +5,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from enum import IntEnum, IntFlag, StrEnum
 
+from ._native_payloads.faults import ERROR_DESCRIPTIONS
+
 DEFAULT_BAUDRATE = 9600
 TN4_PORTS = range(5)
 MAX_PERCENT = 100
@@ -272,55 +274,4 @@ DEVICE_FEATURES: dict[int, DeviceFeature] = {
     108402: _feature("671", DeviceKind.SNOWMELT, snow=1),
 }
 
-TN_ERRORS: dict[int, str] = {
-    0x00: "No Errors",
-    0x01: "EEPROM Error",
-    0x02: "Internal Error",
-    0x03: "Address Error or Master Device Error",
-    0x04: "Device Lost Error",
-    0x05: "Mixing Configuration Error",
-    0x06: "tN4 Bus Communications Error",
-    0x07: "Schedule Master Error",
-    0x08: "Cool Group Error",
-    0x09: "Device Configuration Error",
-    0x0A: "Alert Input Error",
-    0x0B: "Primary Pump Proof Error",
-    0x0C: "No Pumps Are Running, Flow Proof Demand Input is Active",
-    0x0D: "Combustion Air Proof is Missing",
-    0x0E: "Combustion Air Damper is Closed, Proof Demand Input is Active",
-    0x0F: "Dewpoint Configuration Error",
-    0x80: "Outdoor Sensor Error",
-    0x81: "System Supply Sensor Error",
-    0x82: "System Return Sensor Error",
-    0x83: "Heating Device Supply Sensor Error",
-    0x84: "Heating Device Return Sensor Error",
-    0x85: "Heating Device Outlet Sensor Error",
-    0x86: "Heating Device Inlet Sensor Error",
-    0x87: "Cooling Device Supply Sensor Error",
-    0x88: "Cooling Device Return Sensor Error",
-    0x89: "Cooling Device Inlet Sensor Error",
-    0x8A: "Cooling Device Outlet Sensor Error",
-    0x8B: "Mixing Supply Sensor Error",
-    0x8C: "Mixing Return Sensor Error",
-    0x8D: "Dhw Tank Sensor Error",
-    0x8E: "Room Sensor Error",
-    0x8F: "Slab Sensor Error",
-    0x90: "Duct Sensor Error",
-    0x91: "Remote Sensor Error",
-    0x92: "Coil Return Sensor Error",
-    0x93: "Tank Sensor Error",
-    0x94: "Humidity Sensor Error",
-    0x95: "Heat Pump Error",
-    0x96: "Brown/Slab Error",
-    0x97: "Yellow Error",
-    0x98: "Blue Error",
-    0x99: "Tandem Error",
-    0xC0: "Hot Room Warning",
-    0xC1: "Cold Room Warning",
-    0xC2: "Freeze Protect Warning",
-    0xC3: "Filter Change Warning",
-    0xC4: "Snow/Ice Sensor Heater Not Heating",
-    0xC5: "Snow/Ice Sensor Overheating",
-    0xC6: "Snow/Ice Sensor Temperature Drift",
-    0xC7: "Maximum Melt Time Exceeded",
-}
+TN_ERRORS = ERROR_DESCRIPTIONS

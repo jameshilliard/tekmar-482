@@ -4,6 +4,7 @@ from collections.abc import Callable
 
 from .climate import AIR_MASTER, AIR_MEMBER, AirStatus, ThermostatMode
 from .codec import Fields, Reader, SETBACK, ShortPayload, temp
+from .faults import NETWORK_ERROR, NetworkFault
 from .io import IO_CHANGE, IO_DISCOVER, IO_DISCOVERY, IO_REPLY, IO_REQUEST, IoReport
 from .layouts import (
     BLOCK_SELECTORS as BLOCK_SELECTORS,
@@ -282,11 +283,6 @@ def block_update(r: Reader) -> Fields:
     return fields | block_metadata(block)
 
 
-def network_error(r: Reader) -> Fields:
-    code, value = r.take(2)
-    return {"code": code, "instance": value & 63, "priority": value >> 6}
-
-
 def octets(*names: str) -> Callable[[Reader], Fields]:
     def read(r: Reader) -> Fields:
         return dict(zip(names, r.take(len(names)), strict=True))
@@ -378,7 +374,7 @@ DECODERS: dict[int, tuple[str, Callable[[Reader], Fields]]] = {
     AIR_MEMBER: ("AirGroupMemberStatus", lambda r: AirStatus.read(r, master=False).fields()),
     RELAY_HEARTBEAT: ("RelayStatusHeartbeat", lambda r: RelayHeartbeat(r.byte()).fields()),
     MASTER_STATUS: ("MasterStatus", lambda r: LoopStatus.read(r, master=True).fields()),
-    0x3d7: ("NetworkError", network_error),
+    NETWORK_ERROR: ("NetworkError", lambda r: NetworkFault.read(r).fields()),
     NETWORK_INIT_REQUEST: ("NetworkInitRequest", lambda _: {}),
     0x3f7: ("MasterQuery", lambda _: {}),
 }

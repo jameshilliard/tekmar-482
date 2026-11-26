@@ -50,6 +50,7 @@ from .raw import CaptureGap
 if TYPE_CHECKING:
     from collections.abc import Iterable
 
+    from ._native_payloads.faults import NetworkFault
     from ._water_monitor import WaterSource
     from .native_snowmelt import SnowmeltChannel
     from .native_status import NativeStatusBatch
@@ -61,6 +62,7 @@ TAKING_ADDRESS = 0x3E7
 _BLOCK_HEADER = 3
 _UPDATE_HEADER = 4
 _OLD_ADDRESS = 2
+_FAULT_WORD_BYTES = 2
 _NODE = 31
 _CLIMATE_BLOCKS = frozenset((*MODE_BLOCKS, *SENSOR_BLOCKS, *ADJUSTMENT_BLOCKS))
 
@@ -88,6 +90,14 @@ class NativePath:
 
 
 @dataclass(frozen=True, slots=True)
+class NativeFaultReport:
+    path: NativePath
+    fault: NetworkFault
+    extension: bytes
+    frame: NativeFrame = field(compare=False, repr=False)
+
+
+@dataclass(frozen=True, slots=True)
 class NativeClimate:
     path: NativePath
     identity: NativeIdentity
@@ -102,6 +112,7 @@ class NativeClimate:
 @dataclass(slots=True)
 class _Peer:
     identity: NativeIdentity | None = None
+    fault: NativeFaultReport | None = None
     blocks: dict[BlockKey, NativeFrame] = field(default_factory=dict)
     air: AirStatus | None = None
     active_air_target: AirTarget | None = None
@@ -342,6 +353,14 @@ class NativeState:
     def identity(self, path: NativePath) -> NativeIdentity | None:
         return peer.identity if (peer := self._peers.get(path)) else None
 
+    def fault_report(self, path: NativePath) -> NativeFaultReport | None:
+        """Last fault announcement, including explicit clears; None is unknown."""
+        return peer.fault if (peer := self._peers.get(path)) else None
+
+    @property
+    def fault_reports(self) -> tuple[NativeFaultReport, ...]:
+        return tuple(f for p in sorted(self._peers) if (f := self._peers[p].fault))
+
     def _move(self, path: NativePath, data: bytes) -> tuple[NativePath, ...]:
         if len(data) < _OLD_ADDRESS:
             return ()
@@ -481,6 +500,16 @@ class NativeState:
         if self._selected is not None and path not in self._selected:
             return ()
         changed_water = self._water.observe(record)
+        if (fault := record.network_fault) is not None:
+            peer = self._peers.setdefault(path, _Peer())
+            previous = peer.fault
+            peer.fault = NativeFaultReport(
+                path,
+                fault,
+                data[_FAULT_WORD_BYTES:],
+                record,
+            )
+            return (path,) if previous != peer.fault else ()
         if (sample := record.io_report) is not None:
             peer = self._peers.setdefault(path, _Peer())
             book = peer.io.setdefault(sample.endpoint, IoBook(sample.endpoint))

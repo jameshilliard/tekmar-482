@@ -8,6 +8,7 @@ from ._native_payloads.climate import (
     ThermostatConfiguration,
     ThermostatMode,
 )
+from ._native_payloads.faults import NetworkFault, SensorCircuit
 from ._native_payloads.io import IoEndpoint, IoReport, IoType, io_terminal
 from ._native_payloads.line import (
     ClockReport,
@@ -240,7 +241,7 @@ from .native_snowmelt import (
     SnowmeltConfiguration,
     SnowmeltSample,
 )
-from .native_state import NativeClimate, NativePath, NativeState
+from .native_state import NativeClimate, NativeFaultReport, NativePath, NativeState
 from .native_status import NativeStatusBatch, read_snowmelt_status
 from .native_target_edit import ThermostatTargetChange
 from .native_targets import (
@@ -475,6 +476,7 @@ __all__ = [
     "NativeClimate",
     "NativeDevice",
     "NativeDiscovery",
+    "NativeFaultReport",
     "NativeField",
     "NativeFrame",
     "NativeIdentity",
@@ -497,6 +499,7 @@ __all__ = [
     "NativeWeeklySchedule",
     "NativeWriteResult",
     "NativeWriteStatus",
+    "NetworkFault",
     "NullTransport",
     "OutputSample",
     "Packet",
@@ -541,6 +544,7 @@ __all__ = [
     "ScheduleSignal",
     "ScheduleStatus",
     "ScheduleTarget",
+    "SensorCircuit",
     "SensorInput",
     "SensorObservation",
     "SensorRead",

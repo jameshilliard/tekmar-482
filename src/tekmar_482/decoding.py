@@ -5,9 +5,9 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
+from ._native_payloads.faults import NetworkFault
 from .constants import (
     SETBACK_DESCRIPTION,
-    TN_ERRORS,
     ActiveDemand,
     DeviceMode,
     ThaSetback,
@@ -37,6 +37,11 @@ class DecodedNetworkError:
     high_byte: int
     description: str
 
+    @property
+    def fault(self) -> NetworkFault:
+        """Native code, instance and priority, without a source address."""
+        return NetworkFault(self.raw)
+
 
 @dataclass(frozen=True, slots=True)
 class DecodedNamedValue:
@@ -51,13 +56,12 @@ def decode_network_error(value: int | None) -> DecodedNetworkError | None:
     """Decode a gateway NetworkError value."""
     if value is None:
         return None
-    low_byte = value & 0xFF
-    high_byte = (value >> 8) & 0xFF
+    fault = NetworkFault(value)
     return DecodedNetworkError(
         raw=value,
-        low_byte=low_byte,
-        high_byte=high_byte,
-        description=TN_ERRORS.get(low_byte, "Unknown Error"),
+        low_byte=fault.code,
+        high_byte=value >> 8,
+        description=fault.description,
     )
 
 
@@ -196,6 +200,7 @@ def decoded_to_dict(value: object) -> object:
         }
     if isinstance(value, DecodedNetworkError):
         return {
+            **value.fault.fields(),
             "raw": value.raw,
             "low_byte": value.low_byte,
             "high_byte": value.high_byte,

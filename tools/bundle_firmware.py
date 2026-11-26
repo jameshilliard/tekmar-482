@@ -27,6 +27,7 @@ def main() -> None:
         "__init__.py",
         "climate.py",
         "codec.py",
+        "faults.py",
         "io.py",
         "layouts.py",
         "line.py",

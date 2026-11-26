@@ -14,6 +14,7 @@ from ._native_payloads import (
     decode_payload,
 )
 from ._native_payloads.codec import Reader, ShortPayload
+from ._native_payloads.faults import NETWORK_ERROR, NetworkFault
 from ._native_payloads.io import IO_CHANGE, IO_DISCOVERY, IO_REPLY, IoReport
 from ._native_payloads.line import (
     CLOCK_REPORT,
@@ -332,6 +333,10 @@ class NativeFrame:
             return decode(Reader(self.message.payload))
         except ShortPayload:
             return None
+
+    @property
+    def network_fault(self) -> NetworkFault | None:
+        return self._read_payload(NETWORK_ERROR, NetworkFault.read)
 
     @property
     def setpoint_status(self) -> SetpointStatus | None:
