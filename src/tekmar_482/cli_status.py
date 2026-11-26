@@ -137,15 +137,16 @@ async def read_status_from_args(
         query = NativeStatusQuery.humidity(peer.subnet, args.selector)
     else:
         peer = NativeAddress(*args.peer) if args.peer else None
-        query = (
-            NativeStatusQuery.io(
+        if kind in {StatusRequest.IO_CHANNEL, StatusRequest.IO_DISCOVERY}:
+            query = NativeStatusQuery.io(
                 args.io_subnet,
                 args.io_node,
                 getattr(args, "channel", None),
             )
-            if kind in {StatusRequest.IO_CHANNEL, StatusRequest.IO_DISCOVERY}
-            else NativeStatusQuery(kind)
-        )
+        elif kind is StatusRequest.GATEWAY_ACCESS:
+            query = NativeStatusQuery.gateway_access()
+        else:
+            query = NativeStatusQuery(kind)
     return await stream.read_status(
         args.port,
         query,

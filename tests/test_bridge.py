@@ -635,6 +635,7 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
                         ("31700000", "71f161c5 2241040019"),
                         ("30700000", "70f161c1 02"),
                         ("01100000", "410161c3 000102"),
+                        ("20000001 01", "600161c1 02"),
                     ):
                         steps.append(
                             (
@@ -675,7 +676,7 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
                     for line in out.getvalue().splitlines()
                     if "status_read" in line
                 ]
-                assert len(telemetry) == (0 if passive else 5)
+                assert len(telemetry) == (0 if passive else 6)
                 assert all(
                     entry["answered"] and entry["reports"] for entry in telemetry
                 )

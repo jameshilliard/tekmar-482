@@ -2,38 +2,22 @@
 
 from __future__ import annotations
 
-import asyncio
-from dataclasses import dataclass
-from enum import Enum
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Self
 
 from ._native_payloads.scenes import NativeScene, SceneResponse
 from ._native_payloads.writes import NativeField, WritableBlock
-from .constants import TN4_PORTS
-from .native import NativeBlockQuery, NativeMessage, require_enum
-from .raw import NativePortBusyError, TxResult, TxStatus
+from .native import NativeBlockQuery, require_enum
+from .native_line import BroadcastIssue, BroadcastResult, LineBroadcast
 
 if TYPE_CHECKING:
-    from .native import NativeAddress, NativeFrame
+    from .native import NativeAddress, NativeFrame, NativeMessage
     from .native_write import NativeWriteResult
     from .raw import BridgeStream
 
 
-class SceneSendIssue(Enum):
-    PORT_BUSY = "port_busy"
-    DEADLINE = "outcome_unknown"
-
-
-@dataclass(frozen=True, slots=True)
-class ScenePortResult:
-    port: int
-    outcome: TxResult | SceneSendIssue
-
-    @property
-    def link_acknowledged(self) -> bool:
-        return (
-            isinstance(self.outcome, TxResult) and self.outcome.status is TxStatus.ACK
-        )
+SceneSendIssue = BroadcastIssue
+ScenePortResult = BroadcastResult
 
 
 @dataclass(frozen=True, slots=True)
@@ -43,55 +27,27 @@ class SceneSelection:
     scene: NativeScene
     ports: tuple[int, ...]
     source: NativeAddress
+    broadcast: LineBroadcast = field(init=False, repr=False, compare=False)
 
     def __post_init__(self) -> None:
-        require_enum(self.scene, NativeScene)
-        if (
-            not self.ports
-            or len(set(self.ports)) != len(self.ports)
-            or not all(port in TN4_PORTS for port in self.ports)
-        ):
-            msg = "select one or more distinct physical ports (0..4)"
-            raise ValueError(msg)
+        object.__setattr__(
+            self,
+            "broadcast",
+            LineBroadcast.scene(self.ports, self.scene, source=self.source),
+        )
 
     @property
     def message(self) -> NativeMessage:
-        return NativeMessage.scene_report(self.scene, source=self.source)
+        return self.broadcast.message
 
     async def send(
         self,
         stream: BridgeStream,
         *,
         timeout: float = 20,
-    ) -> tuple[ScenePortResult, ...]:
+    ) -> tuple[BroadcastResult, ...]:
         """Return independent link outcomes; do not claim application readback."""
-        if not timeout > 0:
-            msg = "scene send timeout must be positive"
-            raise ValueError(msg)
-        message = self.message
-
-        async def one(port: int) -> ScenePortResult:
-            deadline = asyncio.timeout(timeout)
-            try:
-                async with deadline:
-                    return ScenePortResult(port, await stream.send(port, message))
-            except NativePortBusyError:
-                return ScenePortResult(port, SceneSendIssue.PORT_BUSY)
-            except TimeoutError:
-                if not deadline.expired():
-                    raise
-                return ScenePortResult(port, SceneSendIssue.DEADLINE)
-
-        results = await asyncio.gather(
-            *(one(p) for p in self.ports),
-            return_exceptions=True,
-        )
-        collected = []
-        for result in results:
-            if isinstance(result, BaseException):
-                raise result
-            collected.append(result)
-        return tuple(collected)
+        return await self.broadcast.send(stream, timeout=timeout)
 
 
 @dataclass(frozen=True, slots=True)

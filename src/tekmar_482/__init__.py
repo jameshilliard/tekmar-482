@@ -1,6 +1,14 @@
 """Async Python client for the tekmar 482 gateway."""
 
 from ._native_payloads import SnowmeltBlock
+from ._native_payloads.line import (
+    ClockReport,
+    GroupReport,
+    SetpointApplication,
+    SetpointAssignment,
+    ZoneSyncAdjustment,
+    ZoneTargetMode,
+)
 from ._native_payloads.products import NativeProduct
 from ._native_payloads.queries import (
     NativeStatusQuery,
@@ -119,6 +127,12 @@ from .native_discovery import (
     NativeInventory,
     NativeProbe,
     discover_native,
+)
+from .native_line import (
+    BroadcastIssue,
+    BroadcastResult,
+    DeviceGroupBinding,
+    LineBroadcast,
 )
 from .native_scene import (
     ScenePortResult,
@@ -284,8 +298,11 @@ __all__ = [
     "BridgeManagement",
     "BridgeMode",
     "BridgeStream",
+    "BroadcastIssue",
+    "BroadcastResult",
     "CaptureGap",
     "CaptureRecord",
+    "ClockReport",
     "ConnectionClosedError",
     "DailyEvents",
     "DateTimeFields",
@@ -297,6 +314,7 @@ __all__ = [
     "DeviceAttributeBit",
     "DeviceAttributes",
     "DeviceFeature",
+    "DeviceGroupBinding",
     "DeviceKind",
     "DeviceMode",
     "DeviceRuntime",
@@ -312,9 +330,11 @@ __all__ = [
     "GatewayInfo",
     "GatewayRuntime",
     "GatewaySnapshot",
+    "GroupReport",
     "InvalidCapture",
     "InvalidReason",
     "InventoryDrainTimeoutError",
+    "LineBroadcast",
     "MessageApplyResult",
     "MethodSpec",
     "ModeSettingFields",
@@ -379,6 +399,8 @@ __all__ = [
     "SetbackPercentFields",
     "SetbackSetpointFields",
     "SetbackTemperatureFields",
+    "SetpointApplication",
+    "SetpointAssignment",
     "SetpointDeviceData",
     "SetpointDeviceRuntime",
     "SetpointGroupFields",
@@ -422,6 +444,8 @@ __all__ = [
     "UnknownServiceError",
     "WeeklyEvent",
     "WritableBlock",
+    "ZoneSyncAdjustment",
+    "ZoneTargetMode",
     "apply_message",
     "celsius_to_dege",
     "celsius_to_degh",

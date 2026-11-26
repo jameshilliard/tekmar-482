@@ -13,10 +13,20 @@ from ._native_payloads import (
     SnowmeltBlock,
     decode_payload,
 )
+from ._native_payloads.line import (
+    CLOCK_REPORT,
+    GROUP_REPORT,
+    GROUP_UPDATE,
+    ZONE_ADJUSTMENT,
+    ClockReport,
+    GroupReport,
+    ZoneSyncAdjustment,
+    group_command,
+)
 from ._native_payloads.queries import NativeStatusQuery, StatusRequest
 from ._native_payloads.scenes import SCENE_REPORT, NativeScene, SceneReport
 from ._native_payloads.schedules import ScheduleEvent, ScheduleProfile
-from .constants import SETPOINT_GROUP_IDS, TN4_PORTS
+from .constants import TN4_PORTS
 from .units import celsius_to_degh, degh_to_celsius
 
 if TYPE_CHECKING:
@@ -31,6 +41,8 @@ _UPDATE = 0x2DF
 _REPORT = 0x2E7
 _BLOCK_HEADER = 3
 _SCENE_HEADER = 3
+_CLOCK_SIZE = 5
+_GROUP_SIZE = 2
 _WORD_MASK = 0b11
 _SINGLE = 0x10
 _MULTI = 0x38
@@ -147,6 +159,7 @@ class NativeMessage:
     @classmethod
     def scene_report(cls, scene: NativeScene, *, source: NativeAddress) -> Self:
         """Announce a scene to one line at the 483's priority and duration."""
+        require_enum(scene, NativeScene)
         return cls(SCENE_REPORT, source, scene.payload(), priority=0)
 
     @classmethod
@@ -160,22 +173,13 @@ class NativeMessage:
         value: datetime,
         *,
         source: NativeAddress,
-        dst: bool = False,
+        dst: bool | None = None,
         dst_mode: int | None = None,
+        priority: int = 1,
     ) -> Self:
-        """Supply wall time. Omit dst_mode for the five-byte 482 layout."""
-        payload = bytes(
-            (
-                value.minute,
-                value.hour << 3 | value.isoweekday(),
-                (value.month - 1) | int(dst) << 4,
-                value.day - 1,
-                _uint(value.year - 2000, 8),
-            ),
-        )
-        if dst_mode is not None:
-            payload += bytes([_uint(dst_mode, 8)])
-        return cls(0x31F, source, payload)
+        """Encode local civil time. Priority 1 matches the stock 482 broadcast."""
+        report = ClockReport.from_wall_time(value, dst=dst, dst_mode=dst_mode)
+        return cls(CLOCK_REPORT, source, report.payload, priority)
 
     @classmethod
     def setpoint_group(
@@ -184,12 +188,20 @@ class NativeMessage:
         *,
         enabled: bool,
         source: NativeAddress,
+        priority: int = 1,
     ) -> Self:
         """Build a native group update for a single Raw port; no destination node."""
-        if group_id not in SETPOINT_GROUP_IDS:
-            msg = f"Setpoint group must be in 1..12: {group_id}"
-            raise ValueError(msg)
-        return cls(0x21F, source, bytes([group_id, int(enabled)]))
+        return cls(GROUP_UPDATE, source, group_command(group_id, enabled), priority)
+
+    @classmethod
+    def zone_sync(
+        cls,
+        adjustment: ZoneSyncAdjustment,
+        *,
+        source: NativeAddress,
+    ) -> Self:
+        """Announce all three zone settings in the 483 test-settings layout."""
+        return cls(ZONE_ADJUSTMENT, source, adjustment.payload, priority=0)
 
     @classmethod
     def request_snowmelt_status(
@@ -270,6 +282,18 @@ class NativeFrame:
     @property
     def decoded(self) -> dict[str, str | int | float]:
         return self.message.decoded
+
+    @property
+    def clock(self) -> ClockReport | None:
+        if self.message_id == CLOCK_REPORT and len(self.message.payload) >= _CLOCK_SIZE:
+            return ClockReport(self.message.payload)
+        return None
+
+    @property
+    def group_report(self) -> GroupReport | None:
+        if self.message_id == GROUP_REPORT and len(self.message.payload) >= _GROUP_SIZE:
+            return GroupReport(self.message.payload[0], self.message.payload[1])
+        return None
 
     @property
     def scene_report(self) -> SceneReport | None:

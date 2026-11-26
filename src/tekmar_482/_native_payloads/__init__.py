@@ -12,6 +12,7 @@ from .layouts import (
     FixedLayout,
     SnowmeltBlock as SnowmeltBlock,
 )
+from .line import ACCESS_STATUS, CLOCK_REPORT, GROUP_REPORT, GROUP_UPDATE, ZONE_ADJUSTMENT, ClockReport, GroupReport
 from .products import identify_product
 from .scenes import SCENE_REPORT, SCENE_RESPONSE_FIELDS, SceneReport, SceneResponse
 from .schedules import DAY_NAMES, SINGLE_WEEK, DailyEvents, ScheduleBinding, ScheduleCycle, ScheduleEvent
@@ -213,19 +214,30 @@ def outdoor(r: Reader) -> Fields:
 
 
 def clock_report(r: Reader) -> Fields:
-    minute, time, date, day, year = r.take(5)
+    head = r.take(5)
+    report = ClockReport(head)
+    minute, time, date, day, year = head
     month = date & 15
     fields: Fields = {"minute": minute, "weekday": time & 7, "hour": time >> 3,
                       "date_supported": int(date != 0xff), "month_raw": month,
-                      "dst": (date >> 4) & 1, "reserved": date >> 5,
+                      "dst_bit_raw": (date >> 4) & 1, "reserved": date >> 5,
                       "day_raw": day, "year_from_2000": year}
-    # J1196J 0xac90 transmits zero-based month/day. These are the remote's
-    # fields, not a timezone-qualified timestamp or a claim its clock is set.
-    if date != 0xff and month < 12 and day < 31:
-        fields.update(year=2000 + year, month=month + 1, day=day + 1)
+    if report.daylight is not None:
+        fields["dst"] = int(report.daylight)
+    if (calendar := report.standard_date) is not None:
+        fields.update(year=calendar.year, month=calendar.month, day=calendar.day,
+                      weekday_matches=int(calendar.isoweekday() == report.weekday))
+    if (wall := report.wall_datetime) is not None:
+        fields["local_datetime"] = wall.isoformat(timespec="minutes")
     if r.remaining:
         fields["dst_mode"] = r.byte()
     return fields
+
+
+def group_report(r: Reader) -> Fields:
+    group = GroupReport(*r.take(2))
+    return {"group_id": group.group, "flags_raw": group.flags, "requested_enable": int(group.requested),
+            "actual_enable": int(group.actual)}
 
 
 def block_request(r: Reader) -> Fields:
@@ -573,7 +585,7 @@ def master_present(r: Reader) -> Fields:
 
 
 DECODERS: dict[int, tuple[str, Callable[[Reader], Fields]]] = {
-    0x010: ("ZoneSynchAdjustment", octets("synch_cycle", "purging", "target_mode")),
+    ZONE_ADJUSTMENT: ("ZoneSynchAdjustment", octets("synch_cycle", "purging", "target_mode")),
     0x011: ("ZoneSynchQuery", octets()),
     0x173: ("TankStatus", octets("tank_id", "pump_output_pct", "tank_temp_raw", "target_temp_raw")),
     0x17f: ("SnowmeltZoneStatusRequest", snow_request),
@@ -581,10 +593,9 @@ DECODERS: dict[int, tuple[str, Callable[[Reader], Fields]]] = {
     0x1f4: ("IORequest", octets("subnet_id", "node_id", "channel_id")),
     0x1f5: ("IODiscoverReport", io_discovery),
     0x1f6: ("IODiscoverRequest", octets("subnet_id", "node_id")),
-    0x200: ("SecureGatewayAccess", lambda r: bits(r.byte(), ("request", 0, 1), ("access_open", 1, 1))),
-    0x20f: ("SetpointEnableReport", lambda r: {"group_id": r.byte()} | bits(
-        r.byte(), ("requested_enable", 0, 1), ("actual_enable", 4, 1))),
-    0x21f: ("SetpointRemoteEnable", octets("group_id", "enable")),
+    ACCESS_STATUS: ("SecureGatewayAccess", lambda r: bits(r.byte(), ("request", 0, 1), ("access_open", 1, 1))),
+    GROUP_REPORT: ("SetpointEnableReport", group_report),
+    GROUP_UPDATE: ("SetpointRemoteEnable", octets("group_id", "enable")),
     0x25f: ("FanDuctStatus", lambda r: bits(r.byte(), ("fan1", 0, 3), ("fan2", 2, 3),
         ("optimum_start", 4, 3), ("freeze_protect", 6, 1)) |
         {"duct_temp_raw": r.word(), "coil_temp_raw": r.word()}),
@@ -630,7 +641,7 @@ DECODERS: dict[int, tuple[str, Callable[[Reader], Fields]]] = {
     0x2d7: ("BlockRequest", block_request),
     0x2df: ("BlockUpdate", block_update),
     0x2e7: ("BlockReport", block_report),
-    0x31f: ("RealTimeClockReport", clock_report),
+    CLOCK_REPORT: ("RealTimeClockReport", clock_report),
     0x32f: ("OutdoorTemperatureReport", outdoor),
     0x337: ("MaximumBoilerPercent", lambda r: {"max_value": r.byte()}),
     0x33f: ("CycleLengthRequest", lambda r: {"air_group_id": r.byte(), "requested_length": r.byte()}),

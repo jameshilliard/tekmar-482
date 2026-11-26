@@ -26,6 +26,7 @@ def main() -> None:
     for name in (
         "__init__.py",
         "layouts.py",
+        "line.py",
         "products.py",
         "queries.py",
         "scenes.py",

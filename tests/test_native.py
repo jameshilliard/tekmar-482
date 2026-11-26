@@ -130,7 +130,11 @@ class NativeTests(unittest.TestCase):
         )
         last = published.replace(year=2255)
         report = NativeMessage.clock_report(last, source=source, dst=True, dst_mode=0)
-        assert report.payload == bytes([27, 80 | last.isoweekday(), 0x15, 25, 255, 0])
+        # The caller supplied 10:27 daylight; the wire contains 09:27 standard.
+        assert report.payload == bytes([27, 72 | last.isoweekday(), 0x15, 25, 255, 0])
+        assert report.decoded["local_datetime"] == last.replace(tzinfo=None).isoformat(
+            timespec="minutes",
+        )
         assert report.decoded["year"] == 2255
         assert report.decoded["dst"] == 1
         assert report.decoded["dst_mode"] == 0

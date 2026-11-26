@@ -284,6 +284,7 @@ def _status_queries(
                     StatusRequest.ZONE_SYNC,
                 )
             )
+            ports[port].append((None, NativeStatusQuery.gateway_access()))
     return ports
 
 

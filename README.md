@@ -377,7 +377,8 @@ tekmar-482 read-status master 2 --tcp 192.0.2.10:3001 --json
 ```
 
 Other services are `outdoor`, `wwsd`, `zone-sync`, `io-discovery`,
-`io-channel` and `humidity`. Active `dump` also requests the five shared
+`io-channel`, `humidity` and `gateway-access` (read-only access status).
+Active `dump` also requests the six shared
 line services once per responding port; use `--no-line-status` to skip them.
 `read_native_snapshot(..., include_line_status=True)` does the same.
 `stream.read_status(port, query, source=source, peer=peer)` returns a
@@ -387,6 +388,34 @@ source. Keys may arrive out of order or in several frames. Missing keys
 and a link ACK without a report never constitute a complete answer.
 Partial data are available even when the CLI exits with status 1. These
 commands do not change device settings or enable a snowmelt group.
+
+### Line announcements
+
+These commands preview the exact native frame offline. Sending requires
+`--confirm`, a transport and an explicit list of physical ports:
+
+```bash
+tekmar-482 set-clock 2030-07-15T00:30 --dst --ports 0 2 --json
+tekmar-482 set-group 4 on --ports 1 --json
+tekmar-482 set-zone-sync --cycle 0 --purge on --target outdoor-reset --ports 2 --json
+```
+
+`LineBroadcast.clock(...)`, `.group(...)`, `.zone_sync(...)` and `.scene(...)`
+provide the equivalent Python API. Inspect `announcement.message.to_bytes()`
+or call `await announcement.send(stream)`. Each selected port has its own
+link outcome. A timeout never causes an automatic retry; a link ACK does
+not mean every controller applied the announcement.
+
+To look up a 161/162's remote-enable assignment, use
+`set-device-group PORT SUBNET NODE on --tcp HOST:PORT`. The default only
+reads the identity and setup. To transmit, add **both** `--expect-group N`
+and `--confirm`: if the freshly read group differs, no enable is sent.
+The command broadcasts to the group, not solely to the selected device.
+A DHW, pool or unassigned application has no remote-enable group. In
+Python use `await DeviceGroupBinding.read(stream, port, address)` and
+`binding.announcement(expected_group, enabled=True)`. Incoming
+`frame.group_report` exposes the source's requested and actual bits
+separately. An echoed command is not a group report.
 
 ### Scenes
 
@@ -632,7 +661,12 @@ In Raw mode, `NativeMessage.request_clock(source=...)` builds a native 317
 for one line. Listen for 31F frames and use the frame's port and source to
 identify the responding clock; a link ACK is not a clock reading.
 `NativeMessage.clock_report(value, source=...)` builds the five-byte 482
-payload. Supply `dst` and optionally `dst_mode` for peers using those fields.
+payload. Supply **local civil time**: the encoder subtracts a daylight
+hour before encoding the date, weekday and hour. A timezone-aware value
+can supply the DST adjustment; use `dst=True` for an explicitly daylight
+wall time. An offset alone is not DST. `dst_mode` adds the optional sixth
+byte. On receive, `frame.clock.wall_datetime` is local time without a
+timezone and is absent for time-only, invalid or contradictory reports.
 
 Humidity measurement and minimum/maximum humidity setpoints use independent
 device attribute bits. When attributes are unavailable, a humidity-capable model

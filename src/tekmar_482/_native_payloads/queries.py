@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from enum import IntEnum
 
 from . import decode_payload
+from .line import ACCESS_STATUS
 
 
 class StatusRequest(IntEnum):
@@ -11,6 +12,7 @@ class StatusRequest(IntEnum):
     SNOWMELT = 0x17f
     IO_CHANNEL = 0x1f4
     IO_DISCOVERY = 0x1f6
+    GATEWAY_ACCESS = ACCESS_STATUS
     WWSD = 0x307
     CLOCK = 0x317
     HUMIDITY = 0x322
@@ -28,6 +30,7 @@ _REPLIES = {
     StatusRequest.WWSD: 0x30f, StatusRequest.CLOCK: 0x31f,
     StatusRequest.HUMIDITY: 0x323, StatusRequest.OUTDOOR: 0x32f,
     StatusRequest.MASTER: 0x3ff,
+    StatusRequest.GATEWAY_ACCESS: ACCESS_STATUS,
 }
 _WIDTHS = {StatusRequest.IO_CHANNEL: 3, StatusRequest.IO_DISCOVERY: 2, StatusRequest.HUMIDITY: 5}
 
@@ -107,6 +110,9 @@ class NativeStatusQuery:
             role = SnowmeltRole(self.payload[0] & 7)
             if self.payload[0] >> 3 >= role.maximum:
                 raise ValueError("snowmelt destination outside the configured range")
+        elif self.kind is StatusRequest.GATEWAY_ACCESS:
+            if self.payload != b"\x01":
+                raise ValueError("gateway access query must request status only")
         elif len(self.payload) != _WIDTHS.get(self.kind, 0):
             raise ValueError(f"wrong payload width for {self.kind.name.lower()} request")
 
@@ -122,6 +128,10 @@ class NativeStatusQuery:
     def for_snowmelt_device(cls, application: int, number: int, keys: bytes | None = None) -> "NativeStatusQuery":
         role = SnowmeltRole.for_application(application)
         return cls.snowmelt(role, number, _APPLICATION_KEYS[application] if keys is None else keys)
+
+    @classmethod
+    def gateway_access(cls) -> "NativeStatusQuery":
+        return cls(StatusRequest.GATEWAY_ACCESS, b"\x01")
 
     @classmethod
     def io(cls, subnet: int, node: int, channel: int | None = None) -> "NativeStatusQuery":
@@ -142,6 +152,8 @@ class NativeStatusQuery:
     def match(self, message_id: int, source_subnet: int, data: bytes) -> ReplyPart | None:
         if message_id != self.kind.reply_id or "truncated" in decode_payload(message_id, data):
             return None
+        if self.kind is StatusRequest.GATEWAY_ACCESS and data[0] & 1:
+            return None  # The query uses the same ID as the status; an echo is not a reply.
         if self.kind is StatusRequest.SNOWMELT:
             # Requests use (configured number - 1), reports use the configured number.
             if data[0] != self.payload[0] + 8:

@@ -89,6 +89,23 @@ class NativeStatusTests(unittest.IsolatedAsyncioTestCase):
         )
         assert await self.stream.read() == stale
 
+    async def test_gateway_access_requires_report_not_query_echo(self) -> None:
+        query = NativeStatusQuery.gateway_access()
+        for flag in (0, 2):
+            task = asyncio.create_task(
+                self.stream.read_status(2, query, source=_HOST, peer=_PEER),
+            )
+            assert (await self.sent()).to_bytes() == bytes.fromhex("20000001 01")
+            self.capture(0x200, "01", peer=_HOST)
+            self.capture(0x200, "03", peer=_PEER)
+            self.capture(0x200, "02", port=1)
+            self.capture(0x200, "02", peer=NativeAddress(3, 2))
+            self.result(TxStatus.ACK)
+            frame = self.capture(0x200, f"{flag:02x}")
+            batch = await task
+            assert batch.answered and batch.reports == (frame,)
+            assert frame.decoded["access_open"] == bool(flag)
+
     async def test_partial_and_missing_tx_do_not_claim_a_complete_read(self) -> None:
         for terminal in (True, False):
             task = asyncio.create_task(

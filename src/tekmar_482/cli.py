@@ -10,10 +10,18 @@ from collections.abc import Callable, Sequence
 from dataclasses import asdict
 from typing import TYPE_CHECKING, Any, TextIO
 
+from ._native_payloads.line import GROUP_IDS
 from ._native_payloads.scenes import NativeScene, SceneResponse
 from ._native_payloads.writes import NativeField, WritableBlock
 from ._wire import GatewayEndpoint
 from .bridge import BridgeClient
+from .cli_line import (
+    LINE_COMMANDS,
+    add_line_commands,
+    device_group,
+    prepare_broadcast,
+    send_broadcast,
+)
 from .cli_schedule import (
     add_schedule_commands,
     schedule_change,
@@ -33,7 +41,7 @@ from .firmware import install_firmware
 from .gateway import open_gateway
 from .native import NativeAddress, NativeBlockQuery
 from .native_discovery import NativeDevice, discover_native
-from .native_scene import SceneSelection, SceneSendIssue, write_scene_response
+from .native_scene import write_scene_response
 from .native_schedule import read_weekly_schedule
 from .native_sensors import read_thermostat_sensors
 from .native_snapshot import read_native_snapshot
@@ -228,6 +236,11 @@ def build_parser() -> argparse.ArgumentParser:
 
     _add_block_commands(subparsers, dump)
     _add_scene_commands(subparsers)
+    add_line_commands(
+        subparsers,
+        _common_parent(default_timeout=20, require_transport=False),
+        _int_value,
+    )
     add_schedule_commands(
         subparsers,
         _common_parent(default_timeout=20),
@@ -305,6 +318,24 @@ def _add_block_commands(
         parents=[parent],
         help="read the room statistics and sensor inputs of one native thermostat",
     )
+    group = subparsers.add_parser(
+        "set-device-group",
+        parents=[parent],
+        help="read a setpoint controller's assignment before broadcasting to its group",
+    )
+    _add_native_target(group)
+    group.add_argument("state", choices=("on", "off"))
+    group.add_argument(
+        "--expect-group",
+        type=int,
+        choices=GROUP_IDS,
+        help="group that may receive the command",
+    )
+    group.add_argument(
+        "--confirm",
+        action="store_true",
+        help="broadcast; default reads the assignment only",
+    )
     write = subparsers.add_parser(
         "write-block",
         parents=[parent],
@@ -342,26 +373,6 @@ def _add_block_commands(
 def _add_scene_commands(
     subparsers: argparse._SubParsersAction[argparse.ArgumentParser],
 ) -> None:
-    select = subparsers.add_parser(
-        "select-scene",
-        parents=[_common_parent(default_timeout=20, require_transport=False)],
-        help="preview or broadcast a system scene on selected ports",
-    )
-    select.add_argument("scene", type=int, choices=tuple(s.value for s in NativeScene))
-    select.add_argument(
-        "--ports",
-        nargs="+",
-        type=int,
-        choices=TN4_PORTS,
-        required=True,
-    )
-    select.add_argument("--source-subnet", type=_int_value, default=0)
-    select.add_argument("--source-node", type=_int_value, default=0)
-    select.add_argument(
-        "--confirm",
-        action="store_true",
-        help="transmit; default is offline preview",
-    )
     response = subparsers.add_parser(
         "scene-response",
         parents=[_common_parent(default_timeout=20)],
@@ -541,8 +552,15 @@ async def _native(args: argparse.Namespace, stdout: TextIO) -> int:
     def emit(value: object) -> None:
         stdout.write((json.dumps(value) if args.json else str(value)) + "\n")
 
-    if args.command == "select-scene":
-        return await _select_scene(args, emit)
+    if args.command in LINE_COMMANDS:
+        return await _broadcast(args, emit)
+    if (
+        args.command == "set-device-group"
+        and args.confirm
+        and args.expect_group is None
+    ):
+        msg = "a device-based broadcast requires --expect-group and --confirm"
+        raise CliError(msg)
     endpoint = _endpoint(args)
     if args.command in {"install", "update"}:
         changed = await install_firmware(
@@ -570,6 +588,7 @@ async def _native(args: argparse.Namespace, stdout: TextIO) -> int:
             "read-block",
             "read-device",
             "read-sensors",
+            "set-device-group",
             "write-block",
             "scene-response",
             "read-schedule",
@@ -609,24 +628,14 @@ async def _native(args: argparse.Namespace, stdout: TextIO) -> int:
     return 0
 
 
-async def _select_scene(
+async def _broadcast(
     args: argparse.Namespace,
     emit: Callable[[object], None],
 ) -> int:
-    selection = SceneSelection(
-        NativeScene(args.scene),
-        tuple(args.ports),
-        NativeAddress(args.source_subnet, args.source_node),
-    )
+    announcement, description = prepare_broadcast(args)
     if not args.timeout > 0:
-        msg = "scene send timeout must be positive"
+        msg = "broadcast send timeout must be positive"
         raise CliError(msg)
-    description = {
-        "scene": selection.scene.value,
-        "duration_minutes": selection.scene.duration_minutes,
-        "ports": selection.ports,
-        "body": selection.message.to_bytes().hex(),
-    }
     if not args.confirm:
         emit({"preview": description})
         return 0
@@ -635,21 +644,7 @@ async def _select_scene(
             msg = "expected native firmware"
             raise CliError(msg)
         async with bridge.stream(diagnostics=False) as stream:
-            results = await selection.send(stream, timeout=args.timeout)
-            for result in results:
-                link = result.outcome
-                emit(
-                    {
-                        "port": result.port,
-                        "tx_status": link.value
-                        if isinstance(link, SceneSendIssue)
-                        else link.status.name,
-                        "tx_reason": None
-                        if isinstance(link, SceneSendIssue)
-                        else link.reason,
-                    },
-                )
-    return int(not all(result.link_acknowledged for result in results))
+            return await send_broadcast(stream, announcement, args.timeout, emit)
 
 
 def _native_edits(items: Sequence[str]) -> dict[NativeField, int]:
@@ -685,6 +680,8 @@ async def _native_addressed(
         ack_ports=(args.port,) if args.ack else (),
         diagnostics=False,
     ) as stream:
+        if args.command == "set-device-group":
+            return await device_group(stream, args, address, source, emit)
         if args.command == "read-device":
             snapshot = await read_native_snapshot(
                 stream,
