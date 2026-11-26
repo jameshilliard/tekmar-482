@@ -86,7 +86,7 @@ class NativeTests(unittest.TestCase):
             # 5 C = 41 F = 1260 degH; update data has no support mask.
             update = target.update_celsius(5, source=host)
             assert update.to_bytes() == bytes.fromhex(
-                f"6df00006 1223 {block:02x}00 ec04",
+                f"6df00006 1203 {block:02x}00 ec04",
             )
             disabled = SnowmeltSetpoint(2, peer, block, 0)
             assert disabled.celsius is None
@@ -216,9 +216,29 @@ class NativeTests(unittest.TestCase):
         for invalid_node in (0, 32):
             with self.assertRaises(ValueError):
                 NativeAddress(0, invalid_node).request_mask()
+            with self.assertRaises(ValueError):
+                NativeMessage.update_block(
+                    5,
+                    b"",
+                    source=source,
+                    target=NativeAddress(0, invalid_node),
+                )
         for subnet, node in [(-1, 3), (256, 0), (1, 64)]:
             with self.assertRaises(ValueError):
                 NativeAddress(subnet, node)
+
+    def test_block_update_clears_only_the_destination_lock_flag(self) -> None:
+        origin = NativeAddress(9, 37)
+        for node in range(1, 32):
+            for flag in (0, 32):
+                msg = NativeMessage.update_block(
+                    0x72,
+                    b"\0\0",
+                    source=origin,
+                    target=NativeAddress(0x12, node | flag),
+                )
+                assert NativeMessage.from_bytes(msg.to_bytes()).source == origin
+                assert msg.payload == bytes((0x12, node, 0x72, 0, 0, 0))
 
     def test_single_week_edit_and_readback_vector(self) -> None:
         frame = NativeFrame(2, 4, bytes.fromhex("6e7128ca13007f00018f9024ff06"))
@@ -233,7 +253,7 @@ class NativeTests(unittest.TestCase):
         source = NativeAddress(0, 0)
         edit = week.with_time(Day.MONDAY, time(6, 10))
         assert edit.update(source).to_bytes() == bytes.fromhex(
-            "6df0000b1223130025018f9024ff06",
+            "6df0000b1203130025018f9024ff06",
         )
         assert edit.request(source).payload == bytes.fromhex("13001204000000")
         assert edit.with_time(Day.WEDNESDAY, None).days[2] == 144
@@ -254,7 +274,7 @@ class NativeTests(unittest.TestCase):
         src = NativeAddress(0, 0)
         assert week.request(src).payload == bytes.fromhex("3900120400000003000000")
         assert week.with_time(Day.SUNDAY, None).update(src).payload == bytes.fromhex(
-            "12233900ab00010203040590",
+            "12033900ab00010203040590",
         )
         assert frame.decoded["schedule_id"] == 3
         assert frame.decoded["sunday"] == "01:00"

@@ -187,6 +187,11 @@ request caused it. A zero support mask conveys no value. An indexed
 report without a supported selector remains in the capture stream, but
 cannot complete a read for a particular selector.
 
+Keep the full source node from a report for diagnostics. For an addressed
+write, the 483's block writer and the original 482 address the five-bit
+node, not its lock flag. `NativeMessage.update_block()` makes this conversion
+and rejects node zero; it does not change the caller's source address.
+
 The shared decoder covers all 166 addressed block layouts registered in
 the 483 SW 11 reference. For example, on a 402,
 `NativeBlockQuery(peer, 0x44, selector=129)` reads the DHW pump's

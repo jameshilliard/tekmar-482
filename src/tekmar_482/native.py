@@ -52,12 +52,17 @@ class NativeAddress:
         _uint(self.subnet, 8)
         _uint(self.node, 6)
 
-    def request_mask(self) -> int:
-        index = self.node & 31  # The lock flag is not part of a node selector.
+    @property
+    def block_node(self) -> int:
+        """Five-bit destination used by addressed tN4 reads and writes."""
+        index = self.node & 31
         if not index:
-            msg = "node zero cannot be selected by an addressed block request"
+            msg = "node zero cannot be selected for an addressed block"
             raise ValueError(msg)
-        return 1 << (index - 1)
+        return index
+
+    def request_mask(self) -> int:
+        return 1 << (self.block_node - 1)
 
     def tha_address(self, port: int) -> int | None:
         """Return the display address for a device node, not evidence of inventory."""
@@ -205,11 +210,9 @@ class NativeMessage:
         source: NativeAddress,
         target: NativeAddress,
     ) -> Self:
-        payload = bytes([target.subnet, target.node]) + _uint(block_id, 16).to_bytes(
-            2,
-            "little",
-        )
-        return cls(_UPDATE, source, payload + data)
+        destination = bytes((target.subnet, target.block_node))
+        block = _uint(block_id, 16).to_bytes(2, "little")
+        return cls(_UPDATE, source, destination + block + data)
 
     @property
     def decoded(self) -> dict[str, str | int | float]:
