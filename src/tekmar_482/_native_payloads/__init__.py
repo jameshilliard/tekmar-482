@@ -5,6 +5,7 @@ from collections.abc import Callable
 from .layouts import (
     BLOCK_SELECTORS as BLOCK_SELECTORS,
     FIXED_BLOCKS,
+    H_UNAVAILABLE as H_UNAVAILABLE,
     MULTI_WEEK,
     SETPOINT_FIELDS,
     SNOW_SLAB_TARGETS as SNOW_SLAB_TARGETS,
@@ -15,7 +16,6 @@ from .products import identify_product
 
 Fields = dict[str, str | int | float]
 SETBACK = ("wake", "unoccupied_4", "occupied_4", "sleep", "occupied_2", "unoccupied_2", "away", "unknown")
-H_UNAVAILABLE = (0x4000, 0x8000, 0xc000, 0xffff)
 
 
 class ShortPayload(ValueError):
@@ -407,7 +407,10 @@ def block_update(r: Reader) -> Fields:
         for name in words:
             fields.update(temp(name, r.word()))
         return fields | block_metadata(block)
-    sizes = {3: 3, 5: 5, 6: 5, 7: 6, 9: 5, 13: 5, 15: 6, 0x26: 8, 0xa3: 2, 0xa4: 5, 0xa5: 5}
+    # The stock 482's sensor-setup emitter copies five cached bytes but sets
+    # native payload length to eight: four destination/block and four values.
+    sizes = {3: 3, 5: 5, 6: 5, 7: 6, 9: 5, 13: 4 if len(r.remaining) == 4 else 5,
+             15: 6, 0x26: 8, 0xa3: 2, 0xa4: 5, 0xa5: 5}
     size = 7 if block in SINGLE_WEEK else 8 if block in MULTI_WEEK else sizes.get(block)
     if size is not None:
         for index in range(size):

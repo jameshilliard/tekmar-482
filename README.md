@@ -200,6 +200,39 @@ is present before using it: an unsupported byte is not zero hours.
 The firmware's [addressed block catalog](https://github.com/jameshilliard/tekmar-482-firmware/blob/master/docs/tn4-blocks.md)
 lists the plant, thermostat, heat pump, schedule and snowmelt layouts.
 
+For an addressed edit use `write_block()`. It reads the selected peer,
+preserves all sibling bytes and flags, sends at most one update, and
+requests a fresh report. For example, to change only the wake heating
+setpoint on a thermostat:
+
+```python
+from tekmar_482 import NativeField, NativeWriteStatus, WritableBlock, celsius_to_dege
+
+query = NativeBlockQuery(peer, WritableBlock.HEATING_SETPOINTS)
+result = await stream.write_block(
+    port, query, {NativeField.WAKE: celsius_to_dege(20)}, source=source
+)
+if result.status is NativeWriteStatus.DIFFERENT and result.readback is not None:
+    print(result.readback.require_report().decoded)  # Actual device value.
+```
+
+Values are native wire units, not universally degrees or percentages.
+Use `tekmar-482 write-fields` offline to list the known block and field
+names; the catalog is not a device capability advertisement. A missing
+support bit or incomplete positional source prevents a write. An unchanged
+value never sends an update. Only the requested fields are compared on
+readback. A timeout after sending leaves the outcome unknown and does not
+retry. The client serializes edits on the same port, but tN4 does not
+lock out another device or a manual change.
+
+The CLI previews the complete proposed frame by default. Add `--confirm`
+to apply the edit and see the separate link result and device readback:
+
+```bash
+tekmar-482 write-fields 0x05
+tekmar-482 write-block 2 0x12 3 0x05 wake=40 --tcp 192.0.2.10:3001 --json
+```
+
 The CLI uses the same reader. For example, with an **observed** native node
 on a dedicated single-peer line (addresses below are examples):
 

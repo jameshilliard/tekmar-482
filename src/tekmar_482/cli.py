@@ -10,6 +10,7 @@ from collections.abc import Callable, Sequence
 from dataclasses import asdict
 from typing import TYPE_CHECKING, Any, TextIO
 
+from ._native_payloads.writes import NativeField, WritableBlock
 from ._wire import GatewayEndpoint
 from .bridge import BridgeClient
 from .client import Tekmar482Client
@@ -25,6 +26,7 @@ from .gateway import open_gateway
 from .native import NativeAddress, NativeBlockQuery
 from .native_discovery import NativeDevice, discover_native
 from .native_snapshot import read_native_devices
+from .native_write import NativeWriteStatus
 from .raw import CaptureGap, InvalidCapture, PortError, TxStatus
 from .trpc import (
     ResponseMatch,
@@ -48,6 +50,7 @@ if TYPE_CHECKING:
         GatewaySnapshot,
     )
     from .native import NativeFrame
+    from .native_write import NativeWriteResult
     from .raw import BridgeStream, CaptureRecord, NativeBlockBatch
 
 
@@ -204,31 +207,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="wait for a matching response; default is true for Request service",
     )
 
-    block = subparsers.add_parser(
-        "read-block",
-        parents=[_common_parent(default_timeout=20.0)],
-        help="read an addressed native tN4 block from a physical port",
-    )
-    device = subparsers.add_parser(
-        "read-device",
-        parents=[_common_parent(default_timeout=20.0)],
-        help="identify one native device and read its candidate blocks",
-    )
-    for sampler in (device, dump):
-        sampler.add_argument(
-            "--block-attempts",
-            type=int,
-            default=argparse.SUPPRESS,
-            help="maximum attempts for missing native block replies (default 2)",
-        )
-    for reader in (block, device):
-        _add_native_target(reader)
-    block.add_argument("block", type=_int_value, help="numeric native block ID")
-    block.add_argument(
-        "--selector",
-        type=_int_value,
-        help="secondary ID, including zero",
-    )
+    _add_block_commands(subparsers, dump)
     for name in (
         "panel",
         "led-test",
@@ -267,6 +246,66 @@ def build_parser() -> argparse.ArgumentParser:
                 help="already in unsynchronized ROM ISP",
             )
     return parser
+
+
+def _add_block_commands(
+    subparsers: argparse._SubParsersAction[argparse.ArgumentParser],
+    dump: argparse.ArgumentParser,
+) -> None:
+    fields = subparsers.add_parser(
+        "write-fields",
+        help="list known native write layouts offline",
+    )
+    fields.add_argument(
+        "block",
+        nargs="?",
+        type=_int_value,
+        help="numeric native block ID",
+    )
+    fields.add_argument("--json", action="store_true")
+    parent = _common_parent(default_timeout=20.0)
+    block = subparsers.add_parser(
+        "read-block",
+        parents=[parent],
+        help="read one native tN4 block",
+    )
+    device = subparsers.add_parser(
+        "read-device",
+        parents=[parent],
+        help="identify and read one native device",
+    )
+    write = subparsers.add_parser(
+        "write-block",
+        parents=[parent],
+        help="preview or verify an addressed field edit",
+    )
+    for sampler in (device, dump):
+        sampler.add_argument(
+            "--block-attempts",
+            type=int,
+            default=argparse.SUPPRESS,
+            help="maximum attempts for missing native block replies (default 2)",
+        )
+    for command in (block, device, write):
+        _add_native_target(command)
+    for command in (block, write):
+        command.add_argument("block", type=_int_value, help="numeric native block ID")
+        command.add_argument(
+            "--selector",
+            type=_int_value,
+            help="secondary ID, including zero",
+        )
+    write.add_argument(
+        "fields",
+        metavar="FIELD=RAW",
+        nargs="+",
+        help="unsigned wire values; use write-fields to list names",
+    )
+    write.add_argument(
+        "--confirm",
+        action="store_true",
+        help="send once and verify by reading back; default is preview",
+    )
 
 
 def _add_native_target(parser: argparse.ArgumentParser) -> None:
@@ -347,6 +386,27 @@ async def run(
     stdout: TextIO = sys.stdout,
 ) -> int:
     """Run an already-parsed command."""
+    if args.command == "write-fields":
+        if args.vendor:
+            msg = "this operation is not available with --vendor"
+            raise CliError(msg)
+        blocks = WritableBlock if args.block is None else (WritableBlock(args.block),)
+        for block in blocks:
+            names = tuple(field.label for field in block.fields)
+            if args.json:
+                stdout.write(
+                    json.dumps(
+                        {
+                            "block": block.value,
+                            "name": block.name.lower(),
+                            "fields": names,
+                        },
+                    )
+                    + "\n",
+                )
+            else:
+                stdout.write(f"{block:#04x} {block.name.lower()}: {', '.join(names)}\n")
+        return 0
     if not args.vendor:
         return await _native(args, stdout)
     if (
@@ -417,37 +477,8 @@ async def _native(args: argparse.Namespace, stdout: TextIO) -> int:
         elif args.command == "request":
             async with bridge.normal() as client:
                 await _request(client, args, stdout)
-        elif args.command in {"read-block", "read-device"}:
-            address = NativeAddress(args.subnet, args.node)
-            source = NativeAddress(args.source_subnet, args.source_node)
-            async with bridge.stream(
-                ack_ports=(args.port,) if args.ack else (),
-                diagnostics=False,
-            ) as stream:
-                if args.command == "read-device":
-                    await read_native_devices(
-                        stream,
-                        [NativeDevice(args.port, address)],
-                        source=source,
-                        timeout=args.timeout,
-                        attempts=getattr(args, "block_attempts", 2),
-                        on_batch=lambda b: emit(_batch_fields(b)),
-                    )
-                    return 0
-                query = NativeBlockQuery(address, args.block, args.selector)
-                try:
-                    async with asyncio.timeout(args.timeout):
-                        report = await stream.read_block(
-                            args.port,
-                            query,
-                            source=source,
-                        )
-                except TimeoutError as err:
-                    msg = (
-                        f"no matching block {args.block:#x} report before the deadline"
-                    )
-                    raise CliError(msg) from err
-            emit(_frame_fields(report))
+        elif args.command in {"read-block", "read-device", "write-block"}:
+            return await _native_addressed(bridge, args, emit)
         elif args.command == "send":
             async with bridge.stream(diagnostics=False) as stream:
                 try:
@@ -471,6 +502,87 @@ async def _native(args: argparse.Namespace, stdout: TextIO) -> int:
         else:
             await _native_capture(bridge, args, emit)
     return 0
+
+
+def _native_edits(items: Sequence[str]) -> dict[NativeField, int]:
+    edits: dict[NativeField, int] = {}
+    for item in items:
+        key, sep, value = item.partition("=")
+        if not sep or key.upper() not in NativeField.__members__:
+            msg = f"expected a known native FIELD=RAW, got {item!r}"
+            raise CliError(msg)
+        field = NativeField[key.upper()]
+        if field in edits:
+            msg = f"duplicate native field: {key}"
+            raise CliError(msg)
+        edits[field] = _int_value(value)
+    return edits
+
+
+async def _native_addressed(
+    bridge: BridgeClient,
+    args: argparse.Namespace,
+    emit: Callable[[object], None],
+) -> int:
+    address = NativeAddress(args.subnet, args.node)
+    source = NativeAddress(args.source_subnet, args.source_node)
+    async with bridge.stream(
+        ack_ports=(args.port,) if args.ack else (),
+        diagnostics=False,
+    ) as stream:
+        if args.command == "read-device":
+            await read_native_devices(
+                stream,
+                [NativeDevice(args.port, address)],
+                source=source,
+                timeout=args.timeout,
+                attempts=getattr(args, "block_attempts", 2),
+                on_batch=lambda b: emit(_batch_fields(b)),
+            )
+            return 0
+        query = NativeBlockQuery(address, args.block, args.selector)
+        if args.command == "write-block":
+            result = await stream.write_block(
+                args.port,
+                query,
+                _native_edits(args.fields),
+                source=source,
+                timeout=args.timeout,
+                preview=not args.confirm,
+            )
+            emit(_write_fields(result))
+            return (
+                0
+                if result.status
+                in {
+                    NativeWriteStatus.UNCHANGED,
+                    NativeWriteStatus.PREVIEW,
+                    NativeWriteStatus.CONFIRMED,
+                }
+                else 1
+            )
+        try:
+            async with asyncio.timeout(args.timeout):
+                report = await stream.read_block(args.port, query, source=source)
+        except TimeoutError as err:
+            msg = f"no matching block {args.block:#x} report before the deadline"
+            raise CliError(msg) from err
+        emit(_frame_fields(report))
+        return 0
+
+
+def _write_fields(result: NativeWriteResult) -> dict[str, object]:
+    tx = result.tx_result
+    return {
+        "status": result.status.value,
+        "before": _frame_fields(result.before),
+        "proposed": result.proposed.to_bytes().hex(),
+        "tx_status": tx.status.name if tx else None,
+        "tx_reason": tx.reason if tx else None,
+        "readback": _batch_fields(result.readback)["block_read"]
+        if result.readback
+        else None,
+    }
 
 
 async def _native_capture(

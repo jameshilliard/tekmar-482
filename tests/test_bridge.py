@@ -6,6 +6,7 @@ import json
 import struct
 import unittest
 from contextlib import asynccontextmanager
+from functools import partial
 from io import StringIO
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -350,6 +351,84 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
             assert result["body"] == report.hex()
             assert result["fields"]["sensor_id"] == 5
             assert result["fields"]["slab_high_raw"] == 0x1234
+
+    async def test_cli_write_previews_by_default_and_returns_actual_readback(
+        self,
+    ) -> None:
+        request = bytes.fromhex("6d70000b 050012 04000000 00000000")
+        update = bytes.fromhex("6df00009 1203 0500 112233442f")
+        before = bytes.fromhex("6e7128c8 05001f 1122334455")
+        clamped = bytes.fromhex("6e7128c8 05001f 112233442e")
+        ack = serialize(Packet(1, bytes.fromhex("020100")))
+
+        def capture(body: bytes) -> bytes:
+            return serialize(Packet(1, bytes.fromhex("000107000000") + body))
+
+        async def exchange(
+            reader: asyncio.StreamReader,
+            writer: asyncio.StreamWriter,
+            *,
+            confirm: bool,
+        ) -> None:
+            if (first := await reader.readexactly(1)) == b"?":
+                assert await reader.readexactly(5) == b"\r\nJ\r\n"
+                assert not await reader.read()
+                return
+            caps = management(1, 1)
+            assert first + await reader.readexactly(len(caps) - 1) == caps
+            writer.write(management(1, 4, bytes([1, 0, 5, 3])))
+            steps = [
+                (management(2, 0, b"\x01"), management(2, 3, b"\x01")),
+                (management(9, 0, b"\0"), management(9, 3, b"\0")),
+                (serialize(Packet(1, b"\x01\x01" + request)), ack + capture(before)),
+            ]
+            if confirm:
+                steps.extend(
+                    (
+                        (serialize(Packet(1, b"\x01\x01" + update)), ack),
+                        (
+                            serialize(Packet(1, b"\x01\x01" + request)),
+                            capture(clamped) + ack,
+                        ),
+                    ),
+                )
+            steps.append((management(2, 0, b"\0"), management(2, 3, b"\0")))
+            for outgoing, incoming in steps:
+                assert await reader.readexactly(len(outgoing)) == outgoing
+                writer.write(incoming)
+
+        for confirm in (False, True):
+            async with (
+                listen(partial(exchange, confirm=confirm)) as endpoint,
+                asyncio.timeout(3),
+            ):
+                stdout = StringIO()
+                args = build_parser().parse_args(
+                    [
+                        "write-block",
+                        "1",
+                        "0x12",
+                        "3",
+                        "0x05",
+                        "away=47",
+                        "--tcp",
+                        f"{endpoint.address}:{endpoint.port}",
+                        "--json",
+                        *(["--confirm"] if confirm else []),
+                    ],
+                )
+                assert await run(args, stdout=stdout) == int(confirm)
+                result = json.loads(stdout.getvalue())
+                assert result["proposed"] == update.hex()
+                assert result["before"]["body"] == before.hex()
+                if confirm:
+                    assert (
+                        result["status"] == "different" and result["tx_status"] == "ACK"
+                    )
+                    assert result["readback"]["reports"][0]["body"] == clamped.hex()
+                else:
+                    assert result["status"] == "preview"
+                    assert result["tx_status"] is None and result["readback"] is None
 
     async def test_cli_discovery_probes_quiet_subnet_and_preserves_ack_mask(
         self,

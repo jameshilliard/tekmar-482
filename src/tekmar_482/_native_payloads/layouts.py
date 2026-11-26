@@ -4,6 +4,7 @@ from enum import IntEnum
 
 SETPOINT_FIELDS = ("wake", "unoccupied", "occupied", "sleep", "away")
 MULTI_WEEK = range(0x38, 0x3c)
+H_UNAVAILABLE = (0x4000, 0x8000, 0xc000, 0xffff)
 
 
 class SnowmeltBlock(IntEnum):

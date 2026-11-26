@@ -15,9 +15,17 @@ from tekmar_482 import (
     TrpcMethodId,
     TrpcPacket,
     TrpcService,
+    WritableBlock,
     method_from_name,
 )
-from tekmar_482.cli import build_parser, main, parse_fields, parse_host_port, run
+from tekmar_482.cli import (
+    CliError,
+    build_parser,
+    main,
+    parse_fields,
+    parse_host_port,
+    run,
+)
 
 if TYPE_CHECKING:
     from argparse import Namespace
@@ -59,6 +67,20 @@ def client_factory(
 
 
 class CliTest(unittest.IsolatedAsyncioTestCase):
+    async def test_write_fields_catalog_requires_no_gateway(self) -> None:
+        parser = build_parser()
+        stdout = StringIO()
+        assert (
+            await run(parser.parse_args(["write-fields", "--json"]), stdout=stdout) == 0
+        )
+        catalog = [json.loads(line) for line in stdout.getvalue().splitlines()]
+        assert {block["block"] for block in catalog} == set(WritableBlock)
+        stdout = StringIO()
+        await run(parser.parse_args(["write-fields", "0x71"]), stdout=stdout)
+        assert stdout.getvalue() == "0x71 melt_setpoint: slab_target\n"
+        with self.assertRaisesRegex(CliError, "not available with --vendor"):
+            await run(parser.parse_args(["--vendor", "write-fields"]))
+
     def test_parse_host_port(self) -> None:
         assert parse_host_port("127.0.0.1:3001") == ("127.0.0.1", 3001)
         assert parse_host_port("[::1]:3001") == ("::1", 3001)

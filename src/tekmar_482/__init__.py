@@ -2,6 +2,7 @@
 
 from ._native_payloads import SnowmeltBlock
 from ._native_payloads.products import NativeProduct
+from ._native_payloads.writes import NativeField, WritableBlock
 from ._wire import GatewayEndpoint
 from .bridge import BridgeClient, PanelState
 from .client import Tekmar482Client
@@ -100,6 +101,7 @@ from .native_discovery import (
     discover_native,
 )
 from .native_snapshot import read_native_devices
+from .native_write import NativeWriteResult, NativeWriteStatus
 from .packet import (
     TYPE_DISPLAY,
     TYPE_GENERAL,
@@ -274,6 +276,7 @@ __all__ = [
     "NativeBlockQuery",
     "NativeDevice",
     "NativeDiscovery",
+    "NativeField",
     "NativeFrame",
     "NativeIdentity",
     "NativeInventory",
@@ -282,6 +285,8 @@ __all__ = [
     "NativeProduct",
     "NativeTargets",
     "NativeTransmitError",
+    "NativeWriteResult",
+    "NativeWriteStatus",
     "NullTransport",
     "Packet",
     "PacketTransport",
@@ -336,6 +341,7 @@ __all__ = [
     "UnknownMethodError",
     "UnknownServiceError",
     "WeeklyEvent",
+    "WritableBlock",
     "apply_message",
     "celsius_to_dege",
     "celsius_to_degh",

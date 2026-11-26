@@ -9,15 +9,19 @@ from dataclasses import dataclass, field
 from enum import IntEnum
 from typing import TYPE_CHECKING, Protocol
 
+from ._native_payloads.writes import BlockPatch
 from .constants import TN4_PORTS
 from .exceptions import ConnectionClosedError, ProtocolError, TekmarError
 from .native import NativeFrame, NativeMessage
+from .native_write import write_verified_block
 from .packet import TYPE_TN4
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 
+    from ._native_payloads.writes import NativeField
     from .native import NativeAddress, NativeBlockQuery
+    from .native_write import NativeWriteResult
     from .packet import Packet
 
 _HEADER = 4
@@ -106,6 +110,20 @@ class NativeBlockBatch:
     def missing_nodes(self) -> tuple[int, ...]:
         mask = self.missing_mask
         return tuple(node for node in range(1, 32) if mask & (1 << (node - 1)))
+
+    def require_report(self) -> NativeFrame:
+        """Return the result of a single-node read, or explain why it failed."""
+        if self.query.target.request_mask().bit_count() != 1:
+            msg = "expected a single-node block request"
+            raise ValueError(msg)
+        if self.tx_result is not None and not self.tx_result.may_have_reached_peer:
+            raise NativeTransmitError(self.tx_result)
+        if self.tx_result is None or not self.reports:
+            msg = (
+                "no transmit completion or matching native block report before deadline"
+            )
+            raise TimeoutError(msg)
+        return self.reports[0]
 
 
 @dataclass(slots=True)
@@ -232,6 +250,16 @@ class BridgeStream(Protocol):
         source: NativeAddress,
         timeout: float = 20,
     ) -> NativeBlockBatch: ...
+    async def write_block(
+        self,
+        port: int,
+        query: NativeBlockQuery,
+        changes: Mapping[NativeField, int],
+        *,
+        source: NativeAddress,
+        timeout: float = 20,
+        preview: bool = False,
+    ) -> NativeWriteResult: ...
     async def read(self) -> CaptureRecord: ...
 
 
@@ -246,6 +274,7 @@ class RawDispatcher:
         self.diagnostics: dict[int, PortDiagnostic] = {}
         self._pending: dict[int, asyncio.Future[TxResult]] = {}
         self._blocks: dict[int, _BlockWaiter] = {}
+        self._edits = {port: asyncio.Lock() for port in TN4_PORTS}
         self._records: deque[_Record] = deque(maxlen=backlog)
         self._lost = 0
         self._ready = asyncio.Event()
@@ -261,6 +290,15 @@ class RawDispatcher:
 
     async def send(self, port: int, body: bytes | NativeMessage) -> TxResult:
         """Send once and await this port's link result; cancellation cannot undo TX."""
+        self._check_no_edit(port)
+        return await self._send(port, body)
+
+    def _check_no_edit(self, port: int) -> None:
+        if port in self._edits and self._edits[port].locked():
+            msg = f"block write in progress on port {port}"
+            raise ProtocolError(msg)
+
+    async def _send(self, port: int, body: bytes | NativeMessage) -> TxResult:
         self._check_active()
         if isinstance(body, NativeMessage):
             body = body.to_bytes()
@@ -297,10 +335,9 @@ class RawDispatcher:
         if query.target.request_mask().bit_count() != 1:
             msg = "use read_block_group for multiple nodes"
             raise ValueError(msg)
+        self._check_no_edit(port)
         batch = await self._collect_blocks(port, query, source, None)
-        if batch.tx_result is not None and not batch.tx_result.may_have_reached_peer:
-            raise NativeTransmitError(batch.tx_result)
-        return batch.reports[0]
+        return batch.require_report()
 
     async def read_block_group(
         self,
@@ -314,7 +351,47 @@ class RawDispatcher:
         if not timeout > 0:
             msg = "block response timeout must be positive"
             raise ValueError(msg)
+        self._check_no_edit(port)
         return await self._collect_blocks(port, query, source, timeout)
+
+    async def write_block(
+        self,
+        port: int,
+        query: NativeBlockQuery,
+        changes: Mapping[NativeField, int],
+        *,
+        source: NativeAddress,
+        timeout: float = 20,
+        preview: bool = False,
+    ) -> NativeWriteResult:
+        """Read, optionally update once, then verify. The timeout is per exchange."""
+        if port not in TN4_PORTS or query.target.request_mask().bit_count() != 1:
+            msg = "expected a single destination on a physical port"
+            raise ValueError(msg)
+        if not timeout > 0:
+            msg = "block write timeout must be positive"
+            raise ValueError(msg)
+        patch = BlockPatch.from_fields(query.block_id, changes)
+
+        async def read() -> NativeBlockBatch:
+            return await self._collect_blocks(port, query, source, timeout)
+
+        async def send(message: NativeMessage) -> TxResult:
+            return await self._send(port, message)
+
+        async with self._edits[port]:
+            self._check_active()
+            if port in self._pending or port in self._blocks:
+                msg = f"native operation already in progress on port {port}"
+                raise ProtocolError(msg)
+            return await write_verified_block(
+                patch,
+                source=source,
+                read=read,
+                send=send,
+                timeout=timeout,
+                preview=preview,
+            )
 
     async def _collect_blocks(
         self,
@@ -333,7 +410,7 @@ class RawDispatcher:
         deadline = asyncio.timeout(timeout)
         try:
             async with deadline:
-                result = await self.send(port, query.request(source))
+                result = await self._send(port, query.request(source))
                 if result.may_have_reached_peer:
                     await waiter.done
         except TimeoutError:
