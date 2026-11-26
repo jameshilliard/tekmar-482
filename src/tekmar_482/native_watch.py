@@ -98,6 +98,7 @@ class _Watch:
         self.current: dict[NativePath, NativeClimate] = {}
         self.latest: dict[tuple[NativePath, int], NativeBlockBatch] = {}
         self.statuses: dict[tuple[NativePath, SnowRead], NativeStatusBatch] = {}
+        self.reading_status: set[NativePath] = set()
         self.snow = SnowWatch(self.state, self._queue) if include_snow else None
         self.on_native = on_native
         self.count = 0
@@ -210,11 +211,12 @@ class _Watch:
             and isinstance(record, NativeFrame)
             and record.port in self.queues
         ):
+            sender = NativePath.from_frame(record)
             self.snow.observe(
                 record,
                 self.latest,
-                attempted=(NativePath.from_frame(record), SnowRead.MISSING)
-                in self.statuses,
+                attempted=sender not in self.reading_status
+                and (sender, SnowRead.MISSING) in self.statuses,
             )
 
     def _retry_on_air(self, frame: NativeFrame) -> None:
@@ -245,14 +247,18 @@ class _Watch:
                 if self.snow is None or (query := self.snow.query(path, block)) is None:
                     continue
                 route = self.snow.routes.get(path)
-                answer = await stream.read_status(
-                    path.port,
-                    query,
-                    source=source,
-                    peer=path.address,
-                    timeout=timeout,
-                    wait_for_edits=True,
-                )
+                self.reading_status.add(path)
+                try:
+                    answer = await stream.read_status(
+                        path.port,
+                        query,
+                        source=source,
+                        peer=path.address,
+                        timeout=timeout,
+                        wait_for_edits=True,
+                    )
+                finally:
+                    self.reading_status.discard(path)
                 if epoch == self.epochs.get(path, 0) and route == self.snow.routes.get(
                     path,
                 ):

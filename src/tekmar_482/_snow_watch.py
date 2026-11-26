@@ -22,6 +22,7 @@ if TYPE_CHECKING:
     from .raw import NativeBlockBatch
 
 _GROUP_WIDTH = 2
+_RETRY_REPORTS = 5  # SW 11 retries incomplete snowmelt data every fifth report.
 
 
 class SnowRead(Enum):
@@ -39,7 +40,7 @@ class SnowWatch:
         self._queue = queue
         self.current: dict[NativePath, NativeSnowmelt] = {}
         self._group_flags: dict[tuple[NativePath, int, int], int] = {}
-        self._retry: dict[NativePath, bytes] = {}
+        self._retry: dict[NativePath, tuple[bytes, int]] = {}
         self._setup_hints: set[tuple[NativePath, int, SnowmeltAddress]] = set()
         self.routes: dict[NativePath, int] = {}
 
@@ -124,15 +125,16 @@ class SnowWatch:
                 or not (missing := current.missing_keys)
             ):
                 return
-            # Only a fresh report from the configured endpoint is a retry hint.
-            # A recurring keep-alive cannot poll indefinitely for an absent key.
-            if (
-                current.primary
-                and current.primary.last_frame is frame
-                and self._retry.get(path) != missing
-            ):
-                self._retry[path] = missing
-                self._queue(path, SnowRead.MISSING)
+            # Either valid role proves the controller is transmitting, but the
+            # request and its missing-key set still belong to the primary role.
+            if not any(channel.last_frame is frame for channel in current.channels):
+                return
+            previous, remaining = self._retry.get(path, (b"", 0))
+            if missing == previous and remaining > 1:
+                self._retry[path] = (missing, remaining - 1)
+                return
+            self._retry[path] = (missing, _RETRY_REPORTS)
+            self._queue(path, SnowRead.MISSING)
             return
         if frame.message_id not in (GROUP_REPORT, GROUP_UPDATE):
             return

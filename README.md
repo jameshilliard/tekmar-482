@@ -465,7 +465,12 @@ commands do not change device settings or enable a snowmelt group.
 identified snowmelt controller and thermostats together. It reads identity
 and configuration on each selected path. For a snowmelt control it then
 requests the missing status keys for that application, while continuing to
-receive other devices' reports. It does not poll on a timer.
+receive other devices' reports. After an incomplete request, a new valid
+report from either role can prompt a retry to the configured primary role.
+With the same keys still missing it waits five more reports, matching the
+483's retry cadence. A complete profile and a silent controller generate
+no retries. There is no timer poll. The final summary shows unanswered
+blocks, link outcomes and which keys the latest status requests received.
 
 ```bash
 tekmar-482 watch-native --device 0 0x14 6 --device 2 0x12 3 --duration 60 --tcp 192.0.2.10:3001 --json

@@ -151,6 +151,33 @@ async def watch_all_from_args(
             "missing_identities": unidentified,
             "missing_mode_reports": no_mode,
             "incomplete_snowmelt": no_snow,
+            "status_reads": [
+                {
+                    "port": s.port,
+                    "peer": asdict(s.peer) if s.peer else None,
+                    "service": s.query.kind.name.lower(),
+                    "payload": s.query.payload.hex(),
+                    "requested_keys": list(s.query.keys),
+                    "covered": sorted(s.covered),
+                    "missing_keys": list(s.missing_keys),
+                    "complete": s.complete,
+                    "tx_status": s.tx_result.status.name if s.tx_result else None,
+                    "tx_reason": s.tx_result.reason if s.tx_result else None,
+                }
+                for s in result.latest_statuses
+            ],
+            "unanswered_blocks": [
+                {
+                    "port": b.port,
+                    "subnet": b.query.target.subnet,
+                    "block": b.query.block_id,
+                    "missing_nodes": b.missing_nodes,
+                    "tx_status": b.tx_result.status.name if b.tx_result else None,
+                    "tx_reason": b.tx_result.reason if b.tx_result else None,
+                }
+                for b in result.latest_blocks
+                if b.missing_nodes or b.tx_result is None
+            ],
         },
     )
     return int(

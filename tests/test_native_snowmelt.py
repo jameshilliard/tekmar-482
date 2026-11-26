@@ -409,6 +409,45 @@ class SnowmeltWatchTests(unittest.IsolatedAsyncioTestCase):
         )
         assert result.state.snowmelt_channels(SITE)[0].raw(0x2F) == 1
 
+    async def test_secondary_role_can_prompt_but_not_supply_missing_keys(self) -> None:
+        self.seed()
+        task = asyncio.create_task(
+            watch_native(self.stream, [SITE], duration=0.25, timeout=0.025),
+        )
+        await self.boot()
+        _, initial = await self.next_send()
+        assert (
+            initial.payload
+            == bytes([ZONE.request_byte, 5]) + SnowmeltApplication.ELECTRIC.status_keys
+        )
+        self.ack()
+        await asyncio.sleep(0.04)
+        sensor = snow(
+            SENSOR,
+            [(k, 3) for k in SnowmeltApplication.ELECTRIC.status_keys],
+        )
+        self.rx(sensor)
+        assert (await self.next_send())[1] == initial
+        self.ack()
+        for _ in range(7):
+            self.rx(sensor)  # A request already owns the slot.
+        await asyncio.sleep(0.04)
+        for _ in range(4):
+            self.rx(sensor)
+        self.rx(frame(0x17E, bytes.fromhex("1a02190300")))
+        self.rx(snow(SENSOR, [(0x2F, 1)], NativePath(SITE.port, SITE.subnet, 3)))
+        await asyncio.sleep(0.01)
+        assert self.tx.empty()
+        self.rx(sensor)
+        assert (await self.next_send())[1] == initial
+        self.ack()
+        self.rx(snow(ZONE, [(k, 0) for k in SnowmeltApplication.ELECTRIC.status_keys]))
+        for _ in range(9):
+            self.rx(sensor)
+        result = await task
+        (device,) = result.state.snowmelt_devices
+        assert result.reads == 4 and device.missing_keys == b"" and self.tx.empty()
+
     async def test_active_watch_reads_configuration_and_requests_only_missing_keys(
         self,
     ) -> None:
