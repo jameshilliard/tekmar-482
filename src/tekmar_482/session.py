@@ -28,6 +28,7 @@ if TYPE_CHECKING:
     from collections.abc import Callable, Hashable, Iterator
     from types import TracebackType
 
+    from .normal_trace import NormalTrace
     from .packet import Packet
     from .transport import PacketTransport
 
@@ -187,6 +188,7 @@ class Tekmar482Session:
             frozenset[TrpcMethod],
         ] = {}
         self._observers: set[Callable[[TrpcPacket, TrpcCommand | None], None]] = set()
+        self._trace: NormalTrace | None = None
         self._coalesced_updates: OrderedDict[Hashable, _QueuedUpdate] = OrderedDict()
         self._writer_wake = asyncio.Event()
         self._coalesced_task: asyncio.Task[None] | None = None
@@ -295,6 +297,8 @@ class Tekmar482Session:
 
     async def _close(self) -> None:
         self._closed = True
+        if self._trace is not None:
+            self._trace.finish()
         task = self._reader_task
         self._reader_task = None
         if task is not None:
@@ -354,6 +358,11 @@ class Tekmar482Session:
             else:
                 await self._write_unconfirmed(message, packet)
                 return
+        await self._write_transport(packet)
+
+    async def _write_transport(self, packet: Packet) -> None:
+        if self._trace is not None:
+            self._trace.record(packet, outbound=True)
         await self.transport.write_packet(packet)
 
     async def read_message(self, timeout: float | None = None) -> TrpcPacket | None:
@@ -451,7 +460,7 @@ class Tekmar482Session:
             # Register before transport I/O: the reply can arrive during drain.
             self._track_unconfirmed(unconfirmed, message)
         LOGGER.debug("Sending tekmar 482 tRPC %s", message)
-        await self.transport.write_packet(packet)
+        await self._write_transport(packet)
 
     async def wait_for_inventory_drain(self, *, timeout: float | None) -> None:
         """Wait for an earlier walk, distinguishing a lost terminator from busy I/O."""
@@ -724,6 +733,20 @@ class Tekmar482Session:
         finally:
             self._observers.discard(callback)
 
+    @contextmanager
+    def trace_packets(self, trace: NormalTrace) -> Iterator[None]:
+        """Attach one diagnostic observer without consuming application replies."""
+        self._raise_if_unavailable()
+        if self._trace is not None:
+            msg = "a Normal trace already owns this session"
+            raise ProtocolError(msg)
+        self._trace = trace
+        try:
+            yield
+        finally:
+            self._trace = None
+            trace.finish()
+
     async def _read_loop(self) -> None:
         while not self._closed:
             try:
@@ -814,6 +837,8 @@ class Tekmar482Session:
                 update.future.set_result(result)
 
     async def _dispatch_packet(self, packet: Packet) -> None:
+        if self._trace is not None:
+            self._trace.record(packet, outbound=False)
         async with self._condition:
             self._packet_backlog.append(packet)
             self._trim_packet_backlog()
@@ -1113,6 +1138,8 @@ class Tekmar482Session:
 
     async def _set_reader_error(self, err: BaseException) -> None:
         self._closed = True
+        if self._trace is not None:
+            self._trace.finish(err)
         self._reader_error = err
         await self._fail_pending(err)
         self._fail_coalesced_updates(err)

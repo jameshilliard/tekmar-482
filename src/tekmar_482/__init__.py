@@ -259,6 +259,15 @@ from .native_watch import (
 )
 from .native_water import WaterMonitor, WaterRead, WaterSource, read_water
 from .native_write import NativeWriteResult, NativeWriteStatus
+from .normal_trace import (
+    NormalTrace,
+    NormalTraceState,
+    RxFlag,
+    TraceOrigin,
+    TracePacket,
+    TraceRx,
+    TraceTx,
+)
 from .packet import (
     TYPE_DISPLAY,
     TYPE_GENERAL,
@@ -500,6 +509,8 @@ __all__ = [
     "NativeWriteResult",
     "NativeWriteStatus",
     "NetworkFault",
+    "NormalTrace",
+    "NormalTraceState",
     "NullTransport",
     "OutputSample",
     "Packet",
@@ -526,6 +537,7 @@ __all__ = [
     "RoomLimitTable",
     "RoomTemperatures",
     "RuntimeRegister",
+    "RxFlag",
     "ScenePortResult",
     "SceneReport",
     "SceneResponse",
@@ -606,8 +618,12 @@ __all__ = [
     "ThermostatSensors",
     "ThermostatTarget",
     "ThermostatTargetChange",
+    "TraceOrigin",
+    "TracePacket",
     "TraceReplayTransport",
+    "TraceRx",
     "TraceStep",
+    "TraceTx",
     "TransportError",
     "TrpcCommand",
     "TrpcFieldMap",

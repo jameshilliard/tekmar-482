@@ -50,6 +50,7 @@ from .cli_status import (
     watch_from_args,
     water_fields,
 )
+from .cli_trace import add_trace_command, trace_record
 from .client import Tekmar482Client
 from .constants import DEFAULT_BAUDRATE, TN4_PORTS
 from .decoding import (
@@ -60,6 +61,7 @@ from .decoding import (
 from .exceptions import TekmarError
 from .firmware import install_firmware
 from .gateway import open_gateway
+from .management import BridgeManagement
 from .native import NativeAddress, NativeBlockQuery
 from .native_discovery import NativeDevice, discover_native
 from .native_io import IoDirectory
@@ -234,6 +236,13 @@ def build_parser() -> argparse.ArgumentParser:
     )
     request.add_argument("method", help="tRPC method name or numeric method ID")
     request.add_argument(
+        "--trace-port",
+        type=int,
+        choices=TN4_PORTS,
+        action="append",
+        help="trace Normal-mode bus activity for this request (repeat per port)",
+    )
+    request.add_argument(
         "fields",
         nargs="*",
         metavar="FIELD=VALUE",
@@ -260,6 +269,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="wait for a matching response; default is true for Request service",
     )
 
+    add_trace_command(subparsers, common)
     _add_block_commands(subparsers, dump)
     _add_scene_commands(subparsers)
     add_line_commands(
@@ -591,13 +601,18 @@ async def run(
     ):
         msg = "native discovery options are unavailable with --vendor"
         raise CliError(msg)
-    if args.auto_update or args.command not in {
-        "gateway-info",
-        "discover",
-        "dump",
-        "monitor",
-        "request",
-    }:
+    if (
+        args.auto_update
+        or getattr(args, "trace_port", None)
+        or args.command
+        not in {
+            "gateway-info",
+            "discover",
+            "dump",
+            "monitor",
+            "request",
+        }
+    ):
         msg = "this operation is not available with --vendor"
         raise CliError(msg)
     factory = client_factory or client_from_args
@@ -632,7 +647,7 @@ def _endpoint(args: argparse.Namespace) -> GatewayEndpoint:
 async def _native(args: argparse.Namespace, stdout: TextIO) -> int:
     def emit(value: object) -> None:
         stdout.write((json.dumps(value) if args.json else str(value)) + "\n")
-        if args.command in {"watch-climate", "watch-native"}:
+        if args.command in {"watch-climate", "watch-native", "trace-normal"}:
             stdout.flush()
 
     if args.command in LINE_COMMANDS:
@@ -671,6 +686,10 @@ async def _native(args: argparse.Namespace, stdout: TextIO) -> int:
             await bridge.test_leds()
         elif args.command == "probe":
             emit({"timers_mask_timestamps": await bridge.probe(duration=args.duration)})
+        elif args.command == "trace-normal" or (
+            args.command == "request" and args.trace_port
+        ):
+            await _normal_trace(bridge, args, emit)
         elif args.command == "request":
             async with bridge.normal() as client:
                 await _request(client, args, stdout)
@@ -1425,6 +1444,54 @@ async def _dump(
                     stdout.write(f"      {key}: {value}\n")
 
 
+async def _normal_trace(
+    bridge: BridgeClient,
+    args: argparse.Namespace,
+    emit: Callable[[object], None],
+) -> None:
+    requesting = args.command == "request"
+    ports = args.trace_port if requesting else args.port or TN4_PORTS
+    result = None
+    async with bridge.normal(select_mode=False) as client:
+        management = BridgeManagement(client)
+        if not requesting and (args.status or args.stop):
+            state = (
+                await management.stop_trace()
+                if args.stop
+                else await management.trace_state()
+            )
+            emit({"trace_state": asdict(state)})
+            return
+        trace = None
+        try:
+            async with management.trace(ports) as trace:
+                if requesting:
+                    result = await _request_payload(client, args)
+                else:
+                    window = asyncio.timeout(args.duration)
+                    try:
+                        async with window:
+                            async for event in trace:
+                                emit(trace_record(event))
+                    except TimeoutError:
+                        if not window.expired():
+                            raise
+        finally:
+            if trace is not None:
+                for event in trace.drain():
+                    emit(trace_record(event))
+                if result is not None:
+                    emit({"request_result": result})
+                emit(
+                    {
+                        "trace_drops": {
+                            "gateway_by_port": trace.gateway_drops,
+                            "host": trace.host_drops,
+                        },
+                    },
+                )
+
+
 async def _monitor(
     client: Tekmar482Client,
     args: argparse.Namespace,
@@ -1458,11 +1525,10 @@ async def _monitor(
             stdout.write(f"{message}\n")
 
 
-async def _request(
+async def _request_payload(
     client: Tekmar482Client,
     args: argparse.Namespace,
-    stdout: TextIO,
-) -> None:
+) -> dict[str, Any]:
     fields = parse_fields(args.fields)
     service = parse_service(args.service)
     method = parse_method(args.method)
@@ -1500,6 +1566,15 @@ async def _request(
     else:
         sent = await client.send(command)
         payload = {"sent": message_to_dict(sent)}
+    return payload
+
+
+async def _request(
+    client: Tekmar482Client,
+    args: argparse.Namespace,
+    stdout: TextIO,
+) -> None:
+    payload = await _request_payload(client, args)
 
     if args.json:
         _write_json(payload, stdout)
@@ -1515,7 +1590,7 @@ async def _request(
             body = response_obj.get("body")
             if isinstance(body, dict) and body:
                 stdout.write(f"body: {body}\n")
-        elif wait:
+        elif "response" in payload:
             stdout.write("response: timeout\n")
 
 

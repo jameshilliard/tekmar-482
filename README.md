@@ -146,6 +146,38 @@ tekmar-482 request CurrentTemperature address=1001 --tcp 192.0.2.10:3001 --json
 Use `client.reports()` inside `bridge.normal()` for unsolicited temperature
 and demand updates; enable them with `await client.set_reporting_state(enabled=True)`.
 
+**Debug a physical thermostat change.** On custom firmware, trace both
+directions of one tN4 port while the ordinary gateway keeps running:
+
+```bash
+tekmar-482 trace-normal --port 1 --duration 60 --tcp 192.0.2.10:3001 --json
+tekmar-482 request HeatSetpoint address=1001 setback=7 --trace-port 1 --tcp 192.0.2.10:3001 --json
+```
+
+Check the air-group status (`0x36F` member or `0x377` master) for the new
+**active target**, then look for a tRPC HeatSetpoint or CoolSetpoint report.
+This distinguishes a change not yet seen on the bus from one already received
+by the gateway. A different schedule period's stored setting need not appear
+in the live target. Check the final drop counts before interpreting silence.
+Repeat `--port` to select several lines; omitting it traces all five. Native
+records carry gateway uptime; every packet row has a host monotonic observation
+time. Normal replies can overtake buffered diagnostics on a busy UART.
+
+For an existing Normal client, subscribe alongside requests and reports:
+
+```python
+async with BridgeManagement(client).trace([1]) as trace:
+    async for event in trace:
+        print(event)
+```
+
+The bounded observer doesn't steal responses. It exposes
+native RX, the origin and outcome of gateway TX attempts, invalid captures
+and both directions of tRPC. Exiting restores the previous trace mask.
+Tracing never enables reporting, changes mode, or grants raw transmit access.
+Use `trace-normal --status` to inspect the gateway's mask and lifetime
+drop counts, or `trace-normal --stop` to clear a trace after a disconnect.
+
 Custom Normal mode obtains missing fields from the device on its own port.
 A changed demand, setback or active room target can trigger a targeted
 ModeSetting read; demand is not interpreted as configured mode. The gateway

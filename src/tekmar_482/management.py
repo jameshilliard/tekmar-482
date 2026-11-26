@@ -3,18 +3,25 @@
 from __future__ import annotations
 
 import re
+import struct
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from enum import IntEnum, IntFlag
 from typing import TYPE_CHECKING
 
-from .exceptions import ProtocolError
-from .trpc import ResponseMatch, TrpcCommand, TrpcMethod, TrpcService
+from .constants import TN4_PORTS
+from .exceptions import ProtocolError, TekmarError
+from .normal_trace import NormalTrace, NormalTraceState
+from .trpc import ResponseMatch, TrpcCommand, TrpcMethod, TrpcPacket, TrpcService
 
 if TYPE_CHECKING:
+    from collections.abc import AsyncIterator, Iterable
+
     from .client import Tekmar482Client
-    from .trpc import TrpcPacket
 
 _CAPABILITY_BYTES = 4
+_TRACE_STATE = struct.Struct("<B5I")
+_COUNTER_MASK = 0xFFFFFFFF
 
 
 class BridgeMode(IntEnum):
@@ -25,6 +32,7 @@ class BridgeMode(IntEnum):
 class BridgeFeature(IntFlag):
     RAW = 1
     ROM_UPDATE = 2
+    NORMAL_TRACE = 4
 
 
 class BridgeMethod(IntEnum):
@@ -38,6 +46,7 @@ class BridgeMethod(IntEnum):
     LED_TEST = 0x544BF008
     ACK_MASK = 0x544BF009
     COUNTERS = 0x544BF00A
+    NORMAL_TRACE = 0x544BF00B
 
 
 @dataclass(frozen=True, slots=True)
@@ -46,6 +55,16 @@ class BridgeCapabilities:
     mode: BridgeMode
     ports: int
     features: BridgeFeature
+
+
+@dataclass(frozen=True, slots=True)
+class _ExtensionUpdate(TrpcCommand):
+    """Opaque custom method body; vendor field shapes are unaffected."""
+
+    payload: bytes = b""
+
+    def to_message(self) -> TrpcPacket:
+        return TrpcPacket(self.service_id, self.method_id, extra=self.payload)
 
 
 class _ManagementMatch(ResponseMatch):
@@ -81,9 +100,11 @@ class BridgeManagement:
         if packet.method_id == BridgeMethod.ERROR:
             reason = packet.extra[4:]
             if reason == b"\x01":
-                msg = "gateway is busy; firmware update was not accepted"
+                msg = "gateway is busy; management operation was not accepted"
             elif reason == b"\x02":
                 msg = "gateway rejected the management service or payload"
+            elif reason == b"\x03":
+                msg = "management operation is unavailable in the current gateway mode"
             else:
                 msg = f"unexpected management error: {reason.hex()}"
             raise ProtocolError(msg)
@@ -112,6 +133,98 @@ class BridgeManagement:
             msg = "missing or invalid custom firmware revision"
             raise ProtocolError(msg)
         return reply.extra.decode("ascii")
+
+    async def trace_state(self) -> NormalTraceState:
+        """Read the active port mask and lifetime drop counts without enabling trace."""
+        reply = await self._exchange(TrpcCommand.request(BridgeMethod.NORMAL_TRACE))
+        if (
+            reply.method_id != BridgeMethod.NORMAL_TRACE
+            or len(reply.extra) != _TRACE_STATE.size
+        ):
+            msg = "invalid Normal trace state"
+            raise ProtocolError(msg)
+        mask, *counts = _TRACE_STATE.unpack(reply.extra)
+        if mask >= 1 << len(TN4_PORTS):
+            msg = "invalid Normal trace port mask"
+            raise ProtocolError(msg)
+        return NormalTraceState(mask, tuple(counts))
+
+    async def _require_trace(self) -> None:
+        caps = await self.capabilities()
+        if (
+            caps is None
+            or caps.mode != BridgeMode.NORMAL
+            or not caps.features & BridgeFeature.NORMAL_TRACE
+        ):
+            msg = "Normal trace requires capable custom firmware in Normal mode"
+            raise ProtocolError(msg)
+
+    async def stop_trace(self) -> NormalTraceState:
+        """Disable an orphaned trace after a debugger disconnected."""
+        with self._session.connection_scope():
+            await self._require_trace()
+            await self._set_trace_mask(0)
+            return await self.trace_state()
+
+    async def _set_trace_mask(self, mask: int) -> None:
+        data = bytes([mask])
+        reply = await self._exchange(
+            _ExtensionUpdate(
+                TrpcService.UPDATE,
+                BridgeMethod.NORMAL_TRACE,
+                payload=data,
+            ),
+        )
+        if reply.method_id != BridgeMethod.NORMAL_TRACE or reply.extra != data:
+            msg = "Normal trace mask was not acknowledged"
+            raise ProtocolError(msg)
+
+    @asynccontextmanager
+    async def trace(
+        self,
+        ports: Iterable[int] = TN4_PORTS,
+        *,
+        backlog: int = 512,
+    ) -> AsyncIterator[NormalTrace]:
+        """Trace an open Normal session without changing its operating mode."""
+        mask = 0
+        for port in ports:
+            if port not in TN4_PORTS:
+                msg = f"invalid trace port {port}"
+                raise ValueError(msg)
+            mask |= 1 << port
+        if not mask:
+            msg = "select at least one trace port"
+            raise ValueError(msg)
+        trace = NormalTrace(backlog)
+        with self._session.connection_scope(), self._session.trace_packets(trace):
+            await self._require_trace()
+            before = await self.trace_state()
+
+            async def restore() -> None:
+                if self._session.is_open and self._session.reader_error is None:
+                    await self._set_trace_mask(before.port_mask)
+                    after = await self.trace_state()
+                    trace.gateway_drops = tuple(
+                        (b - a) & _COUNTER_MASK
+                        for a, b in zip(
+                            before.gateway_drops,
+                            after.gateway_drops,
+                            strict=True,
+                        )
+                    )
+
+            try:
+                await self._set_trace_mask(mask)
+                yield trace
+            except BaseException as err:
+                try:
+                    await restore()
+                except (OSError, TimeoutError, TekmarError) as cleanup:
+                    err.add_note(f"Could not restore Normal trace: {cleanup!r}")
+                raise
+            else:
+                await restore()
 
     async def enter_update_mode(self) -> None:
         """Request ROM ISP once. The caller must still verify the ROM part ID."""

@@ -198,10 +198,15 @@ class BridgeClient:
             raise ProtocolError(msg)
 
     @asynccontextmanager
-    async def normal(self) -> AsyncIterator[Tekmar482Client]:
-        """Borrow the negotiated link for one exclusive Normal-mode tRPC session."""
+    async def normal(
+        self,
+        *,
+        select_mode: bool = True,
+    ) -> AsyncIterator[Tekmar482Client]:
+        """Borrow the link for tRPC. A debugger can attach without a mode change."""
         async with self._transaction():
-            await self._set_byte(BridgeMethod.MODE, BridgeMode.NORMAL)
+            if select_mode:
+                await self._set_byte(BridgeMethod.MODE, BridgeMode.NORMAL)
             transport = _NormalTransport(self._next_packet, self._wire)
             async with Tekmar482Client(
                 transport,

@@ -1,0 +1,248 @@
+import asyncio
+import json
+import struct
+import unittest
+from io import StringIO
+
+from tekmar_482 import (
+    BridgeManagement,
+    ConnectionClosedError,
+    NormalTrace,
+    NormalTraceState,
+    ProtocolError,
+    RxFlag,
+    Tekmar482Client,
+    TraceOrigin,
+    TracePacket,
+    TraceRx,
+    TraceTx,
+    TrpcPacket,
+)
+from tekmar_482.cli import build_parser, run
+from tekmar_482.packet import Packet
+from tekmar_482.raw import CaptureGap, FailureReason, InvalidCapture, InvalidReason
+from tekmar_482.tpck import serialize
+
+from .test_bridge import listen, management
+from .test_management import Script
+
+
+class NormalTraceTests(unittest.IsolatedAsyncioTestCase):
+    def test_decode_independent_wire_vectors_without_losing_unknown_bytes(self) -> None:
+        def decode(data: str) -> TraceRx | TraceTx | InvalidCapture | TrpcPacket | None:
+            return TracePacket(
+                42,
+                outbound=False,
+                packet=Packet(0xD0, bytes.fromhex(data)),
+            ).decoded
+
+        rx = decode("00 02 01000000 03 76f00608 00032b0a06000000")
+        assert isinstance(rx, TraceRx) and rx.flags == RxFlag.ACK | RxFlag.EARLY_START
+        assert rx.frame.port == 2 and rx.frame.timestamp_ms == 1
+        assert rx.frame.message_id == 0x36F
+        tx = decode("01 00 ffffffff 03 02 6d700007 03000000008000")
+        assert isinstance(tx, TraceTx) and tx.origin is TraceOrigin.PROBE
+        assert tx.failure is FailureReason.ARBITRATION_LOST
+        assert tx.frame.message_id == 0x2D7 and tx.frame.timestamp_ms == 0xFFFFFFFF
+        ack = decode("01 00 00000000 01 00 61f00002 0c01")
+        assert isinstance(ack, TraceTx) and ack.failure is None
+        assert decode("04 03 02000000 02 0900 8080") == InvalidCapture(
+            3,
+            2,
+            InvalidReason.CRC,
+            9,
+            bytes.fromhex("8080"),
+        )
+        for data in (
+            "00",
+            "00 05 00000000 00 76f00600",
+            "ff 00 00000000",
+            "04 03 02000000 02 0900 80",
+            "01 02 00000000 00 00 12300004",
+        ):
+            assert decode(data) is None
+
+    async def test_bounded_observer_drains_before_disconnect(self) -> None:
+        trace = NormalTrace(1)
+        sample = Packet(6, bytes.fromhex("0207010000 0000"))
+        trace.record(sample, outbound=False)
+        trace.record(sample, outbound=True)
+        trace.finish(ConnectionError("wire lost"))
+        assert await anext(trace) == CaptureGap(1) and trace.host_drops == 1
+        row = await anext(trace)
+        assert isinstance(row, TracePacket) and row.outbound and row.packet == sample
+        with self.assertRaisesRegex(ConnectionError, "wire lost"):
+            await anext(trace)
+
+    async def test_refuses_stock_old_and_raw_without_changing_modes(self) -> None:
+        for caps in ("0400000000", "0401f04b5401000503", "0401f04b5401010507"):
+            script = Script(("0101f04b54", caps))
+            async with Tekmar482Client(script) as client:
+                with self.assertRaisesRegex(ProtocolError, "Normal trace requires"):
+                    async with BridgeManagement(client).trace():
+                        self.fail("unexpected trace")
+            assert not script.rows
+
+    async def test_owned_scope_restores_previous_mask_on_cancellation(self) -> None:
+        state = "040bf04b5402" + "00000000" * 5
+        script = Script(
+            ("0101f04b54", "0401f04b5401000507"),
+            ("010bf04b54", state),
+            ("000bf04b5411", "030bf04b5411"),
+            ("000bf04b5402", "030bf04b5402"),
+            ("010bf04b54", state),
+        )
+        ready = asyncio.Event()
+        async with Tekmar482Client(script) as client:
+            management = BridgeManagement(client)
+
+            async def debugger() -> None:
+                async with management.trace([0, 4]):
+                    ready.set()
+                    await asyncio.Event().wait()
+
+            task = asyncio.create_task(debugger())
+            async with asyncio.timeout(1):
+                await ready.wait()
+            with self.assertRaisesRegex(ProtocolError, "already owns"):
+                async with management.trace([0]):
+                    self.fail("overlap admitted")
+            task.cancel()
+            with self.assertRaises(asyncio.CancelledError):
+                await task
+        assert not script.rows
+
+    async def test_inspect_and_stop_orphaned_trace_without_switching_modes(
+        self,
+    ) -> None:
+        counters = struct.pack("<5I", 4, 0, 2, 0, 8).hex()
+        script = Script(
+            ("010bf04b54", "040bf04b5411" + counters),
+            ("0101f04b54", "0401f04b5401000507"),
+            ("000bf04b5400", "030bf04b5400"),
+            ("010bf04b54", "040bf04b5400" + counters),
+        )
+        async with Tekmar482Client(script) as client:
+            manager = BridgeManagement(client)
+            assert await manager.trace_state() == NormalTraceState(17, (4, 0, 2, 0, 8))
+            assert await manager.stop_trace() == NormalTraceState(0, (4, 0, 2, 0, 8))
+        assert not script.rows
+
+    async def test_reconnect_does_not_restore_a_mask_to_the_new_gateway(self) -> None:
+        script = Script(
+            ("0101f04b54", "0401f04b5401000507"),
+            ("010bf04b54", "040bf04b54" + "00" * 21),
+            ("000bf04b5401", "030bf04b5401"),
+        )
+        async with Tekmar482Client(script) as client:
+            with self.assertRaises(ConnectionClosedError):
+                async with BridgeManagement(client).trace([0]):
+                    await client.close()
+                    await client.open()
+        assert not script.rows
+
+    async def test_cli_trace_shares_normal_replies_and_drains_both_directions(
+        self,
+    ) -> None:
+        for request in (False, True):
+
+            async def app(
+                reader: asyncio.StreamReader,
+                writer: asyncio.StreamWriter,
+                *,
+                requesting: bool = request,
+            ) -> None:
+                first = await reader.readexactly(1)
+                if first == b"?":
+                    assert await reader.readexactly(5) == b"\r\nJ\r\n"
+                    assert not await reader.read()
+                    return
+                caps = management(1, 1)
+                assert first + await reader.readexactly(len(caps) - 1) == caps
+                caps_reply = management(1, 4, bytes.fromhex("01000507"))
+                writer.write(caps_reply)
+                before = bytes(1) + struct.pack("<5I", 0, 0, 0xFFFFFFFF, 0, 0)
+                after = bytes(1) + struct.pack("<5I", 0, 0, 1, 0, 0)
+                rx = serialize(
+                    Packet(
+                        0xD0,
+                        bytes.fromhex("00 02 07000000 01 76f00608 00032b0a06000000"),
+                    ),
+                )
+                tx = serialize(
+                    Packet(
+                        0xD0,
+                        bytes.fromhex("01 02 08000000 03 00 6d700007 03000000008000"),
+                    ),
+                )
+                report = serialize(Packet(6, bytes.fromhex("023f010000 0100002b")))
+                steps = [
+                    (caps, caps_reply),
+                    (management(11, 1), management(11, 4, before)),
+                    (
+                        management(11, 0, b"\x04"),
+                        management(11, 3, b"\x04") + rx + report,
+                    ),
+                ]
+                if requesting:
+                    steps.append(
+                        (
+                            serialize(Packet(6, bytes.fromhex("013f010000 01000700"))),
+                            serialize(Packet(6, bytes.fromhex("043f010000 0100072b"))),
+                        ),
+                    )
+                steps.extend(
+                    [
+                        (management(11, 0, b"\0"), tx + management(11, 3, b"\0")),
+                        (management(11, 1), management(11, 4, after)),
+                    ],
+                )
+                for expected, reply in steps:
+                    assert await reader.readexactly(len(expected)) == expected
+                    writer.write(reply)
+                await reader.read()
+
+            async with listen(app) as endpoint, asyncio.timeout(4):
+                args = build_parser().parse_args(
+                    [
+                        *(
+                            [
+                                "request",
+                                "HeatSetpoint",
+                                "address=1",
+                                "setback=7",
+                                "--trace-port",
+                                "2",
+                            ]
+                            if request
+                            else ["trace-normal", "--port", "2", "--duration", "0.03"]
+                        ),
+                        "--tcp",
+                        f"{endpoint.address}:{endpoint.port}",
+                        "--json",
+                    ],
+                )
+                output = StringIO()
+                assert await run(args, stdout=output) == 0
+            rows = [json.loads(line) for line in output.getvalue().splitlines()]
+            assert rows[-1] == {
+                "trace_drops": {"gateway_by_port": [0, 0, 2, 0, 0], "host": 0},
+            }
+            native = [r for r in rows if r.get("layer") == "tn4"]
+            assert [(r["direction"], r["message_id"]) for r in native] == [
+                ("rx", 0x36F),
+                ("tx", 0x2D7),
+            ]
+            assert (
+                native[0]["ack"]
+                and native[1]["origin"] == "probe"
+                and native[1]["outcome"] == "ack"
+            )
+            sides = [
+                r["direction"]
+                for r in rows
+                if r.get("layer") == "trpc" and r["method"] == "HeatSetpoint"
+            ]
+            assert sides == (
+                ["host_rx", "host_tx", "host_rx"] if request else ["host_rx"]
+            )
