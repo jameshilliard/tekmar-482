@@ -17,7 +17,7 @@ from .layouts import (
 from .line import ACCESS_STATUS, CLOCK_REPORT, GROUP_REPORT, GROUP_UPDATE, ZONE_ADJUSTMENT, ClockReport, GroupReport
 from .products import identify_product
 from .scenes import SCENE_REPORT, SCENE_RESPONSE_FIELDS, SceneReport, SceneResponse
-from .schedules import DAY_NAMES, SINGLE_WEEK, DailyEvents, ScheduleBinding, ScheduleCycle, ScheduleEvent
+from .schedules import DAY_NAMES, SCHEDULE_STATUS, SINGLE_WEEK, DailyEvents, ScheduleBinding, ScheduleCycle, ScheduleEvent, ScheduleStatus
 from .snowmelt import SNOW_REPORT, SNOW_REQUEST, SnowmeltApplication, SnowmeltReport
 from .water import DHW_STATUS, MASTER_PRESENT, MASTER_STATUS, PLANT_LOOP_STATUS, TANK_STATUS, DhwStatus, HeatSource, LoopStatus, TankStatus
 
@@ -407,13 +407,6 @@ def io_discovery(r: Reader) -> Fields:
     return fields | {"label_hex": r.take(6).hex(), "type_id": r.byte(), "io_value": r.word()}
 
 
-def schedule(r: Reader) -> Fields:
-    a, b, edge = r.take(3)
-    return {"schedule_id": a & 3, "master": a >> 2 & 1, "previous_schedule_id": a >> 3 & 3,
-            "previous_master": a >> 5 & 1, "events": a >> 6, "current_state": b & 3,
-            "next_state": b >> 2 & 3, "duplicate_response": b >> 4 & 1, "time_to_next_edge": edge}
-
-
 def mix_report(r: Reader) -> Fields:
     mode, pump, actuator, high, target, supply, ret = r.take(7)
     return {"output_mode": mode & 3, "cooling_logic": mode >> 2 & 1, "external_demand": mode >> 4 & 1,
@@ -472,7 +465,7 @@ DECODERS: dict[int, tuple[str, Callable[[Reader], Fields]]] = {
     0x26f: ("SlabStatus", lambda r: {"slab_status": r.byte() & 7, "target_raw": r.byte(), "current_raw": r.word()}),
     0x287: ("CalibrationMode", octets("mode")),
     0x2ef: ("NetworkLock", lambda r: bits(r.byte(), ("access_lock", 0, 1), ("address_lock", 1, 1))),
-    0x2f7: ("ScheduleStatus", schedule),
+    SCHEDULE_STATUS: ("ScheduleStatus", lambda r: ScheduleStatus.read(r).fields()),
     SCENE_REPORT: ("SceneReport", scene_report),
     0x307: ("WWSDRequest", octets()),
     0x30f: ("WWSDStatus", lambda r: bits(r.byte(), *((name, i, 1) for i, name in enumerate(SETPOINT_FIELDS)))),

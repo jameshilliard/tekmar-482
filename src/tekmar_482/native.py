@@ -26,7 +26,12 @@ from ._native_payloads.line import (
 )
 from ._native_payloads.queries import NativeStatusQuery, StatusRequest
 from ._native_payloads.scenes import SCENE_REPORT, NativeScene, SceneReport
-from ._native_payloads.schedules import ScheduleEvent, ScheduleProfile
+from ._native_payloads.schedules import (
+    SCHEDULE_STATUS,
+    ScheduleEvent,
+    ScheduleProfile,
+    ScheduleStatus,
+)
 from ._native_payloads.snowmelt import SNOW_REPORT, SnowmeltReport
 from .constants import TN4_PORTS
 from .units import celsius_to_degh, degh_to_celsius
@@ -296,6 +301,15 @@ class NativeFrame:
         if self.message_id == GROUP_REPORT and len(self.message.payload) >= _GROUP_SIZE:
             return GroupReport(self.message.payload[0], self.message.payload[1])
         return None
+
+    @property
+    def schedule_status(self) -> ScheduleStatus | None:
+        if self.message_id != SCHEDULE_STATUS:
+            return None
+        try:
+            return ScheduleStatus.read(Reader(self.message.payload))
+        except ShortPayload:
+            return None
 
     @property
     def snowmelt_report(self) -> SnowmeltReport | None:

@@ -29,6 +29,7 @@ from ._native_payloads.schedules import (
     ScheduleCycle,
     ScheduleEvent,
     ScheduleProfile,
+    ScheduleStatus,
 )
 from ._native_payloads.sensors import (
     RoomTemperatures,
@@ -144,6 +145,7 @@ from .native import (
     SnowmeltSetpoint,
     WeeklyEvent,
 )
+from .native_calendar import NativeCalendar, ScheduleSignal
 from .native_discovery import (
     NativeDevice,
     NativeDiscovery,
@@ -396,6 +398,7 @@ __all__ = [
     "NativeAddress",
     "NativeBlockBatch",
     "NativeBlockQuery",
+    "NativeCalendar",
     "NativeClimate",
     "NativeDevice",
     "NativeDiscovery",
@@ -449,6 +452,8 @@ __all__ = [
     "ScheduleEvent",
     "ScheduleProfile",
     "ScheduleRow",
+    "ScheduleSignal",
+    "ScheduleStatus",
     "ScheduleTarget",
     "SensorInput",
     "SensorObservation",

@@ -412,7 +412,13 @@ class SnowmeltWatchTests(unittest.IsolatedAsyncioTestCase):
     async def test_secondary_role_can_prompt_but_not_supply_missing_keys(self) -> None:
         self.seed()
         task = asyncio.create_task(
-            watch_native(self.stream, [SITE], duration=0.25, timeout=0.025),
+            watch_native(
+                self.stream,
+                [SITE],
+                schedules=False,
+                duration=0.25,
+                timeout=0.025,
+            ),
         )
         await self.boot()
         _, initial = await self.next_send()
@@ -451,7 +457,9 @@ class SnowmeltWatchTests(unittest.IsolatedAsyncioTestCase):
     async def test_active_watch_reads_configuration_and_requests_only_missing_keys(
         self,
     ) -> None:
-        task = asyncio.create_task(watch_native(self.stream, [SITE], duration=0.18))
+        task = asyncio.create_task(
+            watch_native(self.stream, [SITE], schedules=False, duration=0.18),
+        )
         await self.boot()
         self.rx(snow(ZONE, [(0x19, 0), (0x22, 0xC000)]))
         self.rx(snow(SENSOR, [(0x1B, 0x4FF), (0x29, 3)]))
@@ -499,7 +507,13 @@ class SnowmeltWatchTests(unittest.IsolatedAsyncioTestCase):
                 seen.append(d.primary.operating_state)
 
         task = asyncio.create_task(
-            watch_native(self.stream, [SITE], duration=0.18, on_change=changed),
+            watch_native(
+                self.stream,
+                [SITE],
+                schedules=False,
+                duration=0.18,
+                on_change=changed,
+            ),
         )
         await self.boot()
         other_port = NativePath(1, 0, 0)
@@ -529,7 +543,13 @@ class SnowmeltWatchTests(unittest.IsolatedAsyncioTestCase):
         self.seed()
         self.rx(block(3, bytes.fromhex("01 01"), stat))
         task = asyncio.create_task(
-            watch_native(self.stream, [SITE, stat], duration=0.20, timeout=0.025),
+            watch_native(
+                self.stream,
+                [SITE, stat],
+                schedules=False,
+                duration=0.20,
+                timeout=0.025,
+            ),
         )
         starts = dict([await self.next_send(), await self.next_send()])
         for p in (SITE, stat):
@@ -573,6 +593,7 @@ class SnowmeltWatchTests(unittest.IsolatedAsyncioTestCase):
         args = build_parser().parse_args(
             [
                 "watch-native",
+                "--no-schedules",
                 "--device",
                 str(SITE.port),
                 str(SITE.subnet),

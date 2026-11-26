@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import asdict
 from typing import TYPE_CHECKING
 
+from .cli_schedule import schedule_fields
 from .cli_status import climate_fields, water_fields
 from .native import NativeAddress
 from .native_snow_control import SnowmeltGroupStatus, SnowmeltOperation
@@ -15,6 +16,7 @@ if TYPE_CHECKING:
     import argparse
     from collections.abc import Callable
 
+    from .native_calendar import NativeCalendar
     from .native_snowmelt import NativeSnowmelt, SnowmeltChannel
     from .native_state import NativeState
     from .raw import BridgeStream
@@ -100,6 +102,8 @@ async def watch_all_from_args(
     args: argparse.Namespace,
     emit: Callable[[object], None],
 ) -> int:
+    previous: dict[NativePath, dict[str, object]] = {}
+
     def changed(path: NativePath, state: NativeState) -> None:
         if (snow := state.snowmelt(path)) is not None:
             emit({"snowmelt": snow_fields(snow)})
@@ -118,7 +122,13 @@ async def watch_all_from_args(
             emit({"native_identity": {**asdict(path), **asdict(identity)}})
         if (water := state.water_source(path)) is not None:
             emit({"water_source": water_fields(water)})
+        if not args.no_schedules and (calendar := state.schedule(path)) is not None:
+            view = calendar_fields(calendar)
+            if (path in previous or any(view.values())) and view != previous.get(path):
+                previous[path] = view
+                emit({"native_calendar": {**asdict(path), **view}})
         if path not in state.paths:
+            previous.pop(path, None)
             emit({"native_removed": asdict(path)})
 
     paths = tuple(NativePath(*p) for p in args.device) if args.device else None
@@ -130,6 +140,7 @@ async def watch_all_from_args(
         else NativeAddress(args.source_subnet, args.source_node),
         duration=args.duration,
         timeout=args.timeout,
+        schedules=not args.no_schedules,
         on_change=changed,
     )
     state = result.state
@@ -143,6 +154,15 @@ async def watch_all_from_args(
         for d in state.snowmelt_devices
         if d.missing_keys != b""
     ]
+    no_schedule = (
+        []
+        if args.no_schedules
+        else [
+            {**asdict(p), **calendar_fields(c)}
+            for p in state.paths
+            if (c := state.schedule(p)) is not None and c.incomplete
+        ]
+    )
     emit(
         {
             "completed_reads": result.reads,
@@ -151,6 +171,7 @@ async def watch_all_from_args(
             "missing_identities": unidentified,
             "missing_mode_reports": no_mode,
             "incomplete_snowmelt": no_snow,
+            "incomplete_schedules": no_schedule,
             "status_reads": [
                 {
                     "port": s.port,
@@ -171,6 +192,7 @@ async def watch_all_from_args(
                     "port": b.port,
                     "subnet": b.query.target.subnet,
                     "block": b.query.block_id,
+                    "selector": b.query.selector,
                     "missing_nodes": b.missing_nodes,
                     "tx_status": b.tx_result.status.name if b.tx_result else None,
                     "tx_reason": b.tx_result.reason if b.tx_result else None,
@@ -182,5 +204,25 @@ async def watch_all_from_args(
     )
     return int(
         not state.paths
-        or (not args.passive and bool(unidentified or no_mode or no_snow)),
+        or (
+            not args.passive and bool(unidentified or no_mode or no_snow or no_schedule)
+        ),
     )
+
+
+def calendar_fields(calendar: NativeCalendar) -> dict[str, object]:
+    return {
+        "schedules": [schedule_fields(w) for w in calendar.schedules],
+        "signals": [
+            {
+                **s.status.fields(),
+                "system": s.status.schedule_id + 1,
+                "received_ms": s.frame.timestamp_ms,
+                "body": s.frame.body.hex(),
+            }
+            for s in calendar.signals
+        ],
+        "missing_blocks": [
+            {"block": b, "selector": s} for b, s in calendar.missing_blocks
+        ],
+    }

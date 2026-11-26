@@ -91,7 +91,7 @@ def _known[E: IntEnum](kind: type[E], raw: int | None) -> E | None:
 class ScheduleConfiguration:
     target: ScheduleTarget
     profile: ScheduleProfile
-    setup: NativeBlockBatch
+    setup: NativeFrame
     binding_raw: int | None
     cycle_raw: int | None
     events_raw: int | None
@@ -122,12 +122,14 @@ class ScheduleConfiguration:
         # All four timer rows repeat the selector, mastership, cycle and count.
         return (
             self.target.system is None
-            or frame.message.payload[3]
-            == self.setup.require_report().message.payload[3]
+            or frame.message.payload[3] == self.setup.message.payload[3]
         )
 
 
-async def _configuration(read: _Read, target: ScheduleTarget) -> ScheduleConfiguration:
+async def _configuration(
+    read: _Read,
+    target: ScheduleTarget,
+) -> tuple[ScheduleConfiguration, NativeBlockBatch]:
     identity = (await read(NativeBlockQuery(target.address, 0))).require_report()
     profile = ScheduleProfile.from_identification(identity.decoded)
     timer = profile.product is not None and profile.product.model == "033"
@@ -140,15 +142,15 @@ async def _configuration(read: _Read, target: ScheduleTarget) -> ScheduleConfigu
         else NativeBlockQuery(target.address, SETUP_BLOCK)
     )
     setup = await read(query)
-    return _from_setup(profile, target, setup)
+    return _from_setup(profile, target, setup.require_report()), setup
 
 
 def _from_setup(
     profile: ScheduleProfile,
     target: ScheduleTarget,
-    setup: NativeBlockBatch,
+    setup: NativeFrame,
 ) -> ScheduleConfiguration:
-    fields = setup.require_report().decoded
+    fields = setup.decoded
     binding: int | None
     if target.system is not None:
         binding = (
@@ -176,7 +178,9 @@ def _from_setup(
 class ScheduleRow:
     event: ScheduleEvent
     display_event: ScheduleEvent
-    batch: NativeBlockBatch
+    query: NativeBlockQuery
+    report: NativeFrame | None
+    batch: NativeBlockBatch | None
     days: tuple[int | None, ...]
     matching_header: bool
 
@@ -190,20 +194,17 @@ class ScheduleRow:
 def _row(
     config: ScheduleConfiguration,
     event: ScheduleEvent,
-    batch: NativeBlockBatch,
+    query: NativeBlockQuery,
+    frame: NativeFrame | None,
+    batch: NativeBlockBatch | None,
 ) -> ScheduleRow:
-    frame = (
-        batch.reports[0]
-        if batch.reports and batch.tx_result and batch.tx_result.may_have_reached_peer
-        else None
-    )
     matches = frame is not None and config.header_matches(frame)
     days: tuple[int | None, ...] = (None,) * len(DAY_NAMES)
-    if frame is not None:
+    if matches and frame is not None:
         fields = frame.decoded
         try:
             order = [
-                config.profile.wire_day(batch.query.block_id, i)
+                config.profile.wire_day(query.block_id, i)
                 for i in range(len(DAY_NAMES))
             ]
         except ValueError:
@@ -214,7 +215,15 @@ def _row(
     if count is None:
         msg = "cannot label an event without a daily event configuration"
         raise ValueError(msg)
-    return ScheduleRow(event, count.display_event(event), batch, days, matches)
+    return ScheduleRow(
+        event,
+        count.display_event(event),
+        query,
+        frame,
+        batch,
+        days,
+        matches,
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -246,44 +255,92 @@ class SystemSchedule:
         return self.masters[0] if len(self.masters) == 1 else None
 
 
-type _Key = tuple[int, int | None]
+type ScheduleKey = tuple[int, int | None]
+
+_SETUP_FIELDS = (
+    "heating_schedule_id",
+    "cooling_schedule_id",
+    "schedule_cycling_rate",
+    "num_daily_events",
+)
+
+
+def dependent_rows(key: ScheduleKey) -> tuple[ScheduleKey, ...]:
+    if key[0] == SETUP_BLOCK:
+        return tuple((b, None) for b in SINGLE_WEEK)
+    if key[0] == MULTI_WEEK.start:
+        return tuple((b, key[1]) for b in MULTI_WEEK[1:])
+    return ()
+
+
+def superseded_rows(
+    key: ScheduleKey,
+    before: NativeFrame | None,
+    after: NativeFrame,
+) -> tuple[ScheduleKey, ...]:
+    """Only ownership, cycle or event count invalidate previously read weekdays."""
+    if before is not None:
+        if key[0] == SETUP_BLOCK:
+            old, new = before.decoded, after.decoded
+            if all(old.get(k) == new.get(k) for k in _SETUP_FIELDS):
+                return ()
+        elif (
+            key[0] == MULTI_WEEK.start
+            and before.message.payload[3] == after.message.payload[3]
+        ):
+            return ()
+    return dependent_rows(key)
+
+
+def schedule_configurations(
+    profile: ScheduleProfile,
+    blocks: Mapping[ScheduleKey, NativeFrame],
+) -> Iterable[ScheduleConfiguration]:
+    timer = profile.product is not None and profile.product.model == "033"
+    setups: Iterable[ScheduleKey] = (
+        ((MULTI_WEEK.start, s) for s in range(4)) if timer else ((SETUP_BLOCK, None),)
+    )
+    for key in setups:
+        setup = blocks.get(key)
+        if setup is None or not setup.node & 31:
+            continue
+        address = setup.message.source
+        selector = key[1]
+        if selector is not None:
+            targets = [ScheduleTarget(address, system=selector + 1)]
+        else:
+            targets = [ScheduleTarget(address)]
+            if "cooling_schedule_id" in setup.decoded or (
+                profile.product is not None and not profile.shares_heating_schedule
+            ):
+                targets.append(ScheduleTarget(address, ScheduleChannel.COOL))
+        for target in targets:
+            yield _from_setup(profile, target, setup)
+
+
+def schedules_from_reports(
+    profile: ScheduleProfile,
+    blocks: Mapping[ScheduleKey, NativeFrame],
+    reads: Mapping[ScheduleKey, NativeBlockBatch] | None = None,
+) -> Iterable[NativeWeeklySchedule]:
+    """Project confirmed reports; a passive calendar has no transmit results."""
+    for cfg in schedule_configurations(profile, blocks):
+        rows = []
+        for event in cfg.active_events:
+            query = cfg.target.query(event)
+            slot = (query.block_id, query.selector)
+            if (frame := blocks.get(slot)) is not None:
+                rows.append(
+                    _row(cfg, event, query, frame, reads.get(slot) if reads else None),
+                )
+        yield NativeWeeklySchedule(cfg, tuple(rows))
 
 
 @dataclass(slots=True)
 class _DeviceTables:
     profile: ScheduleProfile
-    blocks: dict[_Key, NativeBlockBatch]
-
-    def tables(self) -> Iterable[NativeWeeklySchedule]:
-        for (block, selector), setup in self.blocks.items():
-            address = setup.require_report().message.source
-            if block == SETUP_BLOCK:
-                targets = [ScheduleTarget(address)]
-                if "cooling_schedule_id" in setup.require_report().decoded or (
-                    self.profile.product is not None
-                    and not self.profile.shares_heating_schedule
-                ):
-                    targets.append(ScheduleTarget(address, ScheduleChannel.COOL))
-            elif (
-                block == MULTI_WEEK.start
-                and selector is not None
-                and selector + 1 in _SYSTEMS
-                and self.profile.product is not None
-                and self.profile.product.model == "033"
-            ):
-                targets = [ScheduleTarget(address, system=selector + 1)]
-            else:
-                continue
-            for target in targets:
-                cfg = _from_setup(self.profile, target, setup)
-                rows = []
-                for event in cfg.active_events:
-                    query = target.query(event)
-                    if (
-                        batch := self.blocks.get((query.block_id, query.selector))
-                    ) is not None:
-                        rows.append(_row(cfg, event, batch))
-                yield NativeWeeklySchedule(cfg, tuple(rows))
+    blocks: dict[ScheduleKey, NativeFrame]
+    reads: dict[ScheduleKey, NativeBlockBatch]
 
 
 @dataclass(frozen=True, slots=True)
@@ -316,15 +373,31 @@ class ScheduleDirectory:
                     devices[path] = _DeviceTables(
                         ScheduleProfile.from_identification(frame.decoded),
                         {},
+                        {},
                     )
                 elif (device := devices.get(path)) is not None:
                     query = replace(batch.query, target=frame.message.source)
-                    device.blocks[block, query.selector] = replace(
+                    key = (block, query.selector)
+                    for row in superseded_rows(key, device.blocks.get(key), frame):
+                        device.blocks.pop(row, None)
+                        device.reads.pop(row, None)
+                    device.blocks[key] = frame
+                    device.reads[key] = replace(
                         batch,
                         query=query,
                         reports=(frame,),
                     )
-        return cls(tuple(t for p in sorted(devices) for t in devices[p].tables()))
+        return cls(
+            tuple(
+                t
+                for _, device in sorted(devices.items())
+                for t in schedules_from_reports(
+                    device.profile,
+                    device.blocks,
+                    device.reads,
+                )
+            ),
+        )
 
     def system(self, number: int, *, ports: Iterable[int]) -> SystemSchedule:
         scope = frozenset(ports)
@@ -368,12 +441,21 @@ async def read_weekly_schedule(
             timeout=timeout,
         )
 
-    config = await _configuration(read, target)
+    config, setup = await _configuration(read, target)
     rows = []
     for event in config.active_events:
         query = target.query(event)
-        batch = config.setup if config.setup.query == query else await read(query)
-        rows.append(_row(config, event, batch))
+        batch = setup if setup.query == query else await read(query)
+        report = (
+            batch.reports[0]
+            if (
+                batch.reports
+                and batch.tx_result
+                and batch.tx_result.may_have_reached_peer
+            )
+            else None
+        )
+        rows.append(_row(config, event, query, report, batch))
         if batch.tx_result is None:
             break  # A pending TX still owns the port.
     return NativeWeeklySchedule(config, tuple(rows))
@@ -386,7 +468,7 @@ async def edit_schedule_time(
     *,
     preview: bool,
 ) -> NativeWriteResult:
-    config = await _configuration(editor.read, target)
+    config, setup = await _configuration(editor.read, target)
     count, cycle = config.daily_events, config.cycle
     if config.binding is None or not config.binding.owns_table:
         msg = "this device is not an identified owner of the requested schedule"
@@ -402,7 +484,7 @@ async def edit_schedule_time(
         msg = "the displayed event is not active in this schedule"
         raise ValueError(msg)
     query = target.query(event)
-    baseline = config.setup if config.setup.query == query else await editor.read(query)
+    baseline = setup if setup.query == query else await editor.read(query)
     before = baseline.require_report()
     if not config.header_matches(before):
         msg = "timer event header disagrees with the schedule owner"

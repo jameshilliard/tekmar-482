@@ -23,7 +23,12 @@ from .cli_line import (
     prepare_broadcast,
     send_broadcast,
 )
-from .cli_native_watch import snow_fields, snow_group_from_args, watch_all_from_args
+from .cli_native_watch import (
+    calendar_fields,
+    snow_fields,
+    snow_group_from_args,
+    watch_all_from_args,
+)
 from .cli_schedule import (
     add_schedule_commands,
     schedule_change,
@@ -1008,6 +1013,10 @@ def _emit_capture_summary(
         emit({"thermostat_climate": climate_fields(thermostat)})
     for snow in observed.snowmelt_devices:
         emit({"snowmelt": snow_fields(snow)})
+    for path in observed.paths:
+        calendar = observed.schedule(path)
+        if calendar and (calendar.schedules or calendar.signals):
+            emit({"native_calendar": {**asdict(path), **calendar_fields(calendar)}})
 
 
 async def _dump_blocks(

@@ -476,13 +476,30 @@ blocks, link outcomes and which keys the latest status requests received.
 tekmar-482 watch-native --device 0 0x14 6 --device 2 0x12 3 --duration 60 --tcp 192.0.2.10:3001 --json
 ```
 
+Schedule-capable devices read their local assignment first. A 033 timer
+reads the Wake header for each of its four slots instead. The watcher
+requests calendar rows only from confirmed owners and only for active
+events. A native `2F7` role change invalidates the affected assignment and
+rows; ordinary phase changes and countdowns update the live signal without
+sending a request. An addressed schedule write invalidates its destination
+but is never treated as a readback. After a missing setup reply, a new
+role announcement can prompt one retry. Use `--no-schedules` to omit calendar
+reads and output.
+
 The library equivalent is `await watch_native(stream, paths, on_change=callback)`.
 The synchronous callback receives `(path, state)`. Use
-`state.snowmelt(path)`, `state.climate(path)` or `state.water_source(path)` to
+`state.snowmelt(path)`, `state.climate(path)`, `state.schedule(path)` or `state.water_source(path)` to
 obtain an immutable snapshot. `source=None` (CLI: `--passive`) sends no
 requests; link ACKs remain off unless explicitly enabled on a port. A
-finite active watch lists missing identities, modes and snowmelt keys and
+finite active watch lists missing identities, modes, calendar data and snowmelt keys and
 returns status 1 for incomplete coverage.
+
+`state.schedule(path).signals` retains the reported current and next phases
+per advertised system. These are not proof that a device owns a table or that
+a member uses that phase locally. Use `state.schedule_directory.system(n,
+ports=(port,)).owner` to resolve a unique confirmed owner within a scope.
+Missing rows are unknown, not disabled. Passive rows expose their `report`
+without inventing a transmit result.
 
 A single 654 can report a zone **and** a sensor. `device.channels` keeps
 their words separate, even if both use the same number. `device.primary`

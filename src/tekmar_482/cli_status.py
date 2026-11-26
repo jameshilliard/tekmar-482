@@ -191,6 +191,12 @@ def _add_watch(
         parents=[common],
         help=description,
     )
+    if name == "watch-native":
+        watch.add_argument(
+            "--no-schedules",
+            action="store_true",
+            help="skip calendar reads and output",
+        )
     watch.add_argument(
         "--device",
         action="append",
@@ -233,7 +239,7 @@ def add_status_commands(
         common,
         number,
         "watch-native",
-        "watch native devices and read thermostat and snowmelt state",
+        "watch native devices, calendars, thermostat and snowmelt state",
     )
     water = subparsers.add_parser(
         "read-water",

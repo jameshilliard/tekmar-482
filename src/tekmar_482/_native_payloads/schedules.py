@@ -4,11 +4,13 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from enum import IntEnum
 
+from .codec import Fields, Reader
 from .layouts import MULTI_WEEK
 from .products import NativeProduct, product_revision
 
 SINGLE_WEEK = range(0x10, 0x14)
 SETUP_BLOCK = 0x0f
+SCHEDULE_STATUS = 0x2f7
 DAY_NAMES = ("monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday")
 
 
@@ -78,6 +80,70 @@ class DailyEvents(IntEnum):
         if self is self.TWO:
             return ScheduleEvent.OCCUPIED if event is ScheduleEvent.WAKE else ScheduleEvent.UNOCCUPIED
         return event
+
+
+@dataclass(frozen=True, slots=True)
+class ScheduleStatus:
+    """A native status announcement. It does not carry a local schedule binding."""
+    role_flags: int
+    state_flags: int
+    time_to_next_edge: int
+
+    @classmethod
+    def read(cls, reader: Reader) -> "ScheduleStatus":
+        role, states, edge = reader.take(3)
+        return cls(role, states, edge)
+
+    @property
+    def schedule_id(self) -> int:
+        return self.role_flags & 3
+
+    @property
+    def previous_id(self) -> int:
+        return self.role_flags >> 3 & 3
+
+    @property
+    def master(self) -> bool:
+        return bool(self.role_flags & 4)
+
+    @property
+    def previous_master(self) -> bool:
+        return bool(self.role_flags & 32)
+
+    @property
+    def ownership_changed(self) -> bool:
+        return self.schedule_id != self.previous_id or self.master != self.previous_master
+
+    @property
+    def events_raw(self) -> int:
+        return self.role_flags >> 6
+
+    def _event(self, state: int) -> ScheduleEvent | None:
+        if self.events_raw == DailyEvents.FOUR:
+            return ScheduleEvent(state)
+        if self.events_raw == DailyEvents.TWO:
+            return ScheduleEvent.UNOCCUPIED if state & 1 else ScheduleEvent.OCCUPIED
+        return None
+
+    @property
+    def current_event(self) -> ScheduleEvent | None:
+        return self._event(self.state_flags & 3)
+
+    @property
+    def next_event(self) -> ScheduleEvent | None:
+        return self._event(self.state_flags >> 2 & 3)
+
+    def fields(self) -> Fields:
+        values: Fields = {"schedule_id": self.schedule_id, "master": int(self.master),
+                          "previous_schedule_id": self.previous_id, "previous_master": int(self.previous_master),
+                          "events": self.events_raw, "current_state": self.state_flags & 3,
+                          "next_state": self.state_flags >> 2 & 3, "duplicate_response": self.state_flags >> 4 & 1,
+                          "reserved": self.state_flags >> 5, "time_to_next_edge": self.time_to_next_edge,
+                          "ownership_changed": self.ownership_changed}
+        for name, event in (("current_event", self.current_event), ("next_event", self.next_event)):
+            if event is not None:
+                values[name] = event.name.lower()
+        return values
 
 
 @dataclass(frozen=True, slots=True)

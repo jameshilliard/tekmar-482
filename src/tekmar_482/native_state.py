@@ -14,11 +14,20 @@ from ._native_payloads.climate import (
     ThermostatConfiguration,
 )
 from ._native_payloads.codec import Reader, ShortPayload
+from ._native_payloads.layouts import MULTI_WEEK
+from ._native_payloads.schedules import SCHEDULE_STATUS
 from ._native_payloads.sensors import SENSOR_BLOCKS, ThermostatSensors
 from ._native_payloads.snowmelt import SNOW_REPORT
 from .constants import TN4_PORTS
 from .native import NativeAddress, NativeFrame
+from .native_calendar import (
+    SCHEDULE_BLOCKS,
+    NativeCalendar,
+    ScheduleBook,
+    schedule_profile,
+)
 from .native_identity import NativeIdentity
+from .native_schedule import ScheduleDirectory
 from .native_snowmelt import NativeSnowmelt, SnowmeltChannels, SnowmeltConfiguration
 from .native_water import WaterMonitor
 from .raw import CaptureGap
@@ -26,13 +35,16 @@ from .raw import CaptureGap
 if TYPE_CHECKING:
     from collections.abc import Iterable
 
+    from .native_schedule import ScheduleKey
     from .native_snowmelt import SnowmeltChannel
     from .native_water import WaterSource
     from .raw import CaptureRecord
 
 BLOCK_REPORT = 0x2E7
+BLOCK_UPDATE = 0x2DF
 TAKING_ADDRESS = 0x3E7
 _BLOCK_HEADER = 3
+_UPDATE_HEADER = 4
 _OLD_ADDRESS = 2
 _NODE = 31
 type _BlockKey = tuple[int, int | None]
@@ -78,6 +90,7 @@ class _Peer:
     air: AirStatus | None = None
     air_frame: NativeFrame | None = None
     snow: SnowmeltChannels = field(default_factory=SnowmeltChannels)
+    calendar: ScheduleBook = field(default_factory=ScheduleBook)
 
     def climate(self, path: NativePath) -> NativeClimate | None:
         identity = self.identity
@@ -161,6 +174,35 @@ class NativeState:
             peer.snow.channels,
         )
 
+    def schedule(self, path: NativePath) -> NativeCalendar | None:
+        if peer := self._peers.get(path):
+            return peer.calendar.snapshot(peer.identity, addressable=bool(path.node))
+        return None
+
+    @property
+    def schedule_directory(self) -> ScheduleDirectory:
+        return ScheduleDirectory(
+            tuple(
+                w
+                for p in self.paths
+                if (calendar := self.schedule(p)) is not None
+                for w in calendar.schedules
+            ),
+        )
+
+    def missing_schedule_reads(self, path: NativePath) -> dict[ScheduleKey, int]:
+        peer = self._peers.get(path)
+        if peer is None or not path.node:
+            return {}
+        return {
+            k: peer.calendar.revisions.get(k, 0)
+            for k in peer.calendar.missing(schedule_profile(peer.identity))
+        }
+
+    def schedule_revision(self, path: NativePath, key: ScheduleKey) -> int:
+        peer = self._peers.get(path)
+        return peer.calendar.revisions.get(key, 0) if peer else 0
+
     def block(
         self,
         path: NativePath,
@@ -168,6 +210,8 @@ class NativeState:
         selector: int | None = None,
     ) -> NativeFrame | None:
         peer = self._peers.get(path)
+        if peer and block in SCHEDULE_BLOCKS:
+            return peer.calendar.blocks.get((block, selector))
         return peer.blocks.get((block, selector)) if peer else None
 
     def air_frame(self, path: NativePath) -> NativeFrame | None:
@@ -225,11 +269,32 @@ class NativeState:
                 self._reidentify.add(path)
             peer.identity = identity
         key = (block, selector)
+        if block in SCHEDULE_BLOCKS:
+            return peer.calendar.report(key, frame)
         before = peer.blocks.get(key)
         peer.blocks[key] = frame
         if before is not None:
             peer.snow.invalidate(block, before, frame)
         return before is None or before.message.payload != data
+
+    def _schedule_update(self, frame: NativeFrame) -> tuple[NativePath, ...]:
+        data = frame.message.payload
+        if len(data) <= _UPDATE_HEADER:
+            return ()
+        block = int.from_bytes(data[2:4], "little")
+        if block not in SCHEDULE_BLOCKS or "truncated" in frame.decoded:
+            return ()
+        target = NativePath(frame.port, data[0], data[1] & _NODE)
+        peer = self._peers.get(target)
+        if peer is None or not target.node:
+            return ()
+        selector = (
+            (data[_UPDATE_HEADER] & BLOCK_SELECTORS[block][1])
+            if block in MULTI_WEEK
+            else None
+        )
+        peer.calendar.invalidate_update((block, selector))
+        return (target,)
 
     def observe(self, record: CaptureRecord) -> tuple[NativePath, ...]:
         """Return changed paths. Equal samples refresh timestamps without notifying."""
@@ -242,6 +307,8 @@ class NativeState:
             return changed
         if not isinstance(record, NativeFrame):
             return ()
+        if record.message_id == BLOCK_UPDATE:
+            return self._schedule_update(record)
         path = NativePath.from_frame(record)
         data = record.message.payload
         if record.message_id == TAKING_ADDRESS:
@@ -254,6 +321,20 @@ class NativeState:
         changed_water = self._water.observe(record)
         if record.message_id == BLOCK_REPORT:
             return (path,) if self._block(path, record) or changed_water else ()
+        if record.message_id == SCHEDULE_STATUS:
+            status = record.schedule_status
+            if status is None:
+                return ()
+            peer = self._peers.setdefault(path, _Peer())
+            return (
+                (path,)
+                if peer.calendar.announce(
+                    status,
+                    record,
+                    schedule_profile(peer.identity),
+                )
+                else ()
+            )
         if record.message_id == SNOW_REPORT:
             report = record.snowmelt_report
             if report is None or (address := report.address) is None:

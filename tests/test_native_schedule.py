@@ -274,7 +274,8 @@ class NativeScheduleTests(unittest.IsolatedAsyncioTestCase):
             timeout=0.05,
         )
         assert len(week.rows) == 4 and not week.table_complete
-        assert week.rows[1].days == (None,) * 7 and not week.rows[1].batch.reports
+        assert week.rows[1].days == (None,) * 7 and week.rows[1].report is None
+        assert week.rows[1].batch is not None and not week.rows[1].batch.reports
         assert week.rows[2].days == (144,) * 7 and week.rows[2].complete
 
     def test_directory_resolves_only_observed_unique_masters_in_selected_ports(
@@ -329,6 +330,12 @@ class NativeScheduleTests(unittest.IsolatedAsyncioTestCase):
         both = directory.system(1, ports=(1, 2))
         assert len(both.masters) == 2 and both.owner is None
         assert directory.system(4, ports=(1, 2)).owner is None
+        reconfigured = NativeSnapshot(
+            (*reports, batch(1, 0xF, {2: bytes.fromhex("0f 01 02 01 01")})),
+            (),
+        ).schedule_directory
+        owner = reconfigured.system(1, ports=(1,)).owner
+        assert owner and not owner.rows and not owner.table_complete
         replaced = NativeSnapshot(
             (*reports, batch(1, 0, {2: ident})),
             (),

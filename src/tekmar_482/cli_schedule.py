@@ -110,18 +110,18 @@ def schedule_fields(week: NativeWeeklySchedule) -> dict[str, object]:
         "cycle": cfg.cycle.name.lower() if cfg.cycle is not None else None,
         "cycle_raw": cfg.cycle_raw,
         "events_raw": cfg.events_raw,
-        "setup_body": cfg.setup.require_report().body.hex(),
+        "setup_body": cfg.setup.body.hex(),
         "table_complete": week.table_complete,
         "rows": [
             {
                 "event": row.display_event.name.lower(),
                 "wire_event": row.event.name.lower(),
                 "matching_header": row.matching_header,
-                "block": row.batch.query.block_id,
+                "block": row.query.block_id,
                 "tx_status": row.batch.tx_result.status.name
-                if row.batch.tx_result
+                if row.batch and row.batch.tx_result
                 else None,
-                "body": row.batch.reports[0].body.hex() if row.batch.reports else None,
+                "body": row.report.body.hex() if row.report else None,
                 "days": dict(zip(DAY_NAMES, map(_day_value, row.days), strict=True)),
             }
             for row in week.rows
