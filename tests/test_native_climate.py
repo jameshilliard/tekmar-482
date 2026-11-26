@@ -20,34 +20,13 @@ from tekmar_482 import (
 from tekmar_482.cli import build_parser
 from tekmar_482.cli_status import climate_fields
 from tekmar_482.raw import RawDispatcher
+from tests.native_fixtures import TEST_PATH as _PATH
+from tests.native_fixtures import block, frame, identity
 
 if TYPE_CHECKING:
     from collections.abc import Callable
 
-_PATH = NativePath(3, 0x35, 7)
 _HOST = NativeAddress(0, 0)
-
-
-def frame(
-    mid: int,
-    data: bytes,
-    path: NativePath = _PATH,
-    *,
-    stamp: int = 1,
-) -> NativeFrame:
-    return NativeFrame(
-        path.port,
-        stamp,
-        NativeMessage(mid, path.address, data).to_bytes(),
-    )
-
-
-def block(b: int, mask_and_data: bytes, path: NativePath = _PATH) -> NativeFrame:
-    return frame(0x2E7, b.to_bytes(2, "little") + mask_and_data, path)
-
-
-def identity(number: int = 100103, z: int = 1, path: NativePath = _PATH) -> NativeFrame:
-    return block(0, b"\x3f" + number.to_bytes(3, "little") + bytes([0, 0, z]), path)
 
 
 def air(flags: int, temp: int = 0x600, path: NativePath = _PATH) -> NativeFrame:

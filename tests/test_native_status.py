@@ -72,7 +72,7 @@ class NativeStatusTests(unittest.IsolatedAsyncioTestCase):
         self.capture(0x17E, "19 01 990001 230001")  # Extension is not a pair.
         first = self.capture(0x17E, "19 02 220101 220201")
         self.result(TxStatus.FAILED, FailureReason.NO_ACK)
-        self.capture(0x17E, "19 01 220301")  # Repeats a key already received.
+        updated = self.capture(0x17E, "19 01 220301")
         last = self.capture(
             0x17E,
             "19 02 190001 230101",
@@ -80,7 +80,7 @@ class NativeStatusTests(unittest.IsolatedAsyncioTestCase):
         )
         batch = await task
         assert batch.answered and batch.complete and not batch.missing_keys
-        assert batch.reports == (first, last) and batch.expected_count == 3
+        assert batch.reports == (updated, last) and batch.expected_count == 3
         assert batch.covered == {0x19, 0x22, 0x23}
         assert batch.tx_result and batch.tx_result.reason is FailureReason.NO_ACK
         assert (

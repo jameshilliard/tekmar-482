@@ -8,12 +8,13 @@ from typing import TYPE_CHECKING
 
 from ._native_payloads import SnowmeltBlock
 from ._native_payloads.products import AVAILABILITY_FIELDS, block_selectors
-from ._native_payloads.queries import NativeStatusQuery, SnowmeltRole, StatusRequest
+from ._native_payloads.queries import NativeStatusQuery, StatusRequest
 from .constants import TN4_PORTS
 from .native import NativeAddress, NativeBlockQuery, NativeTargets
 from .native_discovery import NativeInventory
 from .native_schedule import ScheduleDirectory
 from .native_sensors import ThermostatSensorMonitor
+from .native_state import NativeState
 from .raw import RejectReason, TxStatus
 
 if TYPE_CHECKING:
@@ -22,6 +23,7 @@ if TYPE_CHECKING:
     from ._native_payloads.products import NativeProduct
     from .native_discovery import NativeDevice
     from .native_sensors import SensorObservation
+    from .native_snowmelt import NativeSnowmelt
     from .native_status import NativeStatusBatch
     from .raw import BridgeStream, NativeBlockBatch
 
@@ -42,6 +44,18 @@ class NativeSnapshot:
     def thermostat_sensors(self) -> tuple[SensorObservation, ...]:
         """Interpret each identified thermostat's sensor replies without more I/O."""
         return ThermostatSensorMonitor.from_batches(self.blocks).devices
+
+    @property
+    def snowmelt_devices(self) -> tuple[NativeSnowmelt, ...]:
+        """Merge fresh block and keyed replies without reordering a source's samples."""
+        state = NativeState()
+        for batch in self.blocks:
+            for frame in batch.reports:
+                state.observe(frame)
+        for status in self.statuses:
+            for frame in status.reports:
+                state.observe(frame)
+        return state.snowmelt_devices
 
 
 @dataclass(slots=True)
@@ -232,7 +246,7 @@ def _status_queries(
     *,
     include_line_status: bool,
 ) -> dict[int, list[tuple[NativeAddress | None, NativeStatusQuery]]]:
-    configs: dict[tuple[int, int, int], dict[str, str | float | int]] = {}
+    state = NativeState()
     busy: set[int] = set()
     active: set[int] = set()
     for batch in batches:
@@ -250,28 +264,14 @@ def _status_queries(
             SnowmeltBlock.SENSOR_ID,
         }:
             for frame in batch.reports:
-                path = (frame.port, frame.subnet, frame.node & 31)
-                configs.setdefault(path, {}).update(frame.decoded)
+                state.observe(frame)
     ports: dict[int, list[tuple[NativeAddress | None, NativeStatusQuery]]] = {}
-    for (port, subnet, node), fields in configs.items():
-        application = fields.get("application_mode")
+    for device in state.snowmelt_devices:
         if (
-            port in busy
-            or fields.get("family") != "snowmelt_control"
-            or not isinstance(application, int)
+            device.path.port not in busy
+            and (query := device.status_query()) is not None
         ):
-            continue
-        try:
-            role = SnowmeltRole.for_application(application)
-            number = fields.get(
-                "sensor_id" if role is SnowmeltRole.SENSOR else "zone_id",
-            )
-            if not isinstance(number, int):
-                continue
-            query = NativeStatusQuery.for_snowmelt_device(application, number)
-        except ValueError:
-            continue  # Unknown application or unconfigured address, not a target.
-        ports.setdefault(port, []).append((NativeAddress(subnet, node), query))
+            ports.setdefault(device.path.port, []).append((device.path.address, query))
     if include_line_status:
         for port in active - busy:
             ports.setdefault(port, []).extend(

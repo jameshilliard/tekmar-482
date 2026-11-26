@@ -37,6 +37,14 @@ from ._native_payloads.sensors import (
     SensorSlot,
     ThermostatSensors,
 )
+from ._native_payloads.snowmelt import (
+    SnowmeltAddress,
+    SnowmeltApplication,
+    SnowmeltOperatingState,
+    SnowmeltPair,
+    SnowmeltReport,
+    WaterDetection,
+)
 from ._native_payloads.water import (
     DhwStatus,
     HeatSource,
@@ -175,9 +183,26 @@ from .native_sensors import (
     read_thermostat_sensors,
 )
 from .native_snapshot import NativeSnapshot, read_native_devices, read_native_snapshot
+from .native_snow_control import (
+    SnowmeltGroupResult,
+    SnowmeltGroupStatus,
+    SnowmeltOperation,
+)
+from .native_snowmelt import (
+    NativeSnowmelt,
+    SnowmeltChannel,
+    SnowmeltConfiguration,
+    SnowmeltSample,
+)
 from .native_state import NativeClimate, NativePath, NativeState
 from .native_status import NativeStatusBatch, read_snowmelt_status
-from .native_watch import ClimateChange, ClimateWatchResult, watch_climate
+from .native_watch import (
+    ClimateChange,
+    ClimateWatchResult,
+    NativeWatchResult,
+    watch_climate,
+    watch_native,
+)
 from .native_water import WaterMonitor, WaterRead, WaterSample, WaterSource, read_water
 from .native_write import NativeWriteResult, NativeWriteStatus
 from .packet import (
@@ -385,11 +410,13 @@ __all__ = [
     "NativeProduct",
     "NativeScene",
     "NativeSnapshot",
+    "NativeSnowmelt",
     "NativeState",
     "NativeStatusBatch",
     "NativeStatusQuery",
     "NativeTargets",
     "NativeTransmitError",
+    "NativeWatchResult",
     "NativeWeeklySchedule",
     "NativeWriteResult",
     "NativeWriteStatus",
@@ -438,11 +465,22 @@ __all__ = [
     "SetpointDeviceRuntime",
     "SetpointGroupFields",
     "SetpointValues",
+    "SnowmeltAddress",
+    "SnowmeltApplication",
     "SnowmeltBlock",
+    "SnowmeltChannel",
+    "SnowmeltConfiguration",
     "SnowmeltData",
+    "SnowmeltGroupResult",
+    "SnowmeltGroupStatus",
     "SnowmeltKey",
+    "SnowmeltOperatingState",
+    "SnowmeltOperation",
+    "SnowmeltPair",
+    "SnowmeltReport",
     "SnowmeltRole",
     "SnowmeltRuntime",
+    "SnowmeltSample",
     "SnowmeltSetpoint",
     "StatusRequest",
     "SystemSchedule",
@@ -478,6 +516,7 @@ __all__ = [
     "UnknownFieldError",
     "UnknownMethodError",
     "UnknownServiceError",
+    "WaterDetection",
     "WaterMonitor",
     "WaterRead",
     "WaterSample",
@@ -534,5 +573,6 @@ __all__ = [
     "service_name",
     "setback_from_value",
     "watch_climate",
+    "watch_native",
     "write_scene_response",
 ]

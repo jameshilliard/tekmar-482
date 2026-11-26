@@ -6,11 +6,12 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 from ._native_payloads import SnowmeltBlock
-from ._native_payloads.queries import NativeStatusQuery, SnowmeltRole
+from ._native_payloads.queries import NativeStatusQuery, SnowmeltRole, StatusRequest
 from .exceptions import TekmarError
 from .native import NativeBlockQuery
 
 if TYPE_CHECKING:
+    from ._native_payloads.snowmelt import SnowmeltPair
     from .native import NativeAddress, NativeFrame
     from .raw import BridgeStream, TxResult
 
@@ -43,6 +44,16 @@ class NativeStatusBatch:
             key for key in dict.fromkeys(self.query.keys) if key not in self.covered
         )
 
+    def snowmelt_pair(self, key: int) -> SnowmeltPair | None:
+        """Return the newest reported word, including an unknown or repeated key."""
+        if self.query.kind is StatusRequest.SNOWMELT:
+            for frame in reversed(self.reports):
+                if (report := frame.snowmelt_report) is not None:
+                    for pair in reversed(report.pairs):
+                        if pair.key == key:
+                            return pair
+        return None
+
 
 @dataclass(slots=True)
 class StatusCollector:
@@ -51,6 +62,7 @@ class StatusCollector:
     reports: list[NativeFrame] = field(default_factory=list, init=False)
     covered: set[int] = field(default_factory=set, init=False)
     expected_count: int | None = field(default=None, init=False)
+    _snow_latest: dict[int, NativeFrame] = field(default_factory=dict, init=False)
 
     def observe(self, frame: NativeFrame) -> bool:
         if self.peer is not None and (
@@ -67,7 +79,15 @@ class StatusCollector:
             self.expected_count = part.expected_count
         elif self.expected_count != part.expected_count:
             self.expected_count = 0  # Conflicting discovery counts are not completion.
-        if not part.items.issubset(self.covered):
+        if self.query.kind is StatusRequest.SNOWMELT:
+            # Keep the newest report for every requested key, in arrival order.
+            # A partial reply may revise an earlier value before the final key.
+            self._snow_latest.update(dict.fromkeys(part.items, frame))
+            active = {id(f) for f in self._snow_latest.values()}
+            self.reports = [f for f in self.reports if id(f) in active]
+            self.reports.append(frame)
+            self.covered.update(part.items)
+        elif not part.items.issubset(self.covered):
             self.reports.append(frame)
             self.covered.update(part.items)
         return self.expected_count > 0 and len(self.covered) == self.expected_count

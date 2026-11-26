@@ -118,6 +118,11 @@ class WaterMonitor:
             ),
         )
 
+    def source(self, port: int, address: NativeAddress) -> WaterSource | None:
+        return self._sources.get(
+            (port, NativeAddress(address.subnet, address.node & _NODE)),
+        )
+
     def _identity(self, path: _Path, frame: NativeFrame) -> bool:
         fields = frame.decoded
         if "truncated" in fields or fields.get("block_layout") == "ambiguous":

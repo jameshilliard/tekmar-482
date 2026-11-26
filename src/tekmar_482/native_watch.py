@@ -1,13 +1,15 @@
-"""Continuous native thermostat observations with optional event-driven setup reads."""
+"""One native capture reader with event-driven reads on independent physical ports."""
 
 from __future__ import annotations
 
 import asyncio
+from collections import OrderedDict
 from dataclasses import dataclass
 from math import isfinite
 from typing import TYPE_CHECKING
 
 from ._native_payloads.climate import AIR_MASTER, AIR_MEMBER, HEATING_SETUP, MODE_BLOCKS
+from ._snow_watch import SnowRead, SnowWatch
 from .native import NativeAddress, NativeBlockQuery, NativeFrame
 from .native_state import TAKING_ADDRESS, NativePath, NativeState
 from .raw import CaptureGap
@@ -17,12 +19,13 @@ if TYPE_CHECKING:
 
     from ._native_payloads.climate import AirReading, AirStatus
     from .native_state import NativeClimate
+    from .native_status import NativeStatusBatch
     from .raw import BridgeStream, CaptureRecord, NativeBlockBatch
 
 _HOST = NativeAddress(0, 0)
 _UPDATE = 0x2DF
 _UPDATE_HEADER = 4
-type _Job = tuple[NativePath, int]
+type _Job = tuple[NativePath, int | SnowRead]
 type _ChannelHint = tuple[int, int] | None
 type _ModeHint = tuple[int, _ChannelHint, _ChannelHint]
 
@@ -52,25 +55,33 @@ class ClimateWatchResult:
     dropped: int
 
 
+@dataclass(frozen=True, slots=True)
+class NativeWatchResult:
+    state: NativeState
+    reads: int
+    latest_blocks: tuple[NativeBlockBatch, ...]
+    latest_statuses: tuple[NativeStatusBatch, ...]
+
+
 class _PortQueue:
     def __init__(self) -> None:
-        self.jobs: dict[_Job, None] = {}
+        self.jobs: OrderedDict[_Job, None] = OrderedDict()
         self.ready = asyncio.Event()
 
-    def add(self, path: NativePath, block: int) -> None:
+    def add(self, path: NativePath, block: int | SnowRead) -> None:
         self.jobs[path, block] = None
+        if isinstance(block, SnowRead):
+            self.jobs.move_to_end((path, block), last=False)
         self.ready.set()
 
     def discard(self, path: NativePath) -> None:
-        self.jobs = {job: None for job in self.jobs if job[0] != path}
+        self.jobs = OrderedDict.fromkeys(job for job in self.jobs if job[0] != path)
 
     async def take(self) -> _Job:
         while not self.jobs:
             self.ready.clear()
             await self.ready.wait()
-        job = next(iter(self.jobs))
-        del self.jobs[job]
-        return job
+        return self.jobs.popitem(last=False)[0]
 
 
 class _Watch:
@@ -80,10 +91,15 @@ class _Watch:
         *,
         active: bool,
         on_change: Callable[[ClimateChange], None] | None,
+        include_snow: bool = False,
+        on_native: Callable[[NativePath, NativeState], None] | None = None,
     ) -> None:
         self.state = NativeState(paths)
         self.current: dict[NativePath, NativeClimate] = {}
-        self.latest: dict[_Job, NativeBlockBatch] = {}
+        self.latest: dict[tuple[NativePath, int], NativeBlockBatch] = {}
+        self.statuses: dict[tuple[NativePath, SnowRead], NativeStatusBatch] = {}
+        self.snow = SnowWatch(self.state, self._queue) if include_snow else None
+        self.on_native = on_native
         self.count = 0
         self.epochs: dict[NativePath, int] = {}
         self.retry_hints: dict[_Job, _ModeHint] = {}
@@ -93,11 +109,13 @@ class _Watch:
         for p in sorted(paths or ()):
             self._queue(p, 0)
 
-    def _queue(self, path: NativePath, block: int) -> None:
+    def _queue(self, path: NativePath, block: int | SnowRead) -> None:
         if (q := self.queues.get(path.port)) is not None:
             q.add(path, block)
 
     def _invalidate(self, path: NativePath) -> None:
+        if self.snow is not None:
+            self.snow.discard(path)
         if queue := self.queues.get(path.port):
             queue.discard(path)
             self.epochs[path] = self.epochs.get(path, 0) + 1
@@ -106,12 +124,23 @@ class _Watch:
             self.latest = {
                 job: batch for job, batch in self.latest.items() if job[0] != path
             }
+            for read in SnowRead:
+                self.statuses.pop((path, read), None)
 
     def _updated(self, path: NativePath) -> None:
         before = self.current.get(path)
         current = self.state.climate(path)
-        if current and before and current.identity.merge(before.identity) is None:
+        old_snow = self.snow.current.get(path) if self.snow is not None else None
+        previous = (
+            before.identity if before else (old_snow.identity if old_snow else None)
+        )
+        identity = self.state.identity(path)
+        if previous is not None and (
+            identity is None or identity.merge(previous) is None
+        ):
             self._invalidate(path)
+            if identity is None:
+                self._queue(path, 0)
         if current is not None:
             self.current[path] = current
             if before is None or before.identity != current.identity:
@@ -126,10 +155,14 @@ class _Watch:
             ):
                 self._queue(path, HEATING_SETUP)
         elif before is not None:
-            self._invalidate(path)
             self.current.pop(path, None)
         if self.on_change is not None and current != before:
             self.on_change(ClimateChange(path, current))
+        if self.snow is not None and self.snow.changed(path):
+            for read in SnowRead:
+                self.statuses.pop((path, read), None)
+        if self.on_native is not None:
+            self.on_native(path, self.state)
 
     def observe(self, record: CaptureRecord) -> None:
         changed = self.state.observe(record)
@@ -139,6 +172,8 @@ class _Watch:
             paths = (
                 self.paths if isinstance(record, CaptureGap) and self.paths else changed
             )
+            if self.snow is not None and (paths or isinstance(record, CaptureGap)):
+                self.snow.clear_hints()
             for path in paths:
                 self._invalidate(path)
                 if (
@@ -147,6 +182,8 @@ class _Watch:
                 ):
                     self.on_change(ClimateChange(path, None))
                 self._queue(path, 0)
+                if self.on_native is not None:
+                    self.on_native(path, self.state)
             return
         if isinstance(record, NativeFrame) and record.message_id == _UPDATE:
             # A block update names its destination, not its author. Only a
@@ -155,12 +192,11 @@ class _Watch:
             if len(data) > _UPDATE_HEADER:
                 block = int.from_bytes(data[2:4], "little")
                 target = NativePath(record.port, data[0], data[1] & 31)
-                if (
-                    target in self.current
-                    and block in MODE_BLOCKS
-                    and "truncated" not in record.decoded
-                ):
-                    self._queue(target, block)
+                if "truncated" not in record.decoded:
+                    if target in self.current and block in MODE_BLOCKS:
+                        self._queue(target, block)
+                    if self.snow is not None:
+                        self.snow.updated_block(target, block)
             return
         for path in changed:
             self._updated(path)
@@ -169,6 +205,17 @@ class _Watch:
             AIR_MASTER,
         ):
             self._retry_on_air(record)
+        if (
+            self.snow is not None
+            and isinstance(record, NativeFrame)
+            and record.port in self.queues
+        ):
+            self.snow.observe(
+                record,
+                self.latest,
+                attempted=(NativePath.from_frame(record), SnowRead.MISSING)
+                in self.statuses,
+            )
 
     def _retry_on_air(self, frame: NativeFrame) -> None:
         path = NativePath.from_frame(frame)
@@ -193,42 +240,58 @@ class _Watch:
     ) -> None:
         while True:
             path, block = await queue.take()
-            if block and path not in self.current:
-                continue
             epoch = self.epochs.get(path, 0)
-            batch = await stream.read_block_group(
-                path.port,
-                NativeBlockQuery(path.address, block),
-                source=source,
-                timeout=timeout,
-                wait_for_edits=True,
-            )
+            if isinstance(block, SnowRead):
+                if self.snow is None or (query := self.snow.query(path, block)) is None:
+                    continue
+                route = self.snow.routes.get(path)
+                answer = await stream.read_status(
+                    path.port,
+                    query,
+                    source=source,
+                    peer=path.address,
+                    timeout=timeout,
+                    wait_for_edits=True,
+                )
+                if epoch == self.epochs.get(path, 0) and route == self.snow.routes.get(
+                    path,
+                ):
+                    self.statuses[path, block] = answer
+                result = answer.tx_result
+            else:
+                if (
+                    block
+                    and path not in self.current
+                    and (self.snow is None or path not in self.snow.current)
+                ):
+                    continue
+                batch = await stream.read_block_group(
+                    path.port,
+                    NativeBlockQuery(path.address, block),
+                    source=source,
+                    timeout=timeout,
+                    wait_for_edits=True,
+                )
+                if epoch == self.epochs.get(path, 0):
+                    self.latest[path, block] = batch
+                result = batch.tx_result
             self.count += 1
-            if epoch == self.epochs.get(path, 0):
-                self.latest[path, block] = batch
-            if batch.tx_result is None:
+            if result is None:
                 await stream.wait_transmit_idle(path.port)
 
 
-async def watch_climate(
+async def _run_watch(
     stream: BridgeStream,
-    paths: Iterable[NativePath] | None = None,
+    watch: _Watch,
     *,
-    source: NativeAddress | None = _HOST,
-    duration: float | None = None,
-    timeout: float = 20,
-    on_change: Callable[[ClimateChange], None] | None = None,
-    on_record: Callable[[CaptureRecord], None] | None = None,
-) -> ClimateWatchResult:
-    """Own capture until deadline or cancellation; coordinate reads with verified edits.
-
-    Only explicit active paths are probed. A passive watcher sends nothing.
-    Callbacks run in arrival order and must not block. Only the last read per
-    path/block is retained; no retry is triggered by silence or a link ACK.
-    """
-    selected = None if paths is None else frozenset(paths)
+    source: NativeAddress | None,
+    duration: float | None,
+    timeout: float,
+    on_record: Callable[[CaptureRecord], None] | None,
+) -> None:
+    selected = watch.paths
     if source is not None and (not selected or any(not p.node for p in selected)):
-        msg = "active climate observation requires explicit addressable device paths"
+        msg = "active observation requires explicit addressable device paths"
         raise ValueError(msg)
     if (
         not isfinite(timeout)
@@ -237,7 +300,6 @@ async def watch_climate(
     ):
         msg = "expected finite positive response timeout and observation duration"
         raise ValueError(msg)
-    watch = _Watch(selected, active=source is not None, on_change=on_change)
 
     async def receive() -> None:
         while True:
@@ -264,6 +326,73 @@ async def watch_climate(
         for task in tasks:
             task.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
+
+
+async def watch_native(
+    stream: BridgeStream,
+    paths: Iterable[NativePath] | None = None,
+    *,
+    source: NativeAddress | None = _HOST,
+    duration: float | None = None,
+    timeout: float = 20,
+    on_change: Callable[[NativePath, NativeState], None] | None = None,
+    on_record: Callable[[CaptureRecord], None] | None = None,
+) -> NativeWatchResult:
+    """Observe selected paths and read identified thermostat and snowmelt setup.
+
+    Synchronous callbacks may inspect immutable snapshots in the current state.
+    Passive mode (source=None) never sends. Use a new watch on each connection.
+    """
+    selected = None if paths is None else frozenset(paths)
+    watch = _Watch(
+        selected,
+        active=source is not None,
+        on_change=None,
+        include_snow=True,
+        on_native=on_change,
+    )
+    await _run_watch(
+        stream,
+        watch,
+        source=source,
+        duration=duration,
+        timeout=timeout,
+        on_record=on_record,
+    )
+    return NativeWatchResult(
+        watch.state,
+        watch.count,
+        tuple(watch.latest.values()),
+        tuple(watch.statuses.values()),
+    )
+
+
+async def watch_climate(
+    stream: BridgeStream,
+    paths: Iterable[NativePath] | None = None,
+    *,
+    source: NativeAddress | None = _HOST,
+    duration: float | None = None,
+    timeout: float = 20,
+    on_change: Callable[[ClimateChange], None] | None = None,
+    on_record: Callable[[CaptureRecord], None] | None = None,
+) -> ClimateWatchResult:
+    """Own capture until deadline or cancellation; coordinate reads with verified edits.
+
+    Only explicit active paths are probed. A passive watcher sends nothing.
+    Callbacks run in arrival order and must not block. Only the last read per
+    path/block is retained; no retry is triggered by silence or a link ACK.
+    """
+    selected = None if paths is None else frozenset(paths)
+    watch = _Watch(selected, active=source is not None, on_change=on_change)
+    await _run_watch(
+        stream,
+        watch,
+        source=source,
+        duration=duration,
+        timeout=timeout,
+        on_record=on_record,
+    )
     thermostats = watch.state.thermostats
     expected = set(selected) if selected is not None else {t.path for t in thermostats}
     confirmed = {t.path for t in thermostats if t.setup.mode_raw is not None}

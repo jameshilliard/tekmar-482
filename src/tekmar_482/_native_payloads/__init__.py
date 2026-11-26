@@ -18,49 +18,12 @@ from .line import ACCESS_STATUS, CLOCK_REPORT, GROUP_REPORT, GROUP_UPDATE, ZONE_
 from .products import identify_product
 from .scenes import SCENE_REPORT, SCENE_RESPONSE_FIELDS, SceneReport, SceneResponse
 from .schedules import DAY_NAMES, SINGLE_WEEK, DailyEvents, ScheduleBinding, ScheduleCycle, ScheduleEvent
+from .snowmelt import SNOW_REPORT, SNOW_REQUEST, SnowmeltApplication, SnowmeltReport
 from .water import DHW_STATUS, MASTER_PRESENT, MASTER_STATUS, PLANT_LOOP_STATUS, TANK_STATUS, DhwStatus, HeatSource, LoopStatus, TankStatus
 
 
 def subnet(value: int) -> Fields:
     return {"water_subnet": value, "water_bus": value & 7, "water_control": value >> 3}
-
-
-SNOW_WORDS = {
-    0x19: "water_detect_state", 0x1a: "heat_sequence_state",
-    0x1c: "warm_weather_shutdown_state", 0x1d: "cold_weather_cutoff_state",
-    0x1e: "zone_type", 0x1f: "electric_off_time_15s_ticks",
-    0x20: "zone_id", 0x21: "sensor_flags", 0x25: "melt_group_id", 0x26: "storm_group_id",
-    0x27: "boiler_output_raw", 0x28: "mix_output_raw", 0x29: "pwm_output_raw",
-    0x2a: "system_pump_contacts", 0x2b: "alert_relay_contacts",
-    0x2f: "keep_alive", 0x30: "melting_time_minutes",
-}
-SNOW_TEMPERATURES = {
-    0x22: "slab_temperature", 0x23: "slab_setpoint", 0x24: "edge_temperature",
-    0x2c: "return_temperature", 0x2d: "supply_temperature", 0x2e: "supply_target",
-}
-SNOW_OPERATING_STATES = {1: "off", 2: "idle", 3: "storm", 4: "melting"}
-SNOW_APPLICATION_MODES = ("pwm", "boiler", "mixing", "electric", "sensor_only")
-
-
-def snowmelt(r: Reader) -> Fields:
-    address, count = r.take(2)
-    fields: Fields = {"source_type": address & 7, "source_id": address >> 3, "pairs": count}
-    for index in range(count):
-        key, value = r.byte(), r.word()
-        prefix = f"pair{index}_"
-        fields[prefix + "key"] = f"0x{key:02x}"
-        if key in SNOW_TEMPERATURES:
-            fields.update(temp(prefix + SNOW_TEMPERATURES[key], value))
-        elif key == 0x1b:
-            fields[prefix + "operating_state"] = value >> 8
-            fields[prefix + "operating_substate"] = value & 0xff
-            if (state := SNOW_OPERATING_STATES.get(value >> 8)) is not None:
-                fields[prefix + "operating_state_name"] = state
-        elif 1 <= key <= 24:
-            fields[prefix + "command_status"] = value
-        else:
-            fields[prefix + SNOW_WORDS.get(key, "value_raw")] = value
-    return fields
 
 
 def io_change(r: Reader) -> Fields:
@@ -243,8 +206,8 @@ def fixed_value(block: int, name: str, value: int) -> Fields:
     elif block == 0x37 and value < 9:
         fields["override_state_name"] = (*SETBACK[:7], "auto_4", "auto_2")[value]
     elif (block == SnowmeltBlock.APPLICATION_MODE and name == "application_mode"
-          and value < len(SNOW_APPLICATION_MODES)):
-        fields["application_mode_name"] = SNOW_APPLICATION_MODES[value]
+          and value < len(SnowmeltApplication)):
+        fields["application_mode_name"] = SnowmeltApplication(value).name.lower()
     return fields
 
 
@@ -495,7 +458,7 @@ DECODERS: dict[int, tuple[str, Callable[[Reader], Fields]]] = {
     ZONE_ADJUSTMENT: ("ZoneSynchAdjustment", octets("synch_cycle", "purging", "target_mode")),
     0x011: ("ZoneSynchQuery", octets()),
     TANK_STATUS: ("TankStatus", lambda r: TankStatus.read(r).fields()),
-    0x17f: ("SnowmeltZoneStatusRequest", snow_request),
+    SNOW_REQUEST: ("SnowmeltZoneStatusRequest", snow_request),
     0x1f3: ("IORequestResponse", io_change),
     0x1f4: ("IORequest", octets("subnet_id", "node_id", "channel_id")),
     0x1f5: ("IODiscoverReport", io_discovery),
@@ -540,7 +503,7 @@ DECODERS: dict[int, tuple[str, Callable[[Reader], Fields]]] = {
         r.byte(), ("previous_node", 0, 31), ("locked", 5, 1))),
     0x3ef: ("AddressTaken", octets()),
     MASTER_PRESENT: ("MasterPresent", master_present),
-    0x17e: ("SnowmeltZoneStatus", snowmelt),
+    SNOW_REPORT: ("SnowmeltZoneStatus", lambda r: SnowmeltReport.read(r).fields()),
     0x1f2: ("IOChangeReport", io_change),
     0x22f: ("SetpointStatus", setpoint),
     DHW_STATUS: ("DHWStatus", lambda r: DhwStatus.read(r).fields()),

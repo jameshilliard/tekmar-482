@@ -461,6 +461,61 @@ and a link ACK without a report never constitute a complete answer.
 Partial data are available even when the CLI exits with status 1. These
 commands do not change device settings or enable a snowmelt group.
 
+**Watch several devices on one connection.** `watch-native` can watch an
+identified snowmelt controller and thermostats together. It reads identity
+and configuration on each selected path. For a snowmelt control it then
+requests the missing status keys for that application, while continuing to
+receive other devices' reports. It does not poll on a timer.
+
+```bash
+tekmar-482 watch-native --device 0 0x14 6 --device 2 0x12 3 --duration 60 --tcp 192.0.2.10:3001 --json
+```
+
+The library equivalent is `await watch_native(stream, paths, on_change=callback)`.
+The synchronous callback receives `(path, state)`. Use
+`state.snowmelt(path)`, `state.climate(path)` or `state.water_source(path)` to
+obtain an immutable snapshot. `source=None` (CLI: `--passive`) sends no
+requests; link ACKs remain off unless explicitly enabled on a port. A
+finite active watch lists missing identities, modes and snowmelt keys and
+returns status 1 for incomplete coverage.
+
+A single 654 can report a zone **and** a sensor. `device.channels` keeps
+their words separate, even if both use the same number. `device.primary`
+selects the configured zone in a control application, or the configured
+sensor in sensor-only mode. It is absent until that endpoint reports.
+`channel.operating_state`, `water_detection` and `pump_on` are typed
+readings. Use `channel.raw(key)` for any reported word, including unknown
+keys. A key has its own gateway receive timestamp; repeated keys use the
+latest wire occurrence. The full ordered pairs remain on
+`frame.snowmelt_report`. `snapshot.snowmelt_devices`, `read-device` and
+`dump` expose the same interpretation. A new occupant, an address change
+or a capture gap invalidates the old state.
+
+**Remote Melt and Storm.** The [654 manual](https://www.watts.com/dfsmedia/0533dbba17714b1ab581ab07a4cbb521/81803-source/638820695340000000/654-d-03.pdf)
+specifies a setpoint-group enable, not a write to an individual zone's
+operating state. Preview the actual group and frame first:
+
+```bash
+tekmar-482 set-snowmelt-group 0 0x14 6 melt on --tcp 192.0.2.10:3001 --json
+```
+
+The command reads the product, application, zone and **both** assignments
+from the controller. To broadcast, explicitly add `--expect-group N --confirm`.
+This can affect **every device using that group**, not just the selected
+zone. Missing, changed, ambiguous or sensor-only bindings cannot transmit.
+`await stream.set_snowmelt_group(port, address, SnowmeltOperation.MELT,
+enabled=True, source=source)` also defaults to preview. An intentional
+send requires `preview=False, expected_group=N`.
+
+After sending once, the client requests operating state from that zone.
+A link ACK, group report, or another sensor's report is not confirmation.
+The result distinguishes a reported state, a different operation, an
+unanswered read and an unknown send outcome. A local demand can keep a
+zone melting after a group is disabled. The CLI exits nonzero if the
+observed operation does not match, and never retries the broadcast. During
+a watch, a change in the configured group's enable on the observed port
+triggers an operating-state read, not an optimistic mode change.
+
 ### Line announcements
 
 These commands preview the exact native frame offline. Sending requires

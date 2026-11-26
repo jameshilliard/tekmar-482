@@ -5,11 +5,12 @@ from enum import IntEnum
 
 from . import decode_payload
 from .line import ACCESS_STATUS
+from .snowmelt import SNOW_REPORT, SNOW_REQUEST, SnowmeltAddress, SnowmeltApplication, SnowmeltKey as SnowmeltKey, SnowmeltRole as SnowmeltRole
 
 
 class StatusRequest(IntEnum):
     ZONE_SYNC = 0x011
-    SNOWMELT = 0x17f
+    SNOWMELT = SNOW_REQUEST
     IO_CHANNEL = 0x1f4
     IO_DISCOVERY = 0x1f6
     GATEWAY_ACCESS = ACCESS_STATUS
@@ -25,7 +26,7 @@ class StatusRequest(IntEnum):
 
 
 _REPLIES = {
-    StatusRequest.ZONE_SYNC: 0x010, StatusRequest.SNOWMELT: 0x17e,
+    StatusRequest.ZONE_SYNC: 0x010, StatusRequest.SNOWMELT: SNOW_REPORT,
     StatusRequest.IO_CHANNEL: 0x1f3, StatusRequest.IO_DISCOVERY: 0x1f5,
     StatusRequest.WWSD: 0x30f, StatusRequest.CLOCK: 0x31f,
     StatusRequest.HUMIDITY: 0x323, StatusRequest.OUTDOOR: 0x32f,
@@ -33,59 +34,6 @@ _REPLIES = {
     StatusRequest.GATEWAY_ACCESS: ACCESS_STATUS,
 }
 _WIDTHS = {StatusRequest.IO_CHANNEL: 3, StatusRequest.IO_DISCOVERY: 2, StatusRequest.HUMIDITY: 5}
-
-
-class SnowmeltRole(IntEnum):
-    ZONE = 1
-    SENSOR = 2
-
-    @property
-    def maximum(self) -> int:
-        return 12 if self is SnowmeltRole.ZONE else 24
-
-    @classmethod
-    def for_application(cls, application: int) -> "SnowmeltRole":
-        if application not in _APPLICATION_KEYS:
-            raise ValueError(f"unknown snowmelt application {application}")
-        return cls.SENSOR if application == 4 else cls.ZONE
-
-
-class SnowmeltKey(IntEnum):
-    WATER_DETECTION = 0x19
-    HEAT_SEQUENCE = 0x1a
-    OPERATING_STATE = 0x1b
-    WARM_WEATHER_SHUTDOWN = 0x1c
-    COLD_WEATHER_CUTOFF = 0x1d
-    ZONE_TYPE = 0x1e
-    ELECTRIC_OFF_TIME = 0x1f
-    ZONE_ID = 0x20
-    SENSOR_FLAGS = 0x21
-    SLAB_TEMPERATURE = 0x22
-    SLAB_SETPOINT = 0x23
-    EDGE_TEMPERATURE = 0x24
-    MELT_GROUP = 0x25
-    STORM_GROUP = 0x26
-    BOILER_OUTPUT = 0x27
-    MIX_OUTPUT = 0x28
-    PWM_OUTPUT = 0x29
-    SYSTEM_PUMP = 0x2a
-    ALERT_RELAY = 0x2b
-    RETURN_TEMPERATURE = 0x2c
-    SUPPLY_TEMPERATURE = 0x2d
-    SUPPLY_TARGET = 0x2e
-    KEEP_ALIVE = 0x2f
-    MELTING_TIME = 0x30
-
-
-# SnowmeltControl.stale_keys_to_request: every application includes water
-# detection and slab temperature. A sensor-only installation needs just those.
-_APPLICATION_KEYS = {
-    0: bytes.fromhex("19 22 1b 23 2d 2a 29"),
-    1: bytes.fromhex("19 22 1b 23 2d 2a 2e 27"),
-    2: bytes.fromhex("19 22 1b 23 2d 2a 2e 28"),
-    3: bytes.fromhex("19 22 1b 23 29"),
-    4: bytes.fromhex("19 22"),
-}
 
 
 @dataclass(frozen=True, slots=True)
@@ -118,16 +66,15 @@ class NativeStatusQuery:
 
     @classmethod
     def snowmelt(cls, role: SnowmeltRole, number: int, keys: bytes) -> "NativeStatusQuery":
-        if not isinstance(role, SnowmeltRole) or not 1 <= number <= role.maximum:
-            raise ValueError("expected configured zone 1..12 or sensor 1..24")
+        address = SnowmeltAddress(role, number)
         if not isinstance(keys, bytes) or not 1 <= len(keys) <= 61:
             raise ValueError("a snowmelt request needs 1..61 ordered keys")
-        return cls(StatusRequest.SNOWMELT, bytes([((number - 1) << 3) | role, len(keys)]) + keys)
+        return cls(StatusRequest.SNOWMELT, bytes([address.request_byte, len(keys)]) + keys)
 
     @classmethod
     def for_snowmelt_device(cls, application: int, number: int, keys: bytes | None = None) -> "NativeStatusQuery":
         role = SnowmeltRole.for_application(application)
-        return cls.snowmelt(role, number, _APPLICATION_KEYS[application] if keys is None else keys)
+        return cls.snowmelt(role, number, SnowmeltApplication(application).status_keys if keys is None else keys)
 
     @classmethod
     def gateway_access(cls) -> "NativeStatusQuery":

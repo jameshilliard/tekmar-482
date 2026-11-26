@@ -23,6 +23,7 @@ from .cli_line import (
     prepare_broadcast,
     send_broadcast,
 )
+from .cli_native_watch import snow_fields, snow_group_from_args, watch_all_from_args
 from .cli_schedule import (
     add_schedule_commands,
     schedule_change,
@@ -53,6 +54,7 @@ from .native_scene import write_scene_response
 from .native_schedule import read_weekly_schedule
 from .native_sensors import read_thermostat_sensors
 from .native_snapshot import read_native_snapshot
+from .native_snow_control import SnowmeltOperation
 from .native_state import NativeState
 from .native_water import read_water
 from .native_write import NativeWriteStatus
@@ -328,24 +330,7 @@ def _add_block_commands(
         parents=[parent],
         help="read the room statistics and sensor inputs of one native thermostat",
     )
-    group = subparsers.add_parser(
-        "set-device-group",
-        parents=[parent],
-        help="read a setpoint controller's assignment before broadcasting to its group",
-    )
-    _add_native_target(group)
-    group.add_argument("state", choices=("on", "off"))
-    group.add_argument(
-        "--expect-group",
-        type=int,
-        choices=GROUP_IDS,
-        help="group that may receive the command",
-    )
-    group.add_argument(
-        "--confirm",
-        action="store_true",
-        help="broadcast; default reads the assignment only",
-    )
+    _add_device_groups(subparsers, parent)
     write = subparsers.add_parser(
         "write-block",
         parents=[parent],
@@ -415,6 +400,41 @@ def _add_scene_commands(
         action="store_true",
         help="update and verify; default is preview",
     )
+
+
+def _add_device_groups(
+    subparsers: argparse._SubParsersAction[argparse.ArgumentParser],
+    parent: argparse.ArgumentParser,
+) -> None:
+    for name, detail in (
+        (
+            "set-device-group",
+            "read a setpoint controller's group assignment before broadcasting",
+        ),
+        (
+            "set-snowmelt-group",
+            "read a snowmelt zone's melt/storm assignment before broadcasting",
+        ),
+    ):
+        group = subparsers.add_parser(name, parents=[parent], help=detail)
+        _add_native_target(group)
+        if name == "set-snowmelt-group":
+            group.add_argument(
+                "operation",
+                choices=[op.name.lower() for op in SnowmeltOperation],
+            )
+        group.add_argument("state", choices=("on", "off"))
+        group.add_argument(
+            "--expect-group",
+            type=int,
+            choices=GROUP_IDS,
+            help="group that may receive the command",
+        )
+        group.add_argument(
+            "--confirm",
+            action="store_true",
+            help="broadcast; default reads the assignment only",
+        )
 
 
 def _add_native_target(parser: argparse.ArgumentParser) -> None:
@@ -573,16 +593,20 @@ def _endpoint(args: argparse.Namespace) -> GatewayEndpoint:
 async def _native(args: argparse.Namespace, stdout: TextIO) -> int:
     def emit(value: object) -> None:
         stdout.write((json.dumps(value) if args.json else str(value)) + "\n")
-        if args.command == "watch-climate":
+        if args.command in {"watch-climate", "watch-native"}:
             stdout.flush()
 
     if args.command in LINE_COMMANDS:
         return await _broadcast(args, emit)
-    if args.command == "watch-climate" and not args.device and not args.passive:
-        msg = "active watch-climate requires --device PORT SUBNET NODE"
+    if (
+        args.command in {"watch-native", "watch-climate"}
+        and not args.device
+        and not args.passive
+    ):
+        msg = f"active {args.command} requires --device PORT SUBNET NODE"
         raise CliError(msg)
     if (
-        args.command == "set-device-group"
+        args.command in {"set-device-group", "set-snowmelt-group"}
         and args.confirm
         and args.expect_group is None
     ):
@@ -617,13 +641,19 @@ async def _native(args: argparse.Namespace, stdout: TextIO) -> int:
             "read-sensors",
             "set-climate-mode",
             "set-device-group",
+            "set-snowmelt-group",
             "write-block",
             "scene-response",
             "read-schedule",
             "write-schedule",
         }:
             return await _native_addressed(bridge, args, emit)
-        elif args.command in {"read-status", "watch-climate", "read-water"}:
+        elif args.command in {
+            "read-status",
+            "watch-native",
+            "watch-climate",
+            "read-water",
+        }:
             return await _native_status(bridge, args, emit)
         elif args.command == "send":
             async with bridge.stream(diagnostics=False) as stream:
@@ -659,6 +689,8 @@ async def _native_status(
         (args.port,) if getattr(args, "ack", False) else getattr(args, "ack_port", ())
     )
     async with bridge.stream(ack_ports=ack_ports, diagnostics=False) as stream:
+        if args.command == "watch-native":
+            return await watch_all_from_args(stream, args, emit)
         if args.command == "watch-climate":
             return await watch_from_args(stream, args, emit)
         if args.command == "read-status":
@@ -726,6 +758,8 @@ def _emit_derived(snapshot: NativeSnapshot, emit: Callable[[object], None]) -> N
         emit({"weekly_schedule": schedule_fields(week)})
     for device in snapshot.thermostat_sensors:
         emit({"thermostat_sensors": sensor_fields(device)})
+    for snow in snapshot.snowmelt_devices:
+        emit({"snowmelt": snow_fields(snow)})
 
 
 async def _native_addressed(
@@ -741,6 +775,8 @@ async def _native_addressed(
     ) as stream:
         if args.command == "set-device-group":
             return await device_group(stream, args, address, source, emit)
+        if args.command == "set-snowmelt-group":
+            return await snow_group_from_args(stream, args, address, source, emit)
         if args.command == "read-device":
             snapshot = await read_native_snapshot(
                 stream,
@@ -970,6 +1006,8 @@ def _emit_capture_summary(
         emit({"water_sources": [water_fields(s) for s in sources]})
     for thermostat in observed.thermostats:
         emit({"thermostat_climate": climate_fields(thermostat)})
+    for snow in observed.snowmelt_devices:
+        emit({"snowmelt": snow_fields(snow)})
 
 
 async def _dump_blocks(

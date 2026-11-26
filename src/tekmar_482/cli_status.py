@@ -179,15 +179,17 @@ async def watch_from_args(
     )
 
 
-def add_status_commands(
+def _add_watch(
     subparsers: argparse._SubParsersAction[argparse.ArgumentParser],
     common: argparse.ArgumentParser,
     number: Callable[[str], int],
+    name: str,
+    description: str,
 ) -> None:
     watch = subparsers.add_parser(
-        "watch-climate",
+        name,
         parents=[common],
-        help="stream native thermostat mode and demand changes",
+        help=description,
     )
     watch.add_argument(
         "--device",
@@ -212,6 +214,27 @@ def add_status_commands(
     )
     watch.add_argument("--source-subnet", type=number, default=0)
     watch.add_argument("--source-node", type=number, default=0)
+
+
+def add_status_commands(
+    subparsers: argparse._SubParsersAction[argparse.ArgumentParser],
+    common: argparse.ArgumentParser,
+    number: Callable[[str], int],
+) -> None:
+    _add_watch(
+        subparsers,
+        common,
+        number,
+        "watch-climate",
+        "stream native thermostat mode and demand changes",
+    )
+    _add_watch(
+        subparsers,
+        common,
+        number,
+        "watch-native",
+        "watch native devices and read thermostat and snowmelt state",
+    )
     water = subparsers.add_parser(
         "read-water",
         parents=[common],

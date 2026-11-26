@@ -34,6 +34,7 @@ def main() -> None:
         "scenes.py",
         "schedules.py",
         "sensors.py",
+        "snowmelt.py",
         "water.py",
         "writes.py",
     ):

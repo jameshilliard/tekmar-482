@@ -15,6 +15,7 @@ from .constants import TN4_PORTS
 from .exceptions import ConnectionClosedError, ProtocolError, TekmarError
 from .native import NativeFrame, NativeMessage
 from .native_schedule import edit_schedule_time
+from .native_snow_control import apply_snowmelt_group
 from .native_status import StatusCollector
 from .native_write import NativeBlockEditor
 from .packet import TYPE_TN4
@@ -27,6 +28,7 @@ if TYPE_CHECKING:
     from ._native_payloads.writes import NativeField
     from .native import NativeAddress, NativeBlockQuery, NativeTargets
     from .native_schedule import ScheduleChange, ScheduleTarget
+    from .native_snow_control import SnowmeltGroupResult, SnowmeltOperation
     from .native_status import NativeStatusBatch
     from .native_write import NativeWriteResult
     from .packet import Packet
@@ -252,6 +254,7 @@ class BridgeStream(Protocol):
         source: NativeAddress,
         peer: NativeAddress | None = None,
         timeout: float = 20,
+        wait_for_edits: bool = False,
     ) -> NativeStatusBatch: ...
     async def read_block(
         self,
@@ -290,6 +293,18 @@ class BridgeStream(Protocol):
         timeout: float = 20,
         preview: bool = False,
     ) -> NativeWriteResult: ...
+    async def set_snowmelt_group(
+        self,
+        port: int,
+        target: NativeAddress,
+        operation: SnowmeltOperation,
+        *,
+        enabled: bool,
+        source: NativeAddress,
+        expected_group: int | None = None,
+        timeout: float = 20,
+        preview: bool = True,
+    ) -> SnowmeltGroupResult: ...
     async def write_schedule_time(
         self,
         port: int,
@@ -445,6 +460,36 @@ class RawDispatcher:
         async with self._editor(port, target, source, timeout) as editor:
             return await editor.write_mode(target, mode, preview=preview)
 
+    async def set_snowmelt_group(
+        self,
+        port: int,
+        target: NativeAddress,
+        operation: SnowmeltOperation,
+        *,
+        enabled: bool,
+        source: NativeAddress,
+        expected_group: int | None = None,
+        timeout: float = 20,
+        preview: bool = True,
+    ) -> SnowmeltGroupResult:
+        """Read the binding, optionally broadcast once, then query the selected zone."""
+        async with self._editor(port, target, source, timeout) as editor:
+            return await apply_snowmelt_group(
+                editor,
+                lambda query: self._collect_status(
+                    port,
+                    query,
+                    source,
+                    target,
+                    timeout,
+                ),
+                target,
+                operation,
+                enabled=enabled,
+                expected_group=expected_group,
+                preview=preview,
+            )
+
     async def write_schedule_time(
         self,
         port: int,
@@ -518,6 +563,7 @@ class RawDispatcher:
         source: NativeAddress,
         peer: NativeAddress | None = None,
         timeout: float = 20,
+        wait_for_edits: bool = False,
     ) -> NativeStatusBatch:
         """Request fresh, non-block status. Captures remain on the normal stream."""
         if port not in TN4_PORTS or not timeout > 0:
@@ -528,7 +574,21 @@ class RawDispatcher:
         ):
             msg = "humidity queries need the reporting peer on the requested subnet"
             raise ValueError(msg)
+        if wait_for_edits:
+            async with self._edits[port]:
+                await self.wait_transmit_idle(port)
+                return await self._collect_status(port, query, source, peer, timeout)
         self._check_no_edit(port)
+        return await self._collect_status(port, query, source, peer, timeout)
+
+    async def _collect_status(
+        self,
+        port: int,
+        query: NativeStatusQuery,
+        source: NativeAddress,
+        peer: NativeAddress | None,
+        timeout: float,
+    ) -> NativeStatusBatch:
         collector = StatusCollector(query, peer)
         request = NativeMessage.request_status(query, source=source)
         result = await self._exchange(port, request, collector.observe, timeout)

@@ -1,4 +1,4 @@
-"""Source-scoped native block reports and thermostat state for one Raw session."""
+"""Source-scoped native configuration and live telemetry for one Raw session."""
 
 from __future__ import annotations
 
@@ -15,15 +15,18 @@ from ._native_payloads.climate import (
 )
 from ._native_payloads.codec import Reader, ShortPayload
 from ._native_payloads.sensors import SENSOR_BLOCKS, ThermostatSensors
+from ._native_payloads.snowmelt import SNOW_REPORT
 from .constants import TN4_PORTS
 from .native import NativeAddress, NativeFrame
 from .native_identity import NativeIdentity
+from .native_snowmelt import NativeSnowmelt, SnowmeltChannels, SnowmeltConfiguration
 from .native_water import WaterMonitor
 from .raw import CaptureGap
 
 if TYPE_CHECKING:
     from collections.abc import Iterable
 
+    from .native_snowmelt import SnowmeltChannel
     from .native_water import WaterSource
     from .raw import CaptureRecord
 
@@ -74,6 +77,7 @@ class _Peer:
     blocks: dict[_BlockKey, NativeFrame] = field(default_factory=dict)
     air: AirStatus | None = None
     air_frame: NativeFrame | None = None
+    snow: SnowmeltChannels = field(default_factory=SnowmeltChannels)
 
     def climate(self, path: NativePath) -> NativeClimate | None:
         identity = self.identity
@@ -116,6 +120,9 @@ class NativeState:
     def water_sources(self) -> tuple[WaterSource, ...]:
         return self._water.sources
 
+    def water_source(self, path: NativePath) -> WaterSource | None:
+        return self._water.source(path.port, path.address)
+
     @property
     def paths(self) -> tuple[NativePath, ...]:
         water = (
@@ -130,6 +137,29 @@ class NativeState:
 
     def climate(self, path: NativePath) -> NativeClimate | None:
         return peer.climate(path) if (peer := self._peers.get(path)) else None
+
+    @property
+    def snowmelt_devices(self) -> tuple[NativeSnowmelt, ...]:
+        return tuple(s for p in self.paths if (s := self.snowmelt(p)) is not None)
+
+    def snowmelt_channels(self, path: NativePath) -> tuple[SnowmeltChannel, ...]:
+        """Return valid reports even without a known product or application."""
+        return peer.snow.channels if (peer := self._peers.get(path)) else ()
+
+    def snowmelt(self, path: NativePath) -> NativeSnowmelt | None:
+        peer = self._peers.get(path)
+        if peer is None or (identity := peer.identity) is None:
+            return None
+        if (
+            product := identity.product
+        ) is None or product.family != "snowmelt_control":
+            return None
+        return NativeSnowmelt(
+            path,
+            identity,
+            SnowmeltConfiguration.from_blocks(peer.blocks),
+            peer.snow.channels,
+        )
 
     def block(
         self,
@@ -197,6 +227,8 @@ class NativeState:
         key = (block, selector)
         before = peer.blocks.get(key)
         peer.blocks[key] = frame
+        if before is not None:
+            peer.snow.invalidate(block, before, frame)
         return before is None or before.message.payload != data
 
     def observe(self, record: CaptureRecord) -> tuple[NativePath, ...]:
@@ -222,6 +254,12 @@ class NativeState:
         changed_water = self._water.observe(record)
         if record.message_id == BLOCK_REPORT:
             return (path,) if self._block(path, record) or changed_water else ()
+        if record.message_id == SNOW_REPORT:
+            report = record.snowmelt_report
+            if report is None or (address := report.address) is None:
+                return ()
+            snow = self._peers.setdefault(path, _Peer()).snow
+            return (path,) if snow.update(record, address, report) else ()
         if record.message_id not in (AIR_MASTER, AIR_MEMBER):
             return (path,) if changed_water else ()
         try:
