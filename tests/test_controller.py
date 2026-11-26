@@ -403,6 +403,34 @@ class ControllerTest(unittest.IsolatedAsyncioTestCase):
                     assert after.runtime.mode_setting == 1
                 transport.assert_complete()
 
+    async def test_private_attribute_read_removes_write_capability(self) -> None:
+        method = TrpcMethod.DEVICE_ATTRIBUTES
+        transport = TraceReplayTransport(
+            [
+                *start_steps(),
+                request_step(
+                    method,
+                    address=1201,
+                    response=response(method, address=1201, attributes=0),
+                ),
+                update_step(TrpcMethod.REPORTING_STATE, state=0),
+            ],
+        )
+        client = Tekmar482Client(transport)
+        controller = Tekmar482Controller(client)
+        changed = asyncio.Event()
+        async with controller, client.reports() as public, asyncio.timeout(2):
+            controller.add_listener(lambda _: changed.set())
+            assert (await client.get_device_attributes(1201)).raw == 0
+            await changed.wait()
+            assert list(public.drain()) == []
+            with (
+                self.assertRaises(ProtocolError),
+                controller.device_write(1201, TrpcMethod.HEAT_SETPOINT),
+            ):
+                self.fail("removed control admitted a write")
+        transport.assert_complete()
+
     async def test_private_group_read_updates_state_and_stops_expiry(self) -> None:
         method = TrpcMethod.SETPOINT_GROUP_ENABLE
         off = response(method, group_id=2, enable=0)

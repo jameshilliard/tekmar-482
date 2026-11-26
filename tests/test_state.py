@@ -64,6 +64,48 @@ def _state() -> Tekmar482State:
 
 
 class StateTest(unittest.TestCase):
+    def test_attribute_reports_reclassify_without_retaining_removed_controls(
+        self,
+    ) -> None:
+        device = DiscoveredDevice(1)
+        discovery = DiscoveryResult(GatewayInfo(), (device,))
+        state = Tekmar482State(
+            discovery,
+            AvailableInfo(
+                GatewaySnapshot(info=discovery.gateway),
+                (
+                    DeviceSnapshot.from_raw_values(
+                        device,
+                        {"current_temperature": 1500},
+                    ),
+                ),
+            ),
+        )
+        for mask in (0x800B, 0x0104, 0):
+            report = TrpcPacket.create(
+                method=TrpcMethod.DEVICE_ATTRIBUTES,
+                service=TrpcService.REPORT,
+                fields={"address": 1, "attributes": mask},
+            )
+            assert state.apply_message(report)
+            runtime = state.runtime(1)
+            assert runtime is not None and runtime.current_temperature == 1500
+            assert runtime.info.attributes.raw == mask
+            assert state.discovery.devices == (runtime.info,)
+            assert isinstance(runtime, ThermostatRuntime) == bool(mask)
+            assert not state.apply_message(report)
+            if mask & DeviceAttributeBit.FAN_PERCENT:
+                assert state.apply_message(
+                    TrpcPacket.create(
+                        method=TrpcMethod.FAN_PERCENT,
+                        service=TrpcService.REPORT,
+                        fields={"address": 1, "setback": 0, "percent": 60},
+                    ),
+                )
+            else:
+                assert DeviceValue.FAN_PERCENT not in runtime.available_values
+                assert not runtime.fan_percent.values
+
     def test_schedule_master_reports_update_metadata_without_losing_runtime(
         self,
     ) -> None:

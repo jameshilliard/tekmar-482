@@ -601,6 +601,51 @@ class ClientDiscoveryTest(unittest.IsolatedAsyncioTestCase):
                 await client.get_setpoint_group(13)
         transport.assert_complete()
 
+    async def test_get_attributes_matches_exact_read_not_push(self) -> None:
+        method = TrpcMethod.DEVICE_ATTRIBUTES
+        transport = TraceReplayTransport(
+            [
+                TraceStep(
+                    request_step(method, address=1).sent,
+                    (
+                        report(method, address=1, attributes=4),
+                        response(method, address=2, attributes=8),
+                        response(method, address=1, attributes=0x103),
+                    ),
+                ),
+            ],
+        )
+        async with Tekmar482Client(transport) as client:
+            attrs = await client.get_device_attributes(1)
+            assert attrs.raw == 0x103
+            assert attrs.slab_setpoint and attrs.zone_cooling
+        transport.assert_complete()
+
+    async def test_late_attribute_reply_cannot_restore_removed_capabilities(
+        self,
+    ) -> None:
+        method = TrpcMethod.DEVICE_ATTRIBUTES
+        old = response(method, address=1, attributes=11)
+        transport = TraceReplayTransport(
+            [
+                request_step(method, address=1),
+                request_step(
+                    method,
+                    address=1,
+                    response=response(method, address=1, attributes=1),
+                ),
+            ],
+        )
+        async with Tekmar482Client(transport) as client:
+            with self.assertRaises(TimeoutError):
+                await client.get_device_attributes(1, timeout=0.01)
+            with self.assertRaises(TimeoutError):
+                await client.get_device_attributes(1, timeout=0.01)
+            assert len(transport.written) == 1
+            transport.queue_message(old)
+            assert (await client.get_device_attributes(1)).raw == 1
+        transport.assert_complete()
+
     async def test_request_response_serializes_transactions(self) -> None:
         transport = BlockingTransport()
         client = Tekmar482Client(transport)

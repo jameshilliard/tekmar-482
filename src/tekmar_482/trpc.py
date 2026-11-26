@@ -654,7 +654,11 @@ class DeviceReplySelector:
             command.method not in _SETBACK_INDEXED_METHODS
             and command.method != TrpcMethod.MODE_SETTING
             and command.method
-            not in {TrpcMethod.HUMIDITY_SET_MIN, TrpcMethod.HUMIDITY_SET_MAX}
+            not in {
+                TrpcMethod.DEVICE_ATTRIBUTES,
+                TrpcMethod.HUMIDITY_SET_MIN,
+                TrpcMethod.HUMIDITY_SET_MAX,
+            }
         ):
             return None
         return cls.for_message(command.to_message(), readback=readback)
@@ -663,6 +667,7 @@ class DeviceReplySelector:
     def for_message(cls, message: TrpcPacket, *, readback: bool = False) -> Self | None:
         service = response_service_for(message.service_id)
         if message.method in {
+            TrpcMethod.DEVICE_ATTRIBUTES,
             TrpcMethod.HUMIDITY_SET_MIN,
             TrpcMethod.HUMIDITY_SET_MAX,
         } and (

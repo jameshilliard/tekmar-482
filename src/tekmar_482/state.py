@@ -10,6 +10,7 @@ from .constants import ThaSetback, setback_event_count
 from .exceptions import ProtocolError
 from .models import (
     AvailableInfo,
+    DeviceAttributes,
     DeviceRuntime,
     DeviceSnapshot,
     DeviceValue,
@@ -42,6 +43,11 @@ GATEWAY_METHODS = {
     TrpcMethod.REPORTING_STATE,
     TrpcMethod.SETBACK_ENABLE,
     TrpcMethod.SETPOINT_GROUP_ENABLE,
+}
+
+DEVICE_METADATA_FIELDS = {
+    TrpcMethod.DEVICE_ATTRIBUTES: "attributes",
+    TrpcMethod.SETBACK_EVENTS: "events",
 }
 
 
@@ -263,7 +269,7 @@ class Tekmar482State:
         if updated == self.data:
             return MessageApplyResult.UNCHANGED
         self.data = updated
-        if message.method is TrpcMethod.SETBACK_EVENTS:
+        if message.method in DEVICE_METADATA_FIELDS:
             self.discovery = self._snapshot_metadata(self.discovery)
         return MessageApplyResult.CHANGED
 
@@ -332,21 +338,15 @@ def apply_message(
     if method in GATEWAY_METHODS:
         return _apply_gateway_message(data, method, message)
 
-    if method is TrpcMethod.SETBACK_EVENTS:
+    if method in DEVICE_METADATA_FIELDS:
         address = message.get("address")
-        if "events" not in message.body or not any(
-            s.info.address == address for s in data.devices
-        ):
+        raw = message.get(DEVICE_METADATA_FIELDS[method])
+        if raw is None or not any(s.info.address == address for s in data.devices):
             return None
-        count = setback_event_count(message.get("events"))
         return replace(
             data,
             devices=tuple(
-                DeviceSnapshot(
-                    replace(s.runtime, info=replace(s.info, setback_events=count)),
-                )
-                if s.info.address == address and s.info.setback_events != count
-                else s
+                _update_metadata(s, method, raw) if s.info.address == address else s
                 for s in data.devices
             ),
         )
@@ -361,6 +361,36 @@ def apply_message(
         return None
 
     return _apply_device_message(discovery, data, address, method, message, command)
+
+
+def _update_metadata(
+    snapshot: DeviceSnapshot,
+    method: TrpcMethod,
+    raw: int,
+) -> DeviceSnapshot:
+    runtime = snapshot.runtime
+    if method is TrpcMethod.SETBACK_EVENTS:
+        info = replace(snapshot.info, setback_events=setback_event_count(raw))
+        return DeviceSnapshot(replace(runtime, info=info))
+    if snapshot.info.attributes.raw == raw:
+        return snapshot
+    info = replace(snapshot.info, attributes=DeviceAttributes(raw))
+    supported = {
+        field.key
+        for candidate, field in DEVICE_FIELDS.items()
+        if device_supports_method(info, candidate)
+    }
+    # Capability evidence can change the runtime subtype without an address move.
+    updated = DeviceRuntime.create(
+        info=info,
+        available_values=runtime.available_values & supported,
+    )
+    return DeviceSnapshot(
+        replace(
+            updated,
+            **{key.value: getattr(runtime, key.value) for key in supported},
+        ),
+    )
 
 
 def _apply_gateway_message(

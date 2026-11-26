@@ -482,6 +482,23 @@ class Tekmar482Client:
         """
         return await self.session.request_inventory(start_address, timeout=timeout)
 
+    async def get_device_attributes(
+        self,
+        address: int,
+        *,
+        timeout: float | None = 5,
+    ) -> DeviceAttributes:
+        """Read the gateway's current capability mask for this address."""
+        reply = _require_reply(
+            await self.request_response(
+                TrpcMethod.DEVICE_ATTRIBUTES,
+                fields=AddressFields(address),
+                timeout=timeout,
+            ),
+            f"attributes at {address}",
+        )
+        return DeviceAttributes(reply.require("attributes"))
+
     async def get_device_info(
         self,
         address: int,

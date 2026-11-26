@@ -21,6 +21,7 @@ from .exceptions import (
 )
 from .models import AvailableInfo, DeviceRuntime, DiscoveredDevice, DiscoveryResult
 from .state import (
+    DEVICE_METADATA_FIELDS,
     MessageApplyResult,
     Tekmar482State,
     is_runtime_message,
@@ -276,10 +277,11 @@ class Tekmar482Controller:
                     await self._set_reporting_confirmed(enabled=False)
                     state = await self._read_state(None)
                     # Subscribe before enabling push so the first reports aren't lost.
+                    matched = set(DEVICE_METADATA_FIELDS)
+                    if self.include_setpoint_groups:
+                        matched.add(TrpcMethod.SETPOINT_GROUP_ENABLE)
                     self._reports = self.client.reports(
-                        include_matched=frozenset({TrpcMethod.SETPOINT_GROUP_ENABLE})
-                        if self.include_setpoint_groups
-                        else frozenset(),
+                        include_matched=frozenset(matched),
                     )
                     state.apply_message(
                         await self._set_reporting_confirmed(enabled=True),

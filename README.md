@@ -302,6 +302,12 @@ does not prove that a snowmelt slab is heating.
 or `None` if unknown. Raw tRPC packets keep the configuration code (0, 1
 or 2). A schedule-master report updates metadata without an inventory walk.
 
+`await client.get_device_attributes(address)` reads that device's observed
+capability mask without requesting its identity or writing a setting. Zero
+means no capability bits are set; it is not an absent-device indicator.
+The controller applies capability reports and matched reads without a new
+inventory walk, retaining measurements for controls that still exist.
+
 ## Push controller
 
 See the [firmware 06 compatibility notes](docs/firmware-06.md) for the scope
