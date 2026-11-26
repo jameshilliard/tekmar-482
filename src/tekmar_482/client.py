@@ -3,29 +3,31 @@
 from __future__ import annotations
 
 import asyncio
+from contextlib import asynccontextmanager
 from datetime import datetime
 from typing import TYPE_CHECKING, Self
 
-from ._deadline import Deadline
+from ._poll import RuntimePoll, filter_discovery_events, observe_runtime
 from .constants import (
     DEFAULT_BAUDRATE,
     DeviceMode,
     ThaSetback,
     ThaValue,
 )
+from .exceptions import (
+    ConnectionClosedError,
+    InventoryDrainTimeoutError,
+    ProtocolError,
+    TekmarError,
+)
 from .models import (
     AvailableInfo,
     DeviceAttributes,
-    DeviceRuntime,
     DeviceSnapshot,
-    DeviceValue,
     DiscoveredDevice,
     DiscoveryResult,
-    GatewayDateTime,
     GatewayInfo,
     GatewaySnapshot,
-    SetpointValues,
-    setback_from_value,
 )
 from .session import Tekmar482Session
 from .transport import (
@@ -55,16 +57,43 @@ from .trpc import (
 from .units import celsius_to_dege, celsius_to_degh
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable, Hashable, Iterable, Sequence
+    from collections.abc import (
+        AsyncIterator,
+        Callable,
+        Hashable,
+        Iterable,
+        Sequence,
+    )
     from types import TracebackType
 
     from .packet import Packet
     from .session import ReportSubscription
     from .transport import PacketTransport
 
-_PROTOCOL_VERSION_RUNTIME_EXTENSIONS = 3
 _MIN_PERCENT = 0
 _MAX_PERCENT = 100
+_REPORTING_ACK_TIMEOUT = 5
+
+_REJECTED_CLOCK = DateTimeFields(
+    year=ThaValue.NA_16,
+    month=ThaValue.NA_8,
+    day=ThaValue.NA_8,
+    weekday=ThaValue.NA_8,
+    hour=ThaValue.NA_8,
+    minute=ThaValue.NA_8,
+).as_fields()
+
+
+class _ClockWriteMatch(ResponseMatch):
+    """Accept the requested echo or the firmware's explicit rejection."""
+
+    def matches(self, message: TrpcPacket) -> bool:
+        return super().matches(message) or (
+            message.service is TrpcService.RESPONSE_UPDATE
+            and message.method is TrpcMethod.DATE_TIME
+            and message.body == _REJECTED_CLOCK
+        )
+
 
 type _SetbackPayload = (
     AddressSetbackFields
@@ -72,6 +101,13 @@ type _SetbackPayload = (
     | SetbackPercentFields
     | SetbackTemperatureFields
 )
+
+
+def _require_reply(reply: TrpcPacket | None, operation: str) -> TrpcPacket:
+    if reply is None:
+        msg = f"No response for {operation}"
+        raise TimeoutError(msg)
+    return reply
 
 
 class Tekmar482Client:
@@ -185,6 +221,7 @@ class Tekmar482Client:
         method: TrpcMethodId,
         *,
         coalesce_key: Hashable,
+        timeout: float | None = None,
         fields: TrpcFieldsInput | None = None,
     ) -> TrpcPacket | None:
         """Send a coalescible tRPC Update message.
@@ -195,6 +232,7 @@ class Tekmar482Client:
         return await self.session.coalesced_update(
             TrpcCommand.update(method, fields),
             coalesce_key=coalesce_key,
+            timeout=timeout,
         )
 
     async def coalesced_update_response(
@@ -231,13 +269,70 @@ class Tekmar482Client:
         timeout: float | None = 5,
     ) -> TrpcPacket | None:
         """Enable or disable tHA reporting."""
+        return await self._set_reporting_state(enabled=enabled, timeout=timeout)
+
+    async def _set_reporting_state(
+        self,
+        *,
+        enabled: bool,
+        timeout: float | None,
+        on_sending: Callable[[], None] | None = None,
+    ) -> TrpcPacket | None:
         fields = ReportingStateFields(enabled)
-        return await self.update_response(
-            TrpcMethod.REPORTING_STATE,
-            match_fields=fields,
+        command = TrpcCommand.update(TrpcMethod.REPORTING_STATE, fields)
+        return await self.session.update_response(
+            command,
+            response_match=ResponseMatch.for_command(command, fields=fields),
             timeout=timeout,
-            fields=fields,
+            on_sending=on_sending,
         )
+
+    @asynccontextmanager
+    async def _reporting_cleanup(
+        self,
+        timeout: float | None,
+    ) -> AsyncIterator[Callable[[], None]]:
+        generation: int | None = None
+        loop = asyncio.get_running_loop()
+        deadline = None if timeout is None else loop.time() + timeout
+        budget = (
+            _REPORTING_ACK_TIMEOUT
+            if timeout is None
+            else min(timeout, _REPORTING_ACK_TIMEOUT)
+        )
+
+        def mark_sending() -> None:
+            nonlocal generation
+            generation = self.session.connection_generation
+
+        async def restore(remaining: float) -> None:
+            if generation is None:
+                return
+            if generation != self.session.connection_generation:
+                msg = "Connection changed before restoring reporting"
+                raise ConnectionClosedError(msg)
+            async with asyncio.timeout(remaining):
+                _require_reply(
+                    await self.set_reporting_state(enabled=True, timeout=None),
+                    "ReportingState=1",
+                )
+
+        try:
+            yield mark_sending
+        except BaseException as err:
+            try:
+                await restore(budget)
+            except (OSError, TekmarError) as cleanup_err:
+                err.add_note(f"Could not restore reporting: {cleanup_err!r}")
+            raise
+        else:
+            try:
+                await restore(
+                    budget if deadline is None else min(budget, deadline - loop.time()),
+                )
+            except TimeoutError as err:
+                msg = "Discovery timed out restoring reporting"
+                raise TimeoutError(msg) from err
 
     async def request_device_inventory(self, address: int = 0) -> TrpcPacket:
         """Request device inventory, usually starting at address 0."""
@@ -268,6 +363,7 @@ class Tekmar482Client:
         response_services: Iterable[TrpcServiceId] | None = None,
         match_address: int | None = None,
         match_fields: TrpcFieldsInput | None = None,
+        publish_match: bool = False,
         timeout: float | None = 5,
         fields: TrpcFieldsInput | None = None,
     ) -> TrpcPacket | None:
@@ -275,6 +371,7 @@ class Tekmar482Client:
         command = TrpcCommand.request(method, fields)
         return await self.session.request_response(
             command,
+            publish_match=publish_match,
             response_match=ResponseMatch.for_command(
                 command,
                 response_method=response_method,
@@ -315,31 +412,55 @@ class Tekmar482Client:
         *,
         max_queue_size: int = 0,
         replay_backlog: bool = False,
+        include_matched: frozenset[TrpcMethod] = frozenset(),
     ) -> ReportSubscription:
-        """Subscribe to unmatched tRPC messages."""
+        """Subscribe to public messages and matched replies for selected methods."""
         return self.session.reports(
             max_queue_size=max_queue_size,
             replay_backlog=replay_backlog,
+            include_matched=include_matched,
         )
 
     async def get_gateway_info(self, *, timeout: float | None = 5) -> GatewayInfo:
         """Request gateway firmware and protocol metadata."""
-        firmware = await self.request_response(
-            TrpcMethod.FIRMWARE_REVISION,
-            timeout=timeout,
-        )
-        protocol = await self.request_response(
-            TrpcMethod.PROTOCOL_VERSION,
+        values = await self._read_metadata(
+            {
+                TrpcMethod.FIRMWARE_REVISION: "revision",
+                TrpcMethod.PROTOCOL_VERSION: "version",
+            },
             timeout=timeout,
         )
         return GatewayInfo(
-            firmware_revision=(
-                firmware.require("revision") if firmware is not None else None
-            ),
-            protocol_version=(
-                protocol.require("version") if protocol is not None else None
-            ),
+            firmware_revision=values.get(TrpcMethod.FIRMWARE_REVISION),
+            protocol_version=values.get(TrpcMethod.PROTOCOL_VERSION),
         )
+
+    async def _read_metadata(
+        self,
+        queries: dict[TrpcMethod, str],
+        *,
+        timeout: float | None,
+        address: int | None = None,
+    ) -> dict[TrpcMethod, int]:
+        """Collect replies within a shared budget, including time queued to send."""
+        values: dict[TrpcMethod, int] = {}
+        with self.session.connection_scope():
+            timer = asyncio.timeout(timeout)
+            try:
+                async with timer:
+                    for method, field in queries.items():
+                        reply = await self.request_response(
+                            method,
+                            fields=None if address is None else AddressFields(address),
+                            timeout=None,
+                        )
+                        values[method] = _require_reply(reply, method.name).require(
+                            field,
+                        )
+            except TimeoutError:
+                if not timer.expired():
+                    raise
+        return values
 
     async def get_inventory_addresses(
         self,
@@ -347,30 +468,11 @@ class Tekmar482Client:
         start_address: int = 0,
         timeout: float | None = 10,
     ) -> tuple[int, ...]:
-        """Request and return all discovered tN4/tN2 device addresses."""
-        await self.request_device_inventory(start_address)
-        addresses: list[int] = []
-        deadline = Deadline.from_timeout(timeout)
+        """Walk the inventory at zero, or look up one exact nonzero address.
 
-        while True:
-            if deadline.expired:
-                return tuple(addresses)
-
-            message = await self.read_until(
-                lambda item: (
-                    item.service == TrpcService.RESPONSE_REQUEST
-                    and item.method == TrpcMethod.DEVICE_INVENTORY
-                ),
-                timeout=deadline.remaining(),
-            )
-            if message is None:
-                return tuple(addresses)
-
-            address = message.require("address")
-            if address in {0, ThaValue.NA_16}:
-                return tuple(addresses)
-            if address not in addresses:
-                addresses.append(address)
+        An explicit not-found reply returns an empty tuple; a timeout raises.
+        """
+        return await self.session.request_inventory(start_address, timeout=timeout)
 
     async def get_device_info(
         self,
@@ -379,46 +481,24 @@ class Tekmar482Client:
         timeout: float | None = 5,
     ) -> DiscoveredDevice:
         """Request metadata for one discovered device address."""
-        device_type = await self.request_response(
-            TrpcMethod.DEVICE_TYPE,
-            match_address=address,
+        values = await self._read_metadata(
+            {
+                TrpcMethod.DEVICE_TYPE: "type",
+                TrpcMethod.DEVICE_VERSION: "j_number",
+                TrpcMethod.DEVICE_ATTRIBUTES: "attributes",
+                TrpcMethod.SETBACK_EVENTS: "events",
+            },
+            address=address,
             timeout=timeout,
-            fields=AddressFields(address),
         )
-        device_version = await self.request_response(
-            TrpcMethod.DEVICE_VERSION,
-            match_address=address,
-            timeout=timeout,
-            fields=AddressFields(address),
-        )
-        attributes = await self.request_response(
-            TrpcMethod.DEVICE_ATTRIBUTES,
-            match_address=address,
-            timeout=timeout,
-            fields=AddressFields(address),
-        )
-        setback_events = await self.request_response(
-            TrpcMethod.SETBACK_EVENTS,
-            match_address=address,
-            timeout=timeout,
-            fields=AddressFields(address),
-        )
-
-        raw_attributes = (
-            attributes.require("attributes") if attributes is not None else 0
-        )
-        raw_type_code = device_type.require("type") if device_type is not None else None
-        raw_version = (
-            device_version.require("j_number") if device_version is not None else None
-        )
+        raw_type_code = values.get(TrpcMethod.DEVICE_TYPE)
+        raw_version = values.get(TrpcMethod.DEVICE_VERSION)
         return DiscoveredDevice(
             address=address,
             type_code=None if raw_type_code == ThaValue.NA_32 else raw_type_code,
             version=None if raw_version == ThaValue.NA_32 else raw_version,
-            attributes=DeviceAttributes(raw_attributes),
-            setback_events=(
-                setback_events.require("events") if setback_events is not None else None
-            ),
+            attributes=DeviceAttributes(values.get(TrpcMethod.DEVICE_ATTRIBUTES)),
+            setback_events=values.get(TrpcMethod.SETBACK_EVENTS),
         )
 
     async def discover(
@@ -427,51 +507,73 @@ class Tekmar482Client:
         timeout: float | None = 30,
         manage_reporting: bool = False,
         setback_enable: bool | None = None,
-        write_delay: float = 0.1,
+        write_delay: float = 0,
     ) -> DiscoveryResult:
         """Discover gateway metadata and all visible attached devices.
 
         By default this only sends request messages. Set `manage_reporting=True`
         to turn reporting off during discovery and back on afterwards. Pass
-        `setback_enable` to update the gateway setback support flag.
+        `setback_enable` to update the gateway setback support flag. The timeout
+        includes restoring reporting. If a scan fails or is cancelled after
+        sending a disable, cleanup gets up to five additional seconds, capped
+        by the specified timeout.
         """
 
         async def delay() -> None:
             if write_delay > 0:
                 await asyncio.sleep(write_delay)
 
-        deadline = Deadline.from_timeout(timeout)
+        phase = "gateway metadata"
+        with self.session.connection_scope():
+            deadline = (
+                None if timeout is None else asyncio.get_running_loop().time() + timeout
+            )
+            async with self._reporting_cleanup(timeout) as mark_sending:
+                await self.session.wait_for_inventory_drain(timeout=timeout)
+                try:
+                    async with asyncio.timeout_at(deadline):
+                        if manage_reporting:
+                            phase = "disabling reporting"
+                            ack = await self._set_reporting_state(
+                                enabled=False,
+                                timeout=_REPORTING_ACK_TIMEOUT,
+                                on_sending=mark_sending,
+                            )
+                            _require_reply(ack, phase)
+                            await delay()
 
-        try:
-            if manage_reporting:
-                await self.set_reporting_state(enabled=False)
-                await delay()
+                        phase = "gateway metadata"
+                        gateway = await self.get_gateway_info(timeout=None)
+                        await delay()
 
-            gateway = await self.get_gateway_info(timeout=deadline.remaining())
-            await delay()
+                        if setback_enable is not None:
+                            phase = f"SetbackEnable={int(setback_enable)}"
+                            fields = EnableFields(setback_enable)
+                            ack = await self.update_response(
+                                TrpcMethod.SETBACK_ENABLE,
+                                match_fields=fields,
+                                timeout=None,
+                                fields=fields,
+                            )
+                            _require_reply(ack, phase)
+                            await delay()
 
-            if setback_enable is not None:
-                fields = EnableFields(setback_enable)
-                await self.update_response(
-                    TrpcMethod.SETBACK_ENABLE,
-                    match_fields=fields,
-                    timeout=deadline.remaining(),
-                    fields=fields,
-                )
-                await delay()
+                        phase = "complete device inventory"
+                        addresses = await self.get_inventory_addresses(timeout=None)
+                        devices: list[DiscoveredDevice] = []
+                        for address in addresses:
+                            phase = f"metadata for device {address}"
+                            devices.append(
+                                await self.get_device_info(address, timeout=None),
+                            )
+                            await delay()
 
-            addresses = await self.get_inventory_addresses(timeout=deadline.remaining())
-            devices: list[DiscoveredDevice] = []
-            for address in addresses:
-                devices.append(
-                    await self.get_device_info(address, timeout=deadline.remaining()),
-                )
-                await delay()
-
-            return DiscoveryResult(gateway=gateway, devices=tuple(devices))
-        finally:
-            if manage_reporting:
-                await self.set_reporting_state(enabled=True)
+                        return DiscoveryResult(gateway=gateway, devices=tuple(devices))
+                except InventoryDrainTimeoutError:
+                    raise
+                except TimeoutError as err:
+                    msg = f"Discovery timed out during {phase}"
+                    raise TimeoutError(msg) from err
 
     async def dump_available_info(
         self,
@@ -479,26 +581,26 @@ class Tekmar482Client:
         timeout: float | None = 2,
         inventory_timeout: float | None = 10,
         include_setbacks: bool = True,
-        include_datetime: bool = True,
-        write_delay: float = 0.1,
+        write_delay: float = 0,
     ) -> AvailableInfo:
         """Request a broad read-only snapshot of gateway and attached device data.
 
         Missing or unsupported values are returned as None. This method does not
         alter reporting or setback settings.
         """
-        discovery = await self.discover(
-            timeout=inventory_timeout,
-            write_delay=write_delay,
-        )
-        return await self.poll_runtime(
-            discovery,
-            timeout=timeout,
-            include_setbacks=include_setbacks,
-            include_datetime=include_datetime,
-            include_setpoint_groups=True,
-            write_delay=write_delay,
-        )
+        with observe_runtime(self.session) as events:
+            discovery = await self.discover(
+                timeout=inventory_timeout,
+                write_delay=write_delay,
+            )
+            filter_discovery_events(events, discovery, None)
+            poll = RuntimePoll.plan(
+                discovery,
+                include_setbacks=include_setbacks,
+                exhaustive_setbacks=True,
+            )
+            await poll.execute(self.session, timeout=timeout, write_delay=write_delay)
+        return poll.reduce(events)
 
     async def poll_runtime(
         self,
@@ -506,9 +608,8 @@ class Tekmar482Client:
         *,
         timeout: float | None = 2,
         include_setbacks: bool = False,
-        include_datetime: bool = False,
         include_setpoint_groups: bool = True,
-        write_delay: float = 0.1,
+        write_delay: float = 0,
     ) -> AvailableInfo:
         """Poll runtime values for an existing discovery result.
 
@@ -516,79 +617,37 @@ class Tekmar482Client:
         device metadata are expected to come from `discover()`, while this method
         refreshes values that can change at runtime.
         """
-        gateway = await self.poll_gateway(
-            gateway_info=discovery.gateway,
-            timeout=timeout,
-            include_datetime=include_datetime,
-            include_setpoint_groups=include_setpoint_groups,
-            write_delay=write_delay,
-        )
-        devices = await self.poll_devices(
-            discovery.devices,
-            protocol_version=discovery.gateway.protocol_version,
-            timeout=timeout,
+        poll = RuntimePoll.plan(
+            discovery,
             include_setbacks=include_setbacks,
+            include_setpoint_groups=include_setpoint_groups,
+        )
+        return await poll.snapshot(
+            self.session,
+            timeout=timeout,
             write_delay=write_delay,
         )
-        return AvailableInfo(gateway=gateway, devices=devices)
 
     async def poll_gateway(
         self,
         *,
         gateway_info: GatewayInfo | None = None,
         timeout: float | None = 2,
-        include_datetime: bool = False,
         include_setpoint_groups: bool = True,
-        write_delay: float = 0.1,
+        write_delay: float = 0,
     ) -> GatewaySnapshot:
         """Poll gateway runtime values without walking device inventory."""
-
-        async def delay() -> None:
-            if write_delay > 0:
-                await asyncio.sleep(write_delay)
-
-        async def request_field(
-            method: TrpcMethodId,
-            field: str,
-            *,
-            match_address: int | None = None,
-            match_fields: TrpcFieldsInput | None = None,
-            fields: TrpcFieldsInput | None = None,
-        ) -> int | None:
-            message = await self.request_response(
-                method,
-                match_address=match_address,
-                match_fields=match_fields,
-                timeout=timeout,
-                fields=fields,
+        with observe_runtime(self.session) as events:
+            if gateway_info is None:
+                gateway_info = await self.get_gateway_info(timeout=timeout)
+                if write_delay > 0:
+                    await asyncio.sleep(write_delay)
+            poll = RuntimePoll.plan(
+                DiscoveryResult(gateway_info, ()),
+                include_setpoint_groups=include_setpoint_groups,
             )
-            await delay()
-            return message.get(field) if message is not None else None
-
-        info = gateway_info
-        if info is None:
-            info = await self.get_gateway_info(timeout=timeout)
-            await delay()
-
-        reporting = await request_field(TrpcMethod.REPORTING_STATE, "state")
-        setback = await request_field(TrpcMethod.SETBACK_ENABLE, "enable")
-        return GatewaySnapshot(
-            info=info,
-            outdoor_temp=await request_field(TrpcMethod.OUTDOOR_TEMP, "temp"),
-            network_error=await request_field(TrpcMethod.NETWORK_ERROR, "error"),
-            date_time=(
-                await self.get_datetime(timeout=timeout, delay=delay)
-                if include_datetime
-                else None
-            ),
-            reporting_enabled=None if reporting is None else bool(reporting),
-            setback_enabled=None if setback is None else bool(setback),
-            setpoint_groups=(
-                await self._dump_setpoint_groups(timeout=timeout, delay=delay)
-                if include_setpoint_groups
-                else None
-            ),
-        )
+            await poll.execute(self.session, timeout=timeout, write_delay=write_delay)
+        return poll.reduce(events).gateway
 
     async def poll_devices(
         self,
@@ -597,290 +656,28 @@ class Tekmar482Client:
         protocol_version: int | None,
         timeout: float | None = 2,
         include_setbacks: bool = False,
-        write_delay: float = 0.1,
+        write_delay: float = 0,
     ) -> tuple[DeviceSnapshot, ...]:
         """Poll runtime values for known devices without rediscovering inventory."""
-
-        async def delay() -> None:
-            if write_delay > 0:
-                await asyncio.sleep(write_delay)
-
-        snapshots = [
-            await self._dump_device_snapshot(
-                device,
-                protocol_version=protocol_version,
-                include_setbacks=include_setbacks,
-                timeout=timeout,
-                delay=delay,
-            )
-            for device in devices
-        ]
-        return tuple(snapshots)
-
-    async def _dump_setpoint_groups(
-        self,
-        *,
-        timeout: float | None,
-        delay: Callable[[], Awaitable[None]],
-    ) -> dict[int, bool | None]:
-        groups: dict[int, bool | None] = {}
-        for group_id in range(1, 13):
-            message = await self.request_response(
-                TrpcMethod.SETPOINT_GROUP_ENABLE,
-                match_fields=SetpointGroupFields(group_id).match_fields(),
-                timeout=timeout,
-                fields=SetpointGroupFields(group_id),
-            )
-            await delay()
-            value = message.get("enable") if message is not None else None
-            groups[group_id] = None if value is None else bool(value)
-        return groups
-
-    async def _dump_device_snapshot(
-        self,
-        device: DiscoveredDevice,
-        *,
-        protocol_version: int | None,
-        include_setbacks: bool,
-        timeout: float | None,
-        delay: Callable[[], Awaitable[None]],
-    ) -> DeviceSnapshot:
-        async def request_field(
-            method: TrpcMethodId,
-            field: str,
-            fields: TrpcFieldsInput,
-        ) -> int | None:
-            message = await self.request_response(
-                method,
-                match_address=device.address,
-                timeout=timeout,
-                fields=fields,
-            )
-            await delay()
-            return message.get(field) if message is not None else None
-
-        available_values = {
-            DeviceValue.CURRENT_TEMPERATURE,
-            DeviceValue.ACTIVE_DEMAND,
-            DeviceValue.SETBACK_STATE,
-        }
-        current_temperature = await request_field(
-            TrpcMethod.CURRENT_TEMPERATURE,
-            "temp",
-            AddressFields(device.address),
+        discovery = DiscoveryResult(
+            GatewayInfo(protocol_version=protocol_version),
+            tuple(devices),
         )
-        active_demand = await request_field(
-            TrpcMethod.ACTIVE_DEMAND,
-            "demand",
-            AddressFields(device.address),
+        poll = RuntimePoll.plan(
+            discovery,
+            include_gateway=False,
+            include_setbacks=include_setbacks,
         )
-        setback_state = await request_field(
-            TrpcMethod.SETBACK_STATE,
-            "setback",
-            AddressFields(device.address),
+        data = await poll.snapshot(
+            self.session,
+            timeout=timeout,
+            write_delay=write_delay,
         )
-        active_setback = setback_from_value(setback_state)
-        current_floor_temperature: int | None = None
-        mode_setting: int | None = None
-        relative_humidity: int | None = None
-        humidity_setpoint_min: int | None = None
-        humidity_setpoint_max: int | None = None
-        heat_setpoints = SetpointValues(active_setback=active_setback)
-        cool_setpoints = SetpointValues(active_setback=active_setback)
-        slab_setpoints = SetpointValues(active_setback=active_setback)
-        fan_percent = SetpointValues(active_setback=active_setback)
-        setpoint_targets = SetpointValues(active_setback=active_setback)
-
-        if protocol_version == _PROTOCOL_VERSION_RUNTIME_EXTENSIONS:
-            available_values.add(DeviceValue.CURRENT_FLOOR_TEMPERATURE)
-            current_floor_temperature = await request_field(
-                TrpcMethod.CURRENT_FLOOR_TEMPERATURE,
-                "temp",
-                AddressFields(device.address),
-            )
-
-        if device.supports_mode_setting:
-            available_values.add(DeviceValue.MODE_SETTING)
-            mode_setting = await request_field(
-                TrpcMethod.MODE_SETTING,
-                "mode",
-                AddressFields(device.address),
-            )
-
-        if device.supports_heat_setpoint:
-            available_values.add(DeviceValue.HEAT_SETPOINTS)
-            heat_setpoints = await self._dump_setpoints(
-                TrpcMethod.HEAT_SETPOINT,
-                "setpoint",
-                device.address,
-                active_setback=active_setback,
-                include_setbacks=include_setbacks,
-                timeout=timeout,
-                delay=delay,
-            )
-
-        if device.supports_cool_setpoint:
-            available_values.add(DeviceValue.COOL_SETPOINTS)
-            cool_setpoints = await self._dump_setpoints(
-                TrpcMethod.COOL_SETPOINT,
-                "setpoint",
-                device.address,
-                active_setback=active_setback,
-                include_setbacks=include_setbacks,
-                timeout=timeout,
-                delay=delay,
-            )
-
-        if device.supports_slab_setpoint:
-            available_values.add(DeviceValue.SLAB_SETPOINTS)
-            slab_setpoints = await self._dump_setpoints(
-                TrpcMethod.SLAB_SETPOINT,
-                "setpoint",
-                device.address,
-                active_setback=active_setback,
-                include_setbacks=include_setbacks,
-                timeout=timeout,
-                delay=delay,
-            )
-
-        if device.supports_fan_percent:
-            available_values.add(DeviceValue.FAN_PERCENT)
-            fan_percent = await self._dump_setpoints(
-                TrpcMethod.FAN_PERCENT,
-                "percent",
-                device.address,
-                active_setback=active_setback,
-                include_setbacks=include_setbacks,
-                timeout=timeout,
-                delay=delay,
-            )
-
-        if device.supports_humidity and protocol_version in {2, 3}:
-            available_values.update(
-                {
-                    DeviceValue.RELATIVE_HUMIDITY,
-                    DeviceValue.HUMIDITY_SETPOINT_MIN,
-                    DeviceValue.HUMIDITY_SETPOINT_MAX,
-                },
-            )
-            relative_humidity = await request_field(
-                TrpcMethod.RELATIVE_HUMIDITY,
-                "percent",
-                AddressFields(device.address),
-            )
-            humidity_setpoint_min = await request_field(
-                TrpcMethod.HUMIDITY_SET_MIN,
-                "percent",
-                AddressFields(device.address),
-            )
-            humidity_setpoint_max = await request_field(
-                TrpcMethod.HUMIDITY_SET_MAX,
-                "percent",
-                AddressFields(device.address),
-            )
-
-        if device.supports_setpoint_device:
-            available_values.add(DeviceValue.SETPOINT_TARGETS)
-            setpoint_targets = await self._dump_setpoints(
-                TrpcMethod.SETPOINT_DEVICE,
-                "temp",
-                device.address,
-                active_setback=active_setback,
-                include_setbacks=include_setbacks,
-                timeout=timeout,
-                delay=delay,
-            )
-
-        return DeviceSnapshot(
-            DeviceRuntime.create(
-                info=device,
-                available_values=frozenset(available_values),
-                current_temperature=current_temperature,
-                current_floor_temperature=current_floor_temperature,
-                active_demand=active_demand,
-                setback_state=setback_state,
-                mode_setting=mode_setting,
-                relative_humidity=relative_humidity,
-                humidity_setpoint_min=humidity_setpoint_min,
-                humidity_setpoint_max=humidity_setpoint_max,
-                setpoint_targets=setpoint_targets,
-                heat_setpoints=heat_setpoints,
-                cool_setpoints=cool_setpoints,
-                slab_setpoints=slab_setpoints,
-                fan_percent=fan_percent,
-            ),
-        )
-
-    async def _dump_setpoints(
-        self,
-        method: TrpcMethodId,
-        field: str,
-        address: int,
-        *,
-        active_setback: ThaSetback | None = None,
-        include_setbacks: bool,
-        timeout: float | None,
-        delay: Callable[[], Awaitable[None]],
-    ) -> SetpointValues:
-        setbacks = tuple(ThaSetback) if include_setbacks else (ThaSetback.CURRENT,)
-        values: dict[ThaSetback, int | None] = {}
-        observed_active_setback = active_setback
-        current_observed_setback: ThaSetback | None = None
-        for setback in setbacks:
-            fields = AddressSetbackFields(address, setback)
-            match_fields = (
-                None if setback is ThaSetback.CURRENT else fields.match_fields()
-            )
-            message = await self.request_response(
-                method,
-                match_address=address,
-                match_fields=match_fields,
-                timeout=timeout,
-                fields=fields,
-            )
-            await delay()
-            value = message.get(field) if message is not None else None
-            if setback is ThaSetback.CURRENT and message is not None:
-                current_observed_setback = (
-                    setback_from_value(message.get("setback"))
-                    or observed_active_setback
-                )
-                observed_active_setback = (
-                    current_observed_setback or observed_active_setback
-                )
-                if current_observed_setback is not None:
-                    values[current_observed_setback] = value
-            values[setback] = value
-        return SetpointValues(
-            values,
-            observed_active_setback,
-            current_observed_setback,
-        )
+        return data.devices
 
     async def request_outdoor_temperature(self) -> TrpcPacket:
         """Request the gateway outdoor temperature."""
         return await self.request(TrpcMethod.OUTDOOR_TEMP)
-
-    async def get_datetime(
-        self,
-        *,
-        timeout: float | None = 5,
-        delay: Callable[[], Awaitable[None]] | None = None,
-    ) -> GatewayDateTime | None:
-        """Request the gateway's current date/time fields."""
-        message = await self.request_response(TrpcMethod.DATE_TIME, timeout=timeout)
-        if delay is not None:
-            await delay()
-        if message is None:
-            return None
-        return GatewayDateTime(
-            year=message.require("year"),
-            month=message.require("month"),
-            day=message.require("day"),
-            weekday=message.require("weekday"),
-            hour=message.require("hour"),
-            minute=message.require("minute"),
-        )
 
     async def request_setpoint_group(self, group_id: int) -> TrpcPacket:
         """Request a setpoint group enable state."""
@@ -895,15 +692,28 @@ class Tekmar482Client:
         *,
         enabled: bool,
         timeout: float | None = 5,
-    ) -> TrpcPacket | None:
-        """Enable or disable a setpoint group."""
+    ) -> TrpcPacket:
+        """Set a gateway group and wait for its report (requires reporting enabled).
+
+        A timeout does not establish whether the gateway applied the command.
+        """
+        if group_id not in range(1, 13):
+            msg = f"Gateway setpoint group must be in 1..12: {group_id}"
+            raise ValueError(msg)
         fields = SetpointGroupFields(group_id, enabled)
-        return await self.update_response(
+        response = await self.update_response(
             TrpcMethod.SETPOINT_GROUP_ENABLE,
+            response_services=(TrpcService.REPORT,),
             match_fields=fields,
             timeout=timeout,
             fields=fields,
         )
+        if response is None:
+            msg = (
+                f"No confirmation for setpoint group {group_id}, enable={int(enabled)}"
+            )
+            raise TimeoutError(msg)
+        return response
 
     async def set_datetime(
         self,
@@ -911,15 +721,19 @@ class Tekmar482Client:
         *,
         timeout: float | None = 5,
     ) -> TrpcPacket | None:
-        """Update the gateway date/time."""
+        """Set the clock; rejection raises ProtocolError, timeout returns None."""
         value = value or datetime.now().astimezone()
         fields = DateTimeFields.from_datetime(value)
-        return await self.update_response(
-            TrpcMethod.DATE_TIME,
-            match_fields=fields,
+        command = TrpcCommand.update(TrpcMethod.DATE_TIME, fields)
+        response = await self.session.update_response(
+            command,
+            response_match=_ClockWriteMatch.for_command(command, fields=fields),
             timeout=timeout,
-            fields=fields,
         )
+        if response is not None and response.body == _REJECTED_CLOCK:
+            msg = "Gateway rejected DateTime update"
+            raise ProtocolError(msg)
+        return response
 
     async def set_heat_setpoint(
         self,
@@ -1245,6 +1059,7 @@ class Tekmar482Client:
         return await self.coalesced_update(
             TrpcMethod.MODE_SETTING,
             coalesce_key=payload.coalesce_key(TrpcMethod.MODE_SETTING),
+            timeout=timeout,
             fields=payload,
         )
 
@@ -1283,6 +1098,7 @@ class Tekmar482Client:
         return await self.coalesced_update(
             method,
             coalesce_key=payload.coalesce_key(method),
+            timeout=timeout,
             fields=payload,
         )
 

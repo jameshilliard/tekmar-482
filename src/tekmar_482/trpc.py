@@ -8,7 +8,7 @@ from enum import IntEnum
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Protocol, Self, runtime_checkable
 
-from .constants import ThaSetback
+from .constants import SETBACK_FAN_MAP, SETBACK_SETPOINT_MAP, ThaSetback, ThaValue
 from .exceptions import (
     ProtocolError,
     UnknownFieldError,
@@ -511,9 +511,54 @@ def method_name(method: TrpcMethodId) -> str | None:
     return spec.name if spec is not None else None
 
 
+_SETPOINT_FIELDS = {
+    TrpcMethod.HEAT_SETPOINT: ("setpoint", ThaValue.NA_8),
+    TrpcMethod.COOL_SETPOINT: ("setpoint", ThaValue.NA_8),
+    TrpcMethod.SLAB_SETPOINT: ("setpoint", ThaValue.NA_8),
+    TrpcMethod.SETPOINT_DEVICE: ("temp", ThaValue.NA_16),
+}
+_SETBACK_INDEXED_METHODS = frozenset((*_SETPOINT_FIELDS, TrpcMethod.FAN_PERCENT))
+
+
+def _echo_field(method: TrpcMethodId) -> str:
+    return (
+        "percent"
+        if method == TrpcMethod.FAN_PERCENT
+        else _SETPOINT_FIELDS[TrpcMethod(method)][0]
+    )
+
+
+def _validate_update(
+    service: TrpcServiceId,
+    method: TrpcMethodId,
+    fields: TrpcFieldMap,
+) -> None:
+    if service != TrpcService.UPDATE:
+        return
+    if (
+        method in _SETBACK_INDEXED_METHODS
+        and "setback" in fields
+        and fields["setback"] not in ThaSetback
+    ):
+        msg = f"{method_name(method)}: invalid setback selector {fields['setback']}"
+        raise ValueError(msg)
+    if method in _SETPOINT_FIELDS:
+        name, na = _SETPOINT_FIELDS[TrpcMethod(method)]
+        value = fields.get(name)
+        if value is None:
+            msg = f"{method_name(method)} update requires {name}"
+            raise ValueError(msg)
+        if not 0 <= value < na:
+            msg = f"{method_name(method)} {name} must be in 0..{na - 1}, got {value}"
+            raise ValueError(msg)
+
+
 def _pack_int(value: int, size: int) -> bytes:
-    mask = (1 << (size * 8)) - 1
-    return (value & mask).to_bytes(size, byteorder="little", signed=False)
+    try:
+        return value.to_bytes(size, byteorder="little")
+    except OverflowError as err:
+        msg = f"{value} does not fit an unsigned {size}-byte field"
+        raise ValueError(msg) from err
 
 
 def _unpack_int(data: bytes) -> int:
@@ -549,6 +594,7 @@ class TrpcCommand:
     def __post_init__(self) -> None:
         """Freeze fields so callers cannot mutate commands after creation."""
         object.__setattr__(self, "fields", freeze_fields(self.fields))
+        _validate_update(self.service, self.method, self.fields)
 
     @classmethod
     def request(
@@ -584,6 +630,121 @@ class TrpcCommand:
             service=self.service,
             method=self.method,
             fields=self.fields,
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class DeviceReplySelector:
+    """Identify a device reply that must not be credited to a later exchange."""
+
+    service: TrpcService
+    method: int
+    address: int
+    slot: int | None
+    echo: tuple[str, int] | None
+
+    @classmethod
+    def for_command(cls, command: TrpcCommand) -> Self | None:
+        if (
+            command.method not in _SETBACK_INDEXED_METHODS
+            and command.method != TrpcMethod.MODE_SETTING
+        ):
+            return None
+        return cls.for_message(command.to_message())
+
+    @classmethod
+    def for_message(cls, message: TrpcPacket) -> Self | None:
+        service = response_service_for(message.service_id)
+        if (
+            message.method is TrpcMethod.MODE_SETTING
+            and service is TrpcService.RESPONSE_UPDATE
+        ):
+            return cls(
+                service,
+                message.method_id,
+                message.body.get("address", 0),
+                None,
+                ("mode", message.body.get("mode", 0)),
+            )
+        if service is None or message.method_id not in _SETBACK_INDEXED_METHODS:
+            return None
+        echo = None
+        if service is TrpcService.RESPONSE_UPDATE:
+            key = _echo_field(message.method_id)
+            echo = (key, message.body.get(key, 0))
+        return cls(
+            service,
+            message.method_id,
+            message.body.get("address", 0),
+            message.body.get("setback", 0),
+            echo,
+        )
+
+    def can_satisfy(self, match: ResponseMatch) -> bool:
+        """Return whether the outstanding reply could satisfy this matcher."""
+        slot = match.fields.get("setback")
+        return (
+            (match.service_ids is None or self.service in match.service_ids)
+            and self.method == match.method_id
+            and (match.address is None or self.address == match.address)
+            and self.address == match.fields.get("address", self.address)
+            and (
+                slot is None
+                or self.slot == slot
+                or ThaSetback.CURRENT in (self.slot, slot)
+            )
+            and (
+                self.echo is None
+                or match.fields.get(self.echo[0], self.echo[1]) == self.echo[1]
+            )
+        )
+
+    def overlaps(self, other: DeviceReplySelector) -> bool:
+        """Return whether a single firmware echo could satisfy either selector."""
+        return (
+            self.service == other.service
+            and self.method == other.method
+            and self.address == other.address
+            and self.echo == other.echo
+            and (
+                self.slot == other.slot or ThaSetback.CURRENT in (self.slot, other.slot)
+            )
+        )
+
+    def shares_write_target(
+        self,
+        other: DeviceReplySelector,
+        *,
+        setbacks_enabled: bool,
+    ) -> bool:
+        """Compare storage slots, not echoed values, when ordering writes."""
+        if self.method != other.method or self.address != other.address:
+            return False
+        if (
+            not setbacks_enabled
+            or self.slot is None
+            or other.slot is None
+            or ThaSetback.CURRENT in (self.slot, other.slot)
+        ):
+            return True
+        slots = (
+            SETBACK_FAN_MAP
+            if self.method == TrpcMethod.FAN_PERCENT
+            else SETBACK_SETPOINT_MAP
+        )
+        return slots.get(self.slot, self.slot) == slots.get(other.slot, other.slot)
+
+    def accepts(self, message: TrpcPacket) -> bool:
+        slot = message.get("setback")
+        return (
+            message.service is self.service
+            and message.method_id == self.method
+            and message.get("address") == self.address
+            and (self.echo is None or message.get(self.echo[0]) == self.echo[1])
+            and (
+                slot == self.slot
+                or (self.slot == ThaSetback.CURRENT and slot in ThaSetback)
+            )
         )
 
 
@@ -639,8 +800,39 @@ class ResponseMatch:
         else:
             services = response_services
 
+        method = command.method if response_method is None else response_method
+        spec = method_spec(method)
+        if (
+            method == command.method
+            and command.service in {TrpcService.REQUEST, TrpcService.UPDATE}
+            and spec is not None
+        ):
+            sent = spec.normalize_fields(command.fields)
+            predicates = spec.normalize_fields(freeze_fields(fields))
+            # The inventory address starts a walk; it is not an echoed selector.
+            if (
+                address is None
+                and "address" not in predicates
+                and "address" in spec.field_names
+                and method != TrpcMethod.DEVICE_INVENTORY
+            ):
+                address = sent.get("address", 0)
+            if method == TrpcMethod.SETPOINT_GROUP_ENABLE:
+                predicates.setdefault("group_id", sent.get("group_id", 0))
+            if (
+                method == TrpcMethod.MODE_SETTING
+                and command.service == TrpcService.UPDATE
+            ):
+                predicates.setdefault("mode", sent.get("mode", 0))
+            if method in _SETBACK_INDEXED_METHODS:
+                predicates.setdefault("setback", sent.get("setback", 0))
+                if command.service == TrpcService.UPDATE:
+                    key = _echo_field(method)
+                    predicates.setdefault(key, sent.get(key, 0))
+            fields = predicates
+
         return cls.create(
-            command.method if response_method is None else response_method,
+            method,
             services=services,
             address=address,
             fields=fields,
@@ -654,7 +846,25 @@ class ResponseMatch:
             return False
         if self.address is not None and message.get("address") != self.address:
             return False
-        return all(message.get(key) == value for key, value in self.fields.items())
+        for key, expected in self.fields.items():
+            actual = message.get(key)
+            if actual == expected:
+                continue
+            # The 482 can answer a CURRENT read or write with the resolved slot.
+            if (
+                key == "setback"
+                and expected == ThaSetback.CURRENT
+                and message.service
+                in {
+                    TrpcService.RESPONSE_REQUEST,
+                    TrpcService.RESPONSE_UPDATE,
+                }
+                and message.method in _SETBACK_INDEXED_METHODS
+                and actual in ThaSetback
+            ):
+                continue
+            return False
+        return True
 
 
 @dataclass(slots=True)
@@ -711,6 +921,7 @@ class TrpcPacket:
 
     def to_bytes(self) -> bytes:
         """Serialize the tRPC header and body."""
+        _validate_update(self.service_id, self.method_id, self.body)
         spec = method_spec(self.method_id)
         body = bytearray()
         if spec is not None:
@@ -753,12 +964,25 @@ class TrpcPacket:
         if spec is None:
             return cls(parsed_service_id, parsed_method_id, {}, body_data)
 
-        padded = body_data[: spec.size].ljust(spec.size, b"\x00")
+        if (
+            parsed_service_id
+            in (
+                TrpcService.REPORT,
+                TrpcService.RESPONSE_REQUEST,
+                TrpcService.RESPONSE_UPDATE,
+            )
+            and len(body_data) < spec.size
+        ):
+            msg = (
+                f"Short {spec.name} body: need {spec.size} bytes, got {len(body_data)}"
+            )
+            raise ProtocolError(msg)
         offset = 0
         body: dict[str, int] = {}
         for item in spec.fields:
             next_offset = offset + item.size
-            body[item.name] = _unpack_int(padded[offset:next_offset])
+            if next_offset <= len(body_data):
+                body[item.name] = _unpack_int(body_data[offset:next_offset])
             offset = next_offset
 
         return cls(

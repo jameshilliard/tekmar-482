@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING, Self, assert_never
 
 from .constants import (
     DEVICE_FEATURES,
+    SETBACK_SETPOINT_MAP,
     DeviceAttributeBit,
     DeviceFeature,
     DeviceKind,
@@ -28,46 +29,6 @@ from .decoding import (
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping
-
-
-@dataclass(frozen=True, slots=True)
-class GatewayDateTime:
-    """Date/time fields reported by the 482 gateway."""
-
-    year: int
-    month: int
-    day: int
-    weekday: int
-    hour: int
-    minute: int
-
-    @classmethod
-    def from_mapping(
-        cls,
-        value: GatewayDateTime | Mapping[str, int],
-    ) -> GatewayDateTime:
-        """Build an immutable gateway date/time value."""
-        if isinstance(value, GatewayDateTime):
-            return value
-        return cls(
-            year=value["year"],
-            month=value["month"],
-            day=value["day"],
-            weekday=value["weekday"],
-            hour=value["hour"],
-            minute=value["minute"],
-        )
-
-    def as_dict(self) -> dict[str, int]:
-        """Return a JSON-friendly dictionary."""
-        return {
-            "year": self.year,
-            "month": self.month,
-            "day": self.day,
-            "weekday": self.weekday,
-            "hour": self.hour,
-            "minute": self.minute,
-        }
 
 
 class DeviceValue(StrEnum):
@@ -102,13 +63,13 @@ type _RawSnapshotValue = int | None | _RawSetpointMap
 
 @dataclass(frozen=True, slots=True)
 class DeviceAttributes:
-    """Decoded DeviceAttributes bit field."""
+    """Decoded DeviceAttributes bit field, or None if it was not reported."""
 
-    raw: int = 0
+    raw: int | None = None
 
     def supports(self, bit: DeviceAttributeBit) -> bool:
         """Return whether the raw DeviceAttributes bit is set."""
-        return bool(self.raw & bit)
+        return self.raw is not None and bool(self.raw & bit)
 
     @property
     def heat_setpoint(self) -> bool:
@@ -137,6 +98,10 @@ class DeviceAttributes:
         return self.supports(DeviceAttributeBit.FAN_PERCENT)
 
     @property
+    def relative_humidity(self) -> bool:
+        return self.supports(DeviceAttributeBit.RELATIVE_HUMIDITY)
+
+    @property
     def humidity_setpoint_min(self) -> bool:
         return self.supports(DeviceAttributeBit.HUMIDITY_SET_MIN)
 
@@ -146,7 +111,11 @@ class DeviceAttributes:
 
     @property
     def humidity(self) -> bool:
-        return self.humidity_setpoint_min or self.humidity_setpoint_max
+        return (
+            self.relative_humidity
+            or self.humidity_setpoint_min
+            or self.humidity_setpoint_max
+        )
 
     @property
     def setpoint_device(self) -> bool:
@@ -216,17 +185,17 @@ class DiscoveredDevice:
 
     @property
     def supports_heat_setpoint(self) -> bool:
+        if self.attributes.raw is not None:
+            return self.attributes.heat_setpoint
         feature = self.feature
-        return self.attributes.heat_setpoint or (
-            feature is not None and feature.supports_heat
-        )
+        return feature is not None and feature.supports_heat
 
     @property
     def supports_cool_setpoint(self) -> bool:
+        if self.attributes.raw is not None:
+            return self.attributes.cool_setpoint
         feature = self.feature
-        return self.attributes.cool_setpoint or (
-            feature is not None and feature.supports_cool
-        )
+        return feature is not None and feature.supports_cool
 
     @property
     def supports_slab_setpoint(self) -> bool:
@@ -234,24 +203,28 @@ class DiscoveredDevice:
 
     @property
     def supports_fan_percent(self) -> bool:
+        if self.attributes.raw is not None:
+            return self.attributes.fan_percent
         feature = self.feature
-        return self.attributes.fan_percent or (
-            feature is not None and feature.supports_fan
-        )
+        return feature is not None and feature.supports_fan
+
+    @property
+    def supports_relative_humidity(self) -> bool:
+        if self.attributes.raw is not None:
+            return self.attributes.relative_humidity
+        feature = self.feature
+        return feature is not None and feature.supports_humidity
 
     @property
     def supports_humidity(self) -> bool:
-        feature = self.feature
-        return self.attributes.humidity or (
-            feature is not None and feature.supports_humidity
-        )
+        return self.attributes.humidity or self.supports_relative_humidity
 
     @property
     def supports_setpoint_device(self) -> bool:
+        if self.attributes.raw is not None:
+            return self.attributes.setpoint_device
         feature = self.feature
-        return self.attributes.setpoint_device or (
-            feature is not None and feature.kind is DeviceKind.SETPOINT
-        )
+        return feature is not None and feature.kind is DeviceKind.SETPOINT
 
     @property
     def supports_mode_setting(self) -> bool:
@@ -281,19 +254,12 @@ class GatewaySnapshot:
     info: GatewayInfo
     outdoor_temp: int | None = None
     network_error: int | None = None
-    date_time: GatewayDateTime | None = None
     reporting_enabled: bool | None = None
     setback_enabled: bool | None = None
     setpoint_groups: Mapping[int, bool | None] | None = None
 
     def __post_init__(self) -> None:
         """Freeze mutable constructor inputs."""
-        if self.date_time is not None:
-            object.__setattr__(
-                self,
-                "date_time",
-                GatewayDateTime.from_mapping(self.date_time),
-            )
         if self.setpoint_groups is not None:
             object.__setattr__(
                 self,
@@ -396,19 +362,12 @@ class GatewayRuntime:
     metadata: GatewayInfo
     outdoor_temp: int | None = None
     network_error: int | None = None
-    date_time: GatewayDateTime | None = None
     reporting_enabled: bool | None = None
     setback_enabled: bool | None = None
     setpoint_groups: Mapping[int, bool | None] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         """Freeze mutable constructor inputs."""
-        if self.date_time is not None:
-            object.__setattr__(
-                self,
-                "date_time",
-                GatewayDateTime.from_mapping(self.date_time),
-            )
         object.__setattr__(
             self,
             "setpoint_groups",
@@ -427,7 +386,6 @@ class GatewayRuntime:
             metadata=snapshot.info,
             outdoor_temp=snapshot.outdoor_temp,
             network_error=snapshot.network_error,
-            date_time=snapshot.date_time,
             reporting_enabled=snapshot.reporting_enabled,
             setback_enabled=snapshot.setback_enabled,
             setpoint_groups=dict(snapshot.setpoint_groups or {}),
@@ -442,6 +400,19 @@ class GatewayRuntime:
     def decoded_network_error(self) -> object:
         """Return decoded network error metadata."""
         return decode_network_error(self.network_error)
+
+
+def _current_setpoint[T](
+    values: Mapping[ThaSetback, T | None],
+    active: ThaSetback | None,
+    observed: ThaSetback | None,
+) -> T | None:
+    if active is None or active is ThaSetback.CURRENT:
+        return values.get(ThaSetback.CURRENT)
+    value = values.get(active)
+    if value is None and observed == active:
+        return values.get(ThaSetback.CURRENT)
+    return value
 
 
 @dataclass(frozen=True, slots=True)
@@ -505,21 +476,11 @@ class SetpointValues:
     @property
     def current(self) -> int | None:
         """Return the active setpoint value."""
-        if (
-            self.active_setback is not None
-            and self.active_setback is not ThaSetback.CURRENT
-        ):
-            if self.current_observed_setback == self.active_setback:
-                active_value = self.values.get(self.active_setback)
-                return (
-                    self.values.get(ThaSetback.CURRENT)
-                    if active_value is None
-                    else active_value
-                )
-            if self.active_setback in self.values:
-                return self.values[self.active_setback]
-            return None
-        return self.values.get(ThaSetback.CURRENT)
+        return _current_setpoint(
+            self.values,
+            self.active_setback,
+            self.current_observed_setback,
+        )
 
     @property
     def wake_4(self) -> int | None:
@@ -555,19 +516,62 @@ class SetpointValues:
             return self.current
         return self.values.get(setback)
 
-    def with_value(self, setback: ThaSetback, value: int | None) -> SetpointValues:
-        """Return a copy with one setback value updated."""
+    def with_value(
+        self,
+        setback: ThaSetback,
+        value: int | None,
+        *,
+        requested_current: bool = False,
+        confirmed_write: bool = False,
+        setbacks_enabled: bool | None = None,
+    ) -> SetpointValues:
+        """Apply a wire observation to the affected setpoint cache slots."""
+        active_state = self.active_setback
+        if requested_current and setback is not ThaSetback.CURRENT:
+            active_state = setback
+        active = _current_observed_setback(active_state)
+        target = active if setback is ThaSetback.CURRENT else setback
+        bucket = SETBACK_SETPOINT_MAP[target] if target is not None else None
         values = dict(self.values)
-        values[setback] = value
-        current_observed_setback = self.current_observed_setback
-        if setback is ThaSetback.CURRENT:
-            current_observed_setback = _current_observed_setback(self.active_setback)
-            if current_observed_setback is not None:
-                values[current_observed_setback] = value
+        observed = self.current_observed_setback
+        slots = {*values, setback, ThaSetback.CURRENT}
+        if active is not None:
+            slots.add(active)
+        # All five methods read the same three buckets. Fan's bus write key
+        # is different, but its cached Away value is separate from Unoccupied.
+        for slot in slots:
+            named = active if slot is ThaSetback.CURRENT else slot
+            aliases = named is not None and SETBACK_SETPOINT_MAP[named] == bucket
+            if (
+                slot is setback
+                or (requested_current and slot is ThaSetback.CURRENT)
+                or (confirmed_write and setbacks_enabled is False)
+                or (
+                    aliases
+                    and (
+                        confirmed_write
+                        or slot in (active, ThaSetback.CURRENT)
+                        or values.get(slot) is not None
+                    )
+                )
+            ):
+                values[slot] = value
+            elif (
+                confirmed_write
+                and slot in values
+                and (setbacks_enabled is None or named is None or target is None)
+            ):
+                # The write might have changed this slot. Wait for fresh evidence.
+                values[slot] = None
+            else:
+                continue
+            if slot is ThaSetback.CURRENT:
+                observed = active if values[slot] is not None else None
         return replace(
             self,
             values=values,
-            current_observed_setback=current_observed_setback,
+            active_setback=active_state,
+            current_observed_setback=observed,
         )
 
     def with_active_setback(
@@ -620,7 +624,8 @@ class DecodedSetbackValues[DecodedValue]:
     ) -> DecodedSetbackValues[DecodedValue]:
         """Decode raw setpoint values."""
         return cls(
-            {setback: decoder(value) for setback, value in setpoints.values.items()},
+            # Resolve CURRENT while missing readings and wire NA are distinct.
+            {slot: decoder(setpoints.get(slot)) for slot in setpoints.values},
             setpoints.active_setback,
             setpoints.current_observed_setback,
         )
@@ -628,21 +633,11 @@ class DecodedSetbackValues[DecodedValue]:
     @property
     def current(self) -> DecodedValue | None:
         """Return the active decoded value."""
-        if (
-            self.active_setback is not None
-            and self.active_setback is not ThaSetback.CURRENT
-        ):
-            if self.current_observed_setback == self.active_setback:
-                active_value = self.values.get(self.active_setback)
-                return (
-                    self.values.get(ThaSetback.CURRENT)
-                    if active_value is None
-                    else active_value
-                )
-            if self.active_setback in self.values:
-                return self.values[self.active_setback]
-            return None
-        return self.values.get(ThaSetback.CURRENT)
+        return _current_setpoint(
+            self.values,
+            self.active_setback,
+            self.current_observed_setback,
+        )
 
     def get(self, setback: ThaSetback) -> DecodedValue | None:
         """Return a decoded value by setback enum."""
@@ -948,26 +943,10 @@ class DeviceRuntime:
         """Return a copy with one scalar value updated."""
         available_values = self.available_values | {value}
         if value is DeviceValue.SETBACK_STATE:
-            active_setback = setback_from_value(raw)
             return replace(
-                self,
+                self.with_active_setback(setback_from_value(raw)),
                 available_values=available_values,
                 setback_state=raw,
-                setpoint_targets=self.setpoint_targets.with_active_setback(
-                    active_setback,
-                ),
-                heat_setpoints=self.heat_setpoints.with_active_setback(
-                    active_setback,
-                ),
-                cool_setpoints=self.cool_setpoints.with_active_setback(
-                    active_setback,
-                ),
-                slab_setpoints=self.slab_setpoints.with_active_setback(
-                    active_setback,
-                ),
-                fan_percent=self.fan_percent.with_active_setback(
-                    active_setback,
-                ),
             )
         if value is DeviceValue.CURRENT_TEMPERATURE:
             return replace(
@@ -1011,38 +990,52 @@ class DeviceRuntime:
         value: DeviceValue,
         setback: ThaSetback,
         raw: int | None,
+        *,
+        requested_current: bool = False,
+        confirmed_write: bool = False,
+        setbacks_enabled: bool | None = None,
     ) -> Self:
         """Return a copy with one setpoint-like value updated."""
         available_values = self.available_values | {value}
+
+        def updated(values: SetpointValues) -> SetpointValues:
+            return values.with_value(
+                setback,
+                raw,
+                requested_current=requested_current,
+                confirmed_write=confirmed_write,
+                setbacks_enabled=setbacks_enabled,
+            )
+
         if value is DeviceValue.SETPOINT_TARGETS:
             return replace(
                 self,
                 available_values=available_values,
-                setpoint_targets=self.setpoint_targets.with_value(setback, raw),
+                setpoint_targets=updated(self.setpoint_targets),
             )
         if value is DeviceValue.HEAT_SETPOINTS:
             return replace(
                 self,
                 available_values=available_values,
-                heat_setpoints=self.heat_setpoints.with_value(setback, raw),
+                heat_setpoints=updated(self.heat_setpoints),
             )
         if value is DeviceValue.COOL_SETPOINTS:
             return replace(
                 self,
                 available_values=available_values,
-                cool_setpoints=self.cool_setpoints.with_value(setback, raw),
+                cool_setpoints=updated(self.cool_setpoints),
             )
         if value is DeviceValue.SLAB_SETPOINTS:
             return replace(
                 self,
                 available_values=available_values,
-                slab_setpoints=self.slab_setpoints.with_value(setback, raw),
+                slab_setpoints=updated(self.slab_setpoints),
             )
         if value is DeviceValue.FAN_PERCENT:
             return replace(
                 self,
                 available_values=available_values,
-                fan_percent=self.fan_percent.with_value(setback, raw),
+                fan_percent=updated(self.fan_percent),
             )
         msg = f"{value.value} is not a setpoint value"
         raise TypeError(msg)

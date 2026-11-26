@@ -5,6 +5,17 @@ from tekmar_482.tpck import EOF, ESC, SOF, TpckParser, serialize
 
 
 class TpckTest(unittest.TestCase):
+    def test_only_unescaped_eof_terminates_a_complete_frame(self) -> None:
+        packet = Packet(TYPE_TRPC, bytes([EOF]))
+        frame = serialize(packet)
+        for invalid in (
+            frame.replace(bytes([ESC, EOF]), bytes([EOF]), 1),
+            frame[:-1] + bytes([ESC, EOF]),
+            frame[:-1] + b"\x01" + frame[-1:],
+        ):
+            with self.subTest(invalid=invalid):
+                assert TpckParser().feed_many(invalid + frame) == [packet]
+
     def test_tpck_round_trip_with_escaped_bytes(self) -> None:
         packet = Packet(TYPE_TRPC, bytes([SOF, EOF, ESC, 0x00]))
 

@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
-from dataclasses import replace
+from dataclasses import dataclass, replace
+from enum import Enum, auto
+from typing import TYPE_CHECKING
 
+from .constants import ThaSetback
 from .exceptions import ProtocolError
 from .models import (
     AvailableInfo,
@@ -12,10 +15,20 @@ from .models import (
     DeviceValue,
     DiscoveredDevice,
     DiscoveryResult,
-    GatewayDateTime,
+    SetpointValues,
     setback_from_value,
 )
-from .trpc import TrpcMethod, TrpcPacket, TrpcService, method_name
+from .trpc import (
+    TrpcCommand,
+    TrpcMethod,
+    TrpcPacket,
+    TrpcService,
+    method_name,
+    response_service_for,
+)
+
+if TYPE_CHECKING:
+    from collections.abc import Iterable
 
 RUNTIME_SERVICES = {
     TrpcService.REPORT,
@@ -24,7 +37,6 @@ RUNTIME_SERVICES = {
 }
 
 GATEWAY_METHODS = {
-    TrpcMethod.DATE_TIME,
     TrpcMethod.NETWORK_ERROR,
     TrpcMethod.OUTDOOR_TEMP,
     TrpcMethod.REPORTING_STATE,
@@ -32,43 +44,76 @@ GATEWAY_METHODS = {
     TrpcMethod.SETPOINT_GROUP_ENABLE,
 }
 
-DEVICE_VALUE_METHODS = {
-    TrpcMethod.ACTIVE_DEMAND,
-    TrpcMethod.COOL_SETPOINT,
-    TrpcMethod.CURRENT_FLOOR_TEMPERATURE,
-    TrpcMethod.CURRENT_TEMPERATURE,
-    TrpcMethod.FAN_PERCENT,
-    TrpcMethod.HEAT_SETPOINT,
-    TrpcMethod.HUMIDITY_SET_MAX,
-    TrpcMethod.HUMIDITY_SET_MIN,
-    TrpcMethod.MODE_SETTING,
-    TrpcMethod.RELATIVE_HUMIDITY,
-    TrpcMethod.SETBACK_STATE,
-    TrpcMethod.SETPOINT_DEVICE,
-    TrpcMethod.SLAB_SETPOINT,
-}
 
-SETPOINT_METHODS = {
-    TrpcMethod.COOL_SETPOINT: (DeviceValue.COOL_SETPOINTS, "setpoint"),
-    TrpcMethod.FAN_PERCENT: (DeviceValue.FAN_PERCENT, "percent"),
-    TrpcMethod.HEAT_SETPOINT: (DeviceValue.HEAT_SETPOINTS, "setpoint"),
-    TrpcMethod.SETPOINT_DEVICE: (DeviceValue.SETPOINT_TARGETS, "temp"),
-    TrpcMethod.SLAB_SETPOINT: (DeviceValue.SLAB_SETPOINTS, "setpoint"),
-}
+@dataclass(frozen=True, slots=True)
+class DeviceField:
+    key: DeviceValue
+    wire_name: str
+    indexed: bool = False
 
-SCALAR_METHODS = {
-    TrpcMethod.ACTIVE_DEMAND: (DeviceValue.ACTIVE_DEMAND, "demand"),
-    TrpcMethod.CURRENT_FLOOR_TEMPERATURE: (
+
+# In poll order: in particular SetbackState precedes any CURRENT requests.
+DEVICE_FIELDS = {
+    TrpcMethod.CURRENT_TEMPERATURE: DeviceField(
+        DeviceValue.CURRENT_TEMPERATURE,
+        "temp",
+    ),
+    TrpcMethod.ACTIVE_DEMAND: DeviceField(DeviceValue.ACTIVE_DEMAND, "demand"),
+    TrpcMethod.SETBACK_STATE: DeviceField(DeviceValue.SETBACK_STATE, "setback"),
+    TrpcMethod.CURRENT_FLOOR_TEMPERATURE: DeviceField(
         DeviceValue.CURRENT_FLOOR_TEMPERATURE,
         "temp",
     ),
-    TrpcMethod.CURRENT_TEMPERATURE: (DeviceValue.CURRENT_TEMPERATURE, "temp"),
-    TrpcMethod.HUMIDITY_SET_MAX: (DeviceValue.HUMIDITY_SETPOINT_MAX, "percent"),
-    TrpcMethod.HUMIDITY_SET_MIN: (DeviceValue.HUMIDITY_SETPOINT_MIN, "percent"),
-    TrpcMethod.MODE_SETTING: (DeviceValue.MODE_SETTING, "mode"),
-    TrpcMethod.RELATIVE_HUMIDITY: (DeviceValue.RELATIVE_HUMIDITY, "percent"),
-    TrpcMethod.SETBACK_STATE: (DeviceValue.SETBACK_STATE, "setback"),
+    TrpcMethod.MODE_SETTING: DeviceField(DeviceValue.MODE_SETTING, "mode"),
+    TrpcMethod.HEAT_SETPOINT: DeviceField(
+        DeviceValue.HEAT_SETPOINTS,
+        "setpoint",
+        indexed=True,
+    ),
+    TrpcMethod.COOL_SETPOINT: DeviceField(
+        DeviceValue.COOL_SETPOINTS,
+        "setpoint",
+        indexed=True,
+    ),
+    TrpcMethod.SLAB_SETPOINT: DeviceField(
+        DeviceValue.SLAB_SETPOINTS,
+        "setpoint",
+        indexed=True,
+    ),
+    TrpcMethod.FAN_PERCENT: DeviceField(
+        DeviceValue.FAN_PERCENT,
+        "percent",
+        indexed=True,
+    ),
+    TrpcMethod.RELATIVE_HUMIDITY: DeviceField(DeviceValue.RELATIVE_HUMIDITY, "percent"),
+    TrpcMethod.HUMIDITY_SET_MIN: DeviceField(
+        DeviceValue.HUMIDITY_SETPOINT_MIN,
+        "percent",
+    ),
+    TrpcMethod.HUMIDITY_SET_MAX: DeviceField(
+        DeviceValue.HUMIDITY_SETPOINT_MAX,
+        "percent",
+    ),
+    TrpcMethod.SETPOINT_DEVICE: DeviceField(
+        DeviceValue.SETPOINT_TARGETS,
+        "temp",
+        indexed=True,
+    ),
 }
+DEVICE_VALUE_METHODS = set(DEVICE_FIELDS)
+SETPOINT_METHODS = {
+    method: (field.key, field.wire_name)
+    for method, field in DEVICE_FIELDS.items()
+    if field.indexed
+}
+
+
+class MessageApplyResult(Enum):
+    """Result of applying a tRPC message to runtime state."""
+
+    UNSUPPORTED = auto()
+    UNCHANGED = auto()
+    CHANGED = auto()
 
 
 def is_runtime_message(message: TrpcPacket) -> bool:
@@ -89,21 +134,22 @@ def device_supports_method(device: DiscoveredDevice, method: TrpcMethod) -> bool
         return device.supports_cool_setpoint
     if method == TrpcMethod.SLAB_SETPOINT:
         return device.supports_slab_setpoint
+    if method == TrpcMethod.CURRENT_FLOOR_TEMPERATURE:
+        return device.attributes.slab_setpoint
     if method == TrpcMethod.FAN_PERCENT:
         return device.supports_fan_percent
-    if method in {
-        TrpcMethod.RELATIVE_HUMIDITY,
-        TrpcMethod.HUMIDITY_SET_MIN,
-        TrpcMethod.HUMIDITY_SET_MAX,
-    }:
-        return device.supports_humidity
+    if method == TrpcMethod.RELATIVE_HUMIDITY:
+        return device.supports_relative_humidity
+    if method == TrpcMethod.HUMIDITY_SET_MIN:
+        return device.attributes.humidity_setpoint_min
+    if method == TrpcMethod.HUMIDITY_SET_MAX:
+        return device.attributes.humidity_setpoint_max
     if method == TrpcMethod.SETPOINT_DEVICE:
         return device.supports_setpoint_device
     if method == TrpcMethod.MODE_SETTING:
         return device.supports_mode_setting
     return method in {
         TrpcMethod.ACTIVE_DEMAND,
-        TrpcMethod.CURRENT_FLOOR_TEMPERATURE,
         TrpcMethod.CURRENT_TEMPERATURE,
         TrpcMethod.SETBACK_STATE,
     }
@@ -162,17 +208,104 @@ class Tekmar482State:
 
         Returns True when the stored snapshot changed.
         """
-        updated = apply_message(self.discovery, self.data, message)
-        if updated is None or updated == self.data:
+        return self.apply_message_result(message) is MessageApplyResult.CHANGED
+
+    def expire_setpoint_group(self, group_id: int) -> bool:
+        """Forget a previously enabled group that the gateway did not reconfirm."""
+        groups = self.data.gateway.setpoint_groups
+        if not groups or groups.get(group_id) is not True:
             return False
-        self.data = updated
+        gateway = replace(self.data.gateway, setpoint_groups={**groups, group_id: None})
+        self.data = replace(self.data, gateway=gateway)
         return True
+
+    def invalidate_devices(self, addresses: set[int]) -> bool:
+        """Discard occupant-specific readings without removing discovery metadata."""
+        if not addresses:
+            return False
+        devices = tuple(
+            DeviceSnapshot(
+                DeviceRuntime.create(
+                    info=s.info,
+                    available_values=s.runtime.available_values,
+                ),
+            )
+            if s.info.address in addresses
+            else s
+            for s in self.data.devices
+        )
+        if self.data.devices == devices:
+            return False
+        self.data = replace(self.data, devices=devices)
+        return True
+
+    def apply_message_result(
+        self,
+        message: TrpcPacket,
+        command: TrpcCommand | None = None,
+    ) -> MessageApplyResult:
+        """Apply a report/response message and return the reducer outcome."""
+        updated = apply_message(self.discovery, self.data, message, command)
+        if updated is None:
+            return MessageApplyResult.UNSUPPORTED
+        if updated == self.data:
+            return MessageApplyResult.UNCHANGED
+        self.data = updated
+        return MessageApplyResult.CHANGED
+
+
+def _retain_device(empty: DeviceRuntime, prior: DeviceRuntime | None) -> DeviceRuntime:
+    if prior is None or empty.info.type_code is None or prior.info != empty.info:
+        return empty
+    empty = empty.with_active_setback(setback_from_value(prior.setback_state))
+    retained = {}
+    for key in empty.available_values & prior.available_values:
+        value = getattr(prior, key.value)
+        if isinstance(value, SetpointValues):
+            # A broader scan can declare additional slots before any reply arrives.
+            planned: SetpointValues = getattr(empty, key.value)
+            value = replace(value, values={**planned.values, **value.values})
+        retained[key.value] = value
+    return replace(empty, **retained)
+
+
+def reconcile_runtime(
+    discovery: DiscoveryResult,
+    empty: AvailableInfo,
+    previous: AvailableInfo | None,
+    observations: Iterable[tuple[TrpcPacket, TrpcCommand | None]],
+) -> AvailableInfo:
+    """Replay wire observations over the scan shape and any same-session values."""
+    data = empty
+    if previous is not None:
+        groups = {
+            **(empty.gateway.setpoint_groups or {}),
+            **(previous.gateway.setpoint_groups or {}),
+        }
+        prior = {s.info.address: s.runtime for s in previous.devices}
+        data = AvailableInfo(
+            replace(
+                previous.gateway,
+                info=empty.gateway.info,
+                setpoint_groups=groups or None,
+            ),
+            tuple(
+                DeviceSnapshot(_retain_device(s.runtime, prior.get(s.info.address)))
+                for s in empty.devices
+            ),
+        )
+    for message, command in observations:
+        updated = apply_message(discovery, data, message, command)
+        if updated is not None:
+            data = updated
+    return data
 
 
 def apply_message(
     discovery: DiscoveryResult,
     data: AvailableInfo,
     message: TrpcPacket,
+    command: TrpcCommand | None = None,
 ) -> AvailableInfo | None:
     """Return updated runtime data after applying one tRPC message."""
     if not is_runtime_message(message):
@@ -189,14 +322,12 @@ def apply_message(
         return None
 
     address = message.get("address")
-    if address is None:
+    if address is None or not any(
+        device.address == address for device in discovery.devices
+    ):
         return None
 
-    devices = {device.address for device in discovery.devices}
-    if address not in devices:
-        return None
-
-    return _apply_device_message(discovery, data, address, method, message)
+    return _apply_device_message(discovery, data, address, method, message, command)
 
 
 def _apply_gateway_message(
@@ -229,27 +360,19 @@ def _apply_gateway_message(
             data,
             gateway=replace(
                 data.gateway,
-                setback_enabled=None if enable is None else bool(enable),
+                setback_enabled=bool(enable) if enable in (0, 1) else None,
             ),
         )
     if method == TrpcMethod.SETPOINT_GROUP_ENABLE:
         group_id = message.get("group_id")
         enable = message.get("enable")
-        if group_id is None:
+        if group_id is None or group_id not in range(1, 13):
             return None
         groups = dict(data.gateway.setpoint_groups or {})
-        groups[group_id] = None if enable is None else bool(enable)
+        groups[group_id] = bool(enable) if enable in (0, 1) else None
         return replace(
             data,
             gateway=replace(data.gateway, setpoint_groups=groups),
-        )
-    if method == TrpcMethod.DATE_TIME:
-        date_time = _message_datetime(message)
-        if date_time is None:
-            return None
-        return replace(
-            data,
-            gateway=replace(data.gateway, date_time=date_time),
         )
     return None
 
@@ -260,6 +383,7 @@ def _apply_device_message(
     address: int,
     method: TrpcMethod,
     message: TrpcPacket,
+    command: TrpcCommand | None,
 ) -> AvailableInfo | None:
     snapshots = {snapshot.info.address: snapshot for snapshot in data.devices}
     snapshot = snapshots.get(address)
@@ -267,16 +391,25 @@ def _apply_device_message(
         return None
 
     runtime = snapshot.runtime
-    if method in SCALAR_METHODS:
-        value, field = SCALAR_METHODS[method]
-        runtime = runtime.with_scalar(value, message.get(field))
-    elif method in SETPOINT_METHODS:
-        updated_runtime = _apply_setpoint_report(runtime, method, message)
+    if (
+        method is TrpcMethod.CURRENT_FLOOR_TEMPERATURE
+        and not runtime.info.attributes.slab_setpoint
+    ):
+        return None
+    field = DEVICE_FIELDS[method]
+    if field.indexed:
+        updated_runtime = _apply_setpoint_report(
+            runtime,
+            method,
+            message,
+            command,
+            setbacks_enabled=data.gateway.setback_enabled,
+        )
         if updated_runtime is None:
             return None
         runtime = updated_runtime
     else:
-        return None
+        runtime = runtime.with_scalar(field.key, message.get(field.wire_name))
 
     snapshots[address] = DeviceSnapshot(runtime)
     return replace(
@@ -293,35 +426,32 @@ def _apply_setpoint_report(
     runtime: DeviceRuntime,
     method: TrpcMethod,
     message: TrpcPacket,
+    command: TrpcCommand | None,
+    *,
+    setbacks_enabled: bool | None,
 ) -> DeviceRuntime | None:
-    value_key, field = SETPOINT_METHODS[method]
+    field = DEVICE_FIELDS[method]
     setback = setback_from_value(message.get("setback"))
     if setback is None:
         return None
-    return runtime.with_setpoint(value_key, setback, message.get(field))
-
-
-def _message_datetime(message: TrpcPacket) -> GatewayDateTime | None:
-    year = message.get("year")
-    month = message.get("month")
-    day = message.get("day")
-    weekday = message.get("weekday")
-    hour = message.get("hour")
-    minute = message.get("minute")
-    if (
-        year is None
-        or month is None
-        or day is None
-        or weekday is None
-        or hour is None
-        or minute is None
+    raw = message.get(field.wire_name)
+    if command is None or (
+        command.method != method
+        or command.fields.get("address") != message.get("address")
+        or command.fields.get("setback") not in (ThaSetback.CURRENT, setback)
+        or message.service != response_service_for(command.service)
     ):
-        return None
-    return GatewayDateTime(
-        year=year,
-        month=month,
-        day=day,
-        weekday=weekday,
-        hour=hour,
-        minute=minute,
+        return runtime.with_setpoint(field.key, setback, raw)
+    requested_current = command.fields.get("setback") == ThaSetback.CURRENT
+    if requested_current and setback is not ThaSetback.CURRENT:
+        # FW06 resolves CURRENT from the same device byte as SetbackState.
+        runtime = runtime.with_scalar(DeviceValue.SETBACK_STATE, int(setback))
+    return runtime.with_setpoint(
+        field.key,
+        setback,
+        raw,
+        requested_current=requested_current,
+        confirmed_write=command.service == TrpcService.UPDATE
+        and raw == command.fields.get(field.wire_name),
+        setbacks_enabled=setbacks_enabled,
     )

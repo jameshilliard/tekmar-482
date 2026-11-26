@@ -101,6 +101,11 @@ class TpckParser:
         elif value == SOF:
             self._start_frame()
             return None
+        elif value == EOF:
+            try:
+                return self._finish_frame() if self._state is _State.EOF else None
+            finally:
+                self.reset()
 
         if self._state is _State.LENGTH:
             self._length = value
@@ -124,11 +129,8 @@ class TpckParser:
             self._state = _State.EOF
             return None
 
-        if self._state is _State.EOF and value == EOF:
-            packet = self._finish_frame()
-            self.reset()
-            return packet
-
+        # The checksum must be followed by the unescaped frame terminator.
+        self.reset()
         return None
 
     def _start_frame(self) -> None:

@@ -1,6 +1,8 @@
 import unittest
 
 from tekmar_482 import (
+    SETBACK_2_EVENT_SETBACKS,
+    SETBACK_4_EVENT_SETBACKS,
     AvailableInfo,
     DecodedSetbackValues,
     DeviceAttributeBit,
@@ -10,7 +12,6 @@ from tekmar_482 import (
     DeviceValue,
     DiscoveredDevice,
     DiscoveryResult,
-    GatewayDateTime,
     GatewayInfo,
     GatewayRuntime,
     GatewaySnapshot,
@@ -18,11 +19,14 @@ from tekmar_482 import (
     Tekmar482State,
     ThaSetback,
     ThermostatRuntime,
+    TrpcCommand,
     TrpcMethod,
     TrpcPacket,
     TrpcService,
     apply_message,
+    decode_dege,
     is_topology_message,
+    schedule_setbacks_for_events,
 )
 
 
@@ -60,6 +64,134 @@ def _state() -> Tekmar482State:
 
 
 class StateTest(unittest.TestCase):
+    def test_reported_setpoint_capability_takes_precedence_over_model(self) -> None:
+        for attrs, expected in ((None, True), (0, False), (128, True)):
+            device = DiscoveredDevice(
+                1201,
+                type_code=101101,
+                attributes=DeviceAttributes(attrs),
+            )
+            assert device.supports_setpoint_device is expected
+
+    def test_current_reply_selects_one_period_for_the_entire_device(self) -> None:
+        state = _state()
+        occupied, away = ThaSetback.OCC_2, ThaSetback.AWAY
+        for slot, value in ((occupied, 50), (away, 56)):
+            state.apply_message(
+                TrpcPacket.create(
+                    method=TrpcMethod.COOL_SETPOINT,
+                    service=TrpcService.REPORT,
+                    fields={"address": 1201, "setback": slot, "setpoint": value},
+                ),
+            )
+        state.apply_message(
+            TrpcPacket.create(
+                method=TrpcMethod.SETBACK_STATE,
+                service=TrpcService.REPORT,
+                fields={"address": 1201, "setback": occupied},
+            ),
+        )
+        command = TrpcCommand.request(
+            TrpcMethod.HEAT_SETPOINT,
+            {"address": 1201, "setback": ThaSetback.CURRENT},
+        )
+        reply = TrpcPacket.create(
+            method=command.method,
+            service=TrpcService.RESPONSE_REQUEST,
+            fields={"address": 1201, "setback": away, "setpoint": 40},
+        )
+        state.apply_message_result(reply)
+        assert state.device_snapshots[1201].runtime.cool_setpoints.current == 50
+        state.apply_message_result(reply, command)
+        runtime = state.device_snapshots[1201].runtime
+        assert runtime.setback_state == away
+        assert runtime.heat_setpoints.current == 40
+        assert runtime.cool_setpoints.current == 56
+        assert runtime.fan_percent.active_setback is away
+
+    def test_unsupported_floor_report_cannot_supply_a_temperature(self) -> None:
+        state = _state()
+        assert not state.apply_message(
+            TrpcPacket.create(
+                method=TrpcMethod.CURRENT_FLOOR_TEMPERATURE,
+                service=TrpcService.REPORT,
+                fields={"address": 1201, "temp": 1500},
+            ),
+        )
+        assert state.device_snapshots[1201].runtime.current_floor_temperature is None
+
+    def test_confirmed_heat_write_updates_only_the_affected_cache_slots(self) -> None:
+        method = TrpcMethod.HEAT_SETPOINT
+        for enabled, expected_away in ((1, 30), (0, 44), (None, None)):
+            with self.subTest(enabled=enabled):
+                state = _state()
+                if enabled is not None:
+                    state.apply_message(
+                        TrpcPacket.create(
+                            service=TrpcService.REPORT,
+                            method=TrpcMethod.SETBACK_ENABLE,
+                            fields={"enable": enabled},
+                        ),
+                    )
+                state.apply_message(
+                    TrpcPacket.create(
+                        service=TrpcService.REPORT,
+                        method=TrpcMethod.SETBACK_STATE,
+                        fields={"address": 1201, "setback": ThaSetback.WAKE_4},
+                    ),
+                )
+                for slot, value in ((ThaSetback.CURRENT, 38), (ThaSetback.AWAY, 30)):
+                    state.apply_message(
+                        TrpcPacket.create(
+                            service=TrpcService.REPORT,
+                            method=method,
+                            fields={
+                                "address": 1201,
+                                "setback": slot,
+                                "setpoint": value,
+                            },
+                        ),
+                    )
+                command = TrpcCommand.update(
+                    method,
+                    {"address": 1201, "setback": ThaSetback.OCC_4, "setpoint": 44},
+                )
+                ack = TrpcPacket.create(
+                    service=TrpcService.RESPONSE_UPDATE,
+                    method=method,
+                    fields=command.fields,
+                )
+                state.apply_message_result(ack, command)
+                values = state.device_snapshots[1201].runtime.heat_setpoints
+                assert values.current == values.wake_4 == values.occ_4 == 44
+                assert values.away == expected_away
+                assert ThaSetback.OCC_2 not in values.values
+
+    def test_enabled_fan_write_keeps_away_distinct_from_unoccupied(self) -> None:
+        runtime = DeviceRuntime.create(
+            info=DiscoveredDevice(address=1201),
+            fan_percent=SetpointValues.from_mapping(
+                {ThaSetback.AWAY: 80, ThaSetback.SLEEP_4: 20},
+                active_setback=ThaSetback.AWAY,
+            ),
+        )
+        values = runtime.with_setpoint(
+            DeviceValue.FAN_PERCENT,
+            ThaSetback.UNOCC_2,
+            40,
+            confirmed_write=True,
+            setbacks_enabled=True,
+        ).fan_percent
+        assert values.unocc_2 == values.sleep_4 == 40
+        assert values.away == values.current == 80
+
+    def test_schedule_setbacks_for_events(self) -> None:
+        assert schedule_setbacks_for_events(0) == ()
+        assert schedule_setbacks_for_events(2) == SETBACK_2_EVENT_SETBACKS
+        assert schedule_setbacks_for_events(4) == SETBACK_4_EVENT_SETBACKS
+        assert schedule_setbacks_for_events(7) is None
+        assert schedule_setbacks_for_events(None) is None
+
     def test_state_applies_gateway_and_device_reports(self) -> None:
         state = _state()
 
@@ -195,7 +327,7 @@ class StateTest(unittest.TestCase):
         )
         runtime = state.runtime(1201)
         assert runtime is not None
-        assert runtime.setpoint_target == 1500
+        assert runtime.setpoint_target == 1400
         assert runtime.setpoint_targets.wake_4 == 1400
 
         state.apply_message(
@@ -327,27 +459,15 @@ class StateTest(unittest.TestCase):
         raw_setpoints[ThaSetback.OCC_2] = 99
 
         raw_groups = {1: True}
-        raw_date_time = {
-            "year": 2026,
-            "month": 6,
-            "day": 9,
-            "weekday": 2,
-            "hour": 21,
-            "minute": 46,
-        }
-        date_time = GatewayDateTime.from_mapping(raw_date_time)
         gateway = GatewaySnapshot(
             info=GatewayInfo(),
-            date_time=date_time,
             setpoint_groups=raw_groups,
         )
         runtime = GatewayRuntime(
             metadata=GatewayInfo(),
-            date_time=date_time,
             setpoint_groups=raw_groups,
         )
         raw_groups[1] = False
-        raw_date_time["minute"] = 59
 
         decoded = DecodedSetbackValues(
             {ThaSetback.OCC_2: "occupied"},
@@ -358,15 +478,6 @@ class StateTest(unittest.TestCase):
         assert gateway.setpoint_groups is not None
         assert gateway.setpoint_groups[1] is True
         assert runtime.setpoint_groups[1] is True
-        assert gateway.date_time == GatewayDateTime(
-            year=2026,
-            month=6,
-            day=9,
-            weekday=2,
-            hour=21,
-            minute=46,
-        )
-        assert runtime.date_time == gateway.date_time
         assert decoded.current == "occupied"
 
         with self.assertRaises(TypeError):
@@ -395,3 +506,15 @@ class StateTest(unittest.TestCase):
 
         assert values.current == 52
         assert decoded.current == 52
+
+    def test_explicit_unavailable_active_slot_does_not_revive_cached_target(
+        self,
+    ) -> None:
+        slot = ThaSetback.OCC_2
+        values = SetpointValues(active_setback=slot).with_value(ThaSetback.CURRENT, 42)
+        for raw in (0xFF, 0, 44):
+            values = values.with_value(slot, raw)
+            decoded = values.decoded(decode_dege)
+            assert decoded.current == decode_dege(values.current)
+            assert decoded.get(ThaSetback.CURRENT) == decode_dege(raw)
+            assert decoded.as_dict()["current"] == decode_dege(raw)

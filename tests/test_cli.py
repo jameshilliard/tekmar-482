@@ -119,17 +119,17 @@ class CliTest(unittest.IsolatedAsyncioTestCase):
                 "address=1001",
                 "--tcp",
                 "127.0.0.1:3001",
-                "--match-address",
-                "1001",
                 "--json",
             ],
         )
         transport = TraceReplayTransport(
             [
-                request_step(
-                    "DeviceType",
-                    address=1001,
-                    response=response("DeviceType", address=1001, type=100101),
+                TraceStep(
+                    sent=request_step("DeviceType", address=1001).sent,
+                    received=(
+                        response("DeviceType", address=1201, type=107201),
+                        response("DeviceType", address=1001, type=100101),
+                    ),
                 ),
             ],
         )
@@ -208,18 +208,6 @@ class CliTest(unittest.IsolatedAsyncioTestCase):
                     "NetworkError",
                     response=response("NetworkError", error=0),
                 ),
-                request_step(
-                    "DateTime",
-                    response=response(
-                        "DateTime",
-                        year=2026,
-                        month=6,
-                        day=9,
-                        weekday=2,
-                        hour=21,
-                        minute=46,
-                    ),
-                ),
                 *(
                     request_step(
                         "SetpointGroupEnable",
@@ -245,14 +233,7 @@ class CliTest(unittest.IsolatedAsyncioTestCase):
         payload = json.loads(stdout.getvalue())
         assert status == 0
         assert payload["gateway"]["info"]["firmware_revision"] == 154
-        assert payload["gateway"]["date_time"] == {
-            "day": 9,
-            "hour": 21,
-            "minute": 46,
-            "month": 6,
-            "weekday": 2,
-            "year": 2026,
-        }
+        assert "date_time" not in payload["gateway"]
         assert payload["gateway"]["decoded"]["outdoor_temp"]["fahrenheit"] == 70.0
         assert (
             payload["gateway"]["decoded"]["network_error"]["description"] == "No Errors"

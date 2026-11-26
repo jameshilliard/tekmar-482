@@ -51,8 +51,28 @@ For a raw TCP serial bridge:
 
 ```python
 async with Tekmar482Client.tcp("192.0.2.10", 3001) as client:
-    await client.request_device_inventory()
+    addresses = await client.get_inventory_addresses(timeout=10)
 ```
+
+The default inventory request (address zero) walks the whole table and ends
+with a zero address. A nonzero `start_address` is an exact lookup, not the
+start of a range: it returns a one-address tuple if present, or an empty tuple
+if the gateway explicitly replies `0xFFFF`. There is no second end marker.
+An inventory timeout raises `TimeoutError`, not an empty or partial device
+list. The next scan waits for the outstanding inventory to finish. If that wait
+expires after the original walk was abandoned, the client raises
+`InventoryDrainTimeoutError`; reconnect before retrying. A running controller
+handles this reconnect automatically. Discovery uses one timeout for the scan, including
+time waiting to send and reading device metadata. If a metadata reply is
+missing, rediscovery raises `TimeoutError` and leaves the controller's last
+complete topology and capabilities in place.
+
+During a live refresh, a missed runtime reply leaves the last observation in
+place for an identified device; an explicit unavailable value replaces it.
+Reconnecting starts with fresh readings. With `discover(manage_reporting=True)`,
+success requires acknowledgment that reporting is back on. If the scan fails
+after the disable was sent, restoration can take up to another five seconds
+(or the scan timeout, whichever is shorter).
 
 For a serialx socket URL:
 
@@ -62,6 +82,23 @@ async with Tekmar482Client.serial_url("socket://192.0.2.10:3001") as client:
 ```
 
 ## Session dispatcher
+
+Queued commands belong to the connection on which they were submitted. Closing
+and reopening the client does not replay writes from the previous connection.
+Closing cannot undo a write the gateway has already received.
+When a newer write replaces an unsent one, the surviving writes keep their
+submission order. This matters when the current and an explicit schedule slot
+refer to the same setpoint.
+
+For requests and setpoint writes, the exchange timeout starts when the command
+takes the wire, not while it is queued. It covers the transport write and any
+required acknowledgment. For indexed setpoint and fan reads, the budget also
+covers draining an earlier unanswered read with an overlapping selector. A
+`CURRENT` reply can name any slot, so it overlaps every slot at that address
+for that method. Other reads can proceed. If the old reply never arrives,
+reopen the connection before retrying the overlapping read.
+A timed-out write may already have been applied;
+the library does not retry it automatically.
 
 `Tekmar482Client` uses a `Tekmar482Session` internally. The session owns the
 single packet reader for the serial/TCP stream, matches request/response calls,
@@ -88,11 +125,79 @@ writing to the gateway:
 await client.set_latest_heat_setpoint_celsius(address=1201, celsius=21.0)
 ```
 
+With `confirm=True`, a latest-value helper returns the acknowledgment, returns
+`None` if a newer command replaced it before transmission, and raises
+`TimeoutError` if no matching acknowledgment arrived after transmission. A
+timeout does not establish whether the thermostat applied the write. If the
+gateway could echo the same acknowledgment for a later write (for example,
+the same temperature for `AWAY` and `CURRENT`), the later write waits for
+the missing reply or times out unsent. This also applies when the first
+write used `confirm=False`: it returns after transmission, but its echo
+cannot confirm a later write. This includes repeated writes of the same
+thermostat mode; a targeted mode read can still proceed. Neither write is retried.
+With setbacks disabled or not yet known, writes to different slots of the
+same setpoint on one device keep their submission order. With setbacks
+enabled, a write to an independent slot can proceed.
+`set_setpoint_group()` waits for a matching group report. Firmware 06 sends
+these reports only when reporting is enabled; it does not directly acknowledge
+the write. A timeout does not prove the command failed, and a matching report
+does not prove that a snowmelt slab is heating.
+
 ## Push controller
+
+See the [firmware 06 compatibility notes](docs/firmware-06.md) for the scope
+of the protocol review and the distinction between gateway and device state.
+
+Firmware 06 supports setting the clock with `set_datetime()`, not reading it.
+A successful write echoes the supplied time; a rejection raises `ProtocolError`.
+Discovery and dumps do not request or report a live clock.
+
+Humidity measurement and minimum/maximum humidity setpoints use independent
+device attribute bits. When attributes are unavailable, a humidity-capable model
+can indicate measurement support, but does not establish either setpoint.
 
 `Tekmar482Controller` owns the Home Assistant-style lifecycle: connect, disable
 reporting during discovery, seed an initial runtime snapshot, enable reports,
-apply live reports to state, and reconnect if the stream drops.
+apply live reports to state, and reconnect if the stream drops. On reconnect
+it repeats discovery, reapplies the configured setback setting (if any), and
+publishes the new inventory and runtime snapshot only after reporting is
+confirmed. If a report or a runtime scan shows reporting unexpectedly disabled,
+the controller reconnects and reads fresh state, since updates may have been
+missed. There is no periodic full-state poll. With setpoint groups enabled,
+the controller rechecks only groups last seen on, after 60 seconds without a
+refresh. Firmware 06 can clear these flags silently. An off reply stops the
+checks, including when it was a reply to a diagnostic read on the same client.
+No reply makes the group unknown until a new observation. This reads
+the gateway flag, not the slab's heating state. A mode write that times out is
+checked with a targeted read, never by repeating the write. A targeted mode
+read that times out gets one retry unless a newer trigger supersedes it. Overlapping writes
+to the same thermostat settle before that read takes the wire.
+
+While reconnecting, `controller.data` remains the last published snapshot.
+Controller writes and repeated calls to `start()` raise `ConnectionClosedError`
+until the replacement connection has confirmed its inventory and reporting.
+Writes attempted during this window are not queued for the new connection.
+Rediscovery also rejects new controller writes until the inventory is confirmed
+again; already admitted device writes finish before the inventory walk starts.
+On a `TakingAddress` report the controller immediately rejects new and unsent
+device writes for the old and new addresses and clears their runtime readings.
+Only a successful inventory started after the report clears that restriction.
+Even when the model is unchanged, readings from before identification are not
+reused for the replacement device.
+If a scan fails while reporting is paused, the controller reconnects and seeds
+fresh state even if its attempt to restore reporting succeeds.
+
+Snapshots apply read replies and unsolicited reports in the order the gateway
+sends them. On a same-connection refresh, a missed read keeps the last known
+value for the same device; an explicit unavailable value clears the decoded
+reading. A scan interrupted by reconnection fails instead of combining readings
+from two connections. A reconnect starts fresh. A reply to a `CURRENT` setpoint request can
+identify the active schedule slot. An unsolicited report for a specific slot
+updates that slot without selecting it. Firmware 06 shares cached values
+between Wake and both Occupied slots, and between Sleep and both Unoccupied
+slots; Away is separate. A confirmed write with setbacks disabled updates
+all cached slots for that setpoint. If the setback setting is unknown, the
+controller clears other slots that may have changed.
 
 ```python
 import asyncio
@@ -118,7 +223,10 @@ asyncio.run(main())
 ```
 
 The lower-level polling methods remain available for setup flows, diagnostics,
-and command-line inspection.
+and command-line inspection. Runtime scans read current targets across devices
+before optional schedule slots. They use the advertised schedule when known
+and probe all named slots when it is unknown. The diagnostic `dump` requests
+all slots by default, regardless of the advertised schedule.
 
 ## Runtime models
 
@@ -205,6 +313,12 @@ tekmar-482 dump --serial /dev/serial/by-id/usb-adapter
 tekmar-482 monitor --tcp 192.0.2.10:3001
 tekmar-482 request DeviceType address=1001 --tcp 192.0.2.10:3001 --json
 ```
+
+Generic request/response calls and CLI requests awaiting a reply match the
+address, setpoint group, and setback slot when the method echoes those fields.
+Use `get_inventory_addresses()` to collect an entire inventory walk; a generic
+request waits for just one matching response. A `CURRENT` setpoint request may
+be answered with the active slot.
 
 Direct serial usage requires the optional serial extra:
 

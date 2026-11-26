@@ -75,8 +75,8 @@ class _TpckProtocol(asyncio.Protocol):
         self._packet_event = asyncio.Event()
         self._transport: _WritableTransport | None = None
         self._closed_waiter: asyncio.Future[None] | None = None
-        self._drain_waiter: asyncio.Future[None] | None = None
-        self._paused = False
+        self._write_ready = asyncio.Event()
+        self._write_ready.set()
         self._error: BaseException | None = None
 
     @property
@@ -115,18 +115,25 @@ class _TpckProtocol(asyncio.Protocol):
 
     def connection_lost(self, exc: Exception | None) -> None:
         self._transport = None
-        self._error = exc or ConnectionClosedError(self._closed_message)
+        if self._error is None:
+            message = (
+                self._closed_message
+                if exc is None
+                else f"{self._closed_message}: {exc}"
+            )
+            # A socket ETIMEDOUT is terminal, not the caller's read deadline.
+            self._error = ConnectionClosedError(message)
+            self._error.__cause__ = exc
         self._packet_event.set()
-        self._wake_drain_waiter(self._error)
+        self._write_ready.set()
         if self._closed_waiter is not None and not self._closed_waiter.done():
             self._closed_waiter.set_result(None)
 
     def pause_writing(self) -> None:
-        self._paused = True
+        self._write_ready.clear()
 
     def resume_writing(self) -> None:
-        self._paused = False
-        self._wake_drain_waiter(None)
+        self._write_ready.set()
 
     async def close(self) -> None:
         transport = self._transport
@@ -165,17 +172,10 @@ class _TpckProtocol(asyncio.Protocol):
     async def write_packet(self, packet: Packet) -> None:
         transport = self._require_transport()
         transport.write(serialize(packet))
-        await self._drain()
+        while not self._write_ready.is_set():
+            await self._write_ready.wait()
         if self._error is not None:
             raise self._error
-
-    async def _drain(self) -> None:
-        while self._paused:
-            waiter = self._drain_waiter
-            if waiter is None or waiter.done():
-                waiter = asyncio.get_running_loop().create_future()
-                self._drain_waiter = waiter
-            await waiter
 
     def _require_transport(self) -> _WritableTransport:
         if self._error is not None:
@@ -183,16 +183,6 @@ class _TpckProtocol(asyncio.Protocol):
         if self._transport is None or self._transport.is_closing():
             raise ConnectionClosedError(self._closed_message)
         return self._transport
-
-    def _wake_drain_waiter(self, err: BaseException | None) -> None:
-        waiter = self._drain_waiter
-        self._drain_waiter = None
-        if waiter is None or waiter.done():
-            return
-        if err is None:
-            waiter.set_result(None)
-        else:
-            waiter.set_exception(err)
 
 
 class SerialxTpckTransport:

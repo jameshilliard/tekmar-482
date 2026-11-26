@@ -22,3 +22,8 @@ class UnitsTest(unittest.TestCase):
         assert round(degh_to_celsius(1550) or 0, 1) == 21.1
         assert celsius_to_degh(21.1111111111) == 1550
         assert degh_to_celsius(0xFFFF) is None
+        assert fahrenheit_to_degh(-85) == 0
+        assert fahrenheit_to_degh(6468.4) == 0xFFFE
+        for value in (-85.01, 6468.41, 6468.5):
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                fahrenheit_to_degh(value)

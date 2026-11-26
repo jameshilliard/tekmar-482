@@ -17,6 +17,15 @@ class ConnectionClosedError(TransportError):
     """Raised when the remote endpoint closes the connection."""
 
 
+class InventoryDrainTimeoutError(TimeoutError):
+    """An abandoned inventory has no terminator; reconnect before starting another."""
+
+    def __init__(self) -> None:
+        super().__init__(
+            "Timed out draining the previous inventory; reconnect to retry",
+        )
+
+
 class UnknownServiceError(ProtocolError):
     """Raised when a tRPC service name is unknown."""
 

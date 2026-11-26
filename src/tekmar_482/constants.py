@@ -6,6 +6,9 @@ from dataclasses import dataclass
 from enum import IntEnum, IntFlag, StrEnum
 
 DEFAULT_BAUDRATE = 9600
+NO_SETBACK_EVENTS = 0
+TWO_EVENT_SETBACK_SCHEDULE = 2
+FOUR_EVENT_SETBACK_SCHEDULE = 4
 
 
 class ThaSetback(IntEnum):
@@ -46,6 +49,7 @@ class DeviceAttributeBit(IntFlag):
     COOL_SETPOINT = 1 << 1
     SLAB_SETPOINT = 1 << 2
     FAN_PERCENT = 1 << 3
+    RELATIVE_HUMIDITY = 1 << 4
     HUMIDITY_SET_MAX = 1 << 5
     HUMIDITY_SET_MIN = 1 << 6
     SETPOINT_DEVICE = 1 << 7
@@ -129,6 +133,46 @@ SETBACK_DESCRIPTION: dict[ThaSetback, str] = {
     ThaSetback.AWAY: "Away",
 }
 
+SETBACK_2_EVENT_SETBACKS: tuple[ThaSetback, ...] = (
+    ThaSetback.OCC_2,
+    ThaSetback.UNOCC_2,
+    ThaSetback.AWAY,
+)
+
+SETBACK_4_EVENT_SETBACKS: tuple[ThaSetback, ...] = (
+    ThaSetback.WAKE_4,
+    ThaSetback.UNOCC_4,
+    ThaSetback.OCC_4,
+    ThaSetback.SLEEP_4,
+    ThaSetback.AWAY,
+)
+
+SETBACK_SCHEDULE_SETBACKS: tuple[ThaSetback, ...] = (
+    *SETBACK_4_EVENT_SETBACKS,
+    ThaSetback.OCC_2,
+    ThaSetback.UNOCC_2,
+)
+
+SETBACK_SCHEDULE_PERIOD: dict[ThaSetback, str] = {
+    ThaSetback.WAKE_4: "wake",
+    ThaSetback.UNOCC_4: "unoccupied",
+    ThaSetback.OCC_4: "occupied",
+    ThaSetback.SLEEP_4: "sleep",
+    ThaSetback.OCC_2: "occupied",
+    ThaSetback.UNOCC_2: "unoccupied",
+    ThaSetback.AWAY: "away",
+}
+
+SETBACK_SCHEDULE_LABEL: dict[ThaSetback, str] = {
+    ThaSetback.WAKE_4: "Wake",
+    ThaSetback.UNOCC_4: "Unoccupied",
+    ThaSetback.OCC_4: "Occupied",
+    ThaSetback.SLEEP_4: "Sleep",
+    ThaSetback.OCC_2: "Occupied",
+    ThaSetback.UNOCC_2: "Unoccupied",
+    ThaSetback.AWAY: "Away",
+}
+
 SETBACK_SETPOINT_MAP: dict[int, int] = {
     ThaSetback.WAKE_4: 0x00,
     ThaSetback.UNOCC_4: 0x01,
@@ -148,6 +192,19 @@ SETBACK_FAN_MAP: dict[int, int] = {
     ThaSetback.UNOCC_2: 0x01,
     ThaSetback.AWAY: 0x01,
 }
+
+
+def schedule_setbacks_for_events(events: int | None) -> tuple[ThaSetback, ...] | None:
+    """Return known schedule setback slots for a reported event count."""
+    if events is None:
+        return None
+    if events == NO_SETBACK_EVENTS:
+        return ()
+    if events == TWO_EVENT_SETBACK_SCHEDULE:
+        return SETBACK_2_EVENT_SETBACKS
+    if events == FOUR_EVENT_SETBACK_SCHEDULE:
+        return SETBACK_4_EVENT_SETBACKS
+    return None
 
 
 def _feature(

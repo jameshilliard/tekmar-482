@@ -15,7 +15,7 @@ def fahrenheit_to_celsius(value: float) -> float:
 
 def celsius_to_dege(value: float) -> int:
     """Convert Celsius to tHA degE, used by one-byte setpoint values."""
-    return round(value * 2)
+    return _encode_temperature(value * 2, ThaValue.NA_8)
 
 
 def dege_to_celsius(value: int) -> float | None:
@@ -27,7 +27,14 @@ def dege_to_celsius(value: int) -> float | None:
 
 def fahrenheit_to_degh(value: float) -> int:
     """Convert Fahrenheit to tHA degH."""
-    return round((value * 10) + 850)
+    return _encode_temperature((value * 10) + 850, ThaValue.NA_16)
+
+
+def _encode_temperature(raw: float, na: ThaValue) -> int:
+    if not 0 <= raw <= na - 1:
+        msg = f"raw temperature {raw} is outside the wire range 0..{na - 1}"
+        raise ValueError(msg)
+    return round(raw)
 
 
 def degh_to_fahrenheit(value: int) -> float | None:

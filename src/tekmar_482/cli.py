@@ -111,8 +111,8 @@ def build_parser() -> argparse.ArgumentParser:
     dump.add_argument(
         "--write-delay",
         type=float,
-        default=0.1,
-        help="delay between requests in seconds",
+        default=0.0,
+        help="optional delay between requests in seconds",
     )
 
     monitor = subparsers.add_parser(
@@ -351,10 +351,12 @@ async def _discover(
         for device in result.devices:
             model = device.model or "unknown"
             kind = device.kind or "unknown"
+            raw = device.attributes.raw
+            attributes = f"0x{raw:04X}" if raw is not None else "unknown"
             stdout.write(
                 f"  - address={device.address} type_code={device.type_code} "
                 f"model={model} kind={kind} version={device.version} "
-                f"attributes=0x{device.attributes.raw:04X} "
+                f"attributes={attributes} "
                 f"setback_events={device.setback_events}\n",
             )
 
@@ -385,8 +387,6 @@ async def _dump(
             f"network_error: {gateway.network_error} "
             f"decoded={decoded_gateway['network_error']}\n",
         )
-        date_time = None if gateway.date_time is None else gateway.date_time.as_dict()
-        stdout.write(f"date_time: {date_time}\n")
         stdout.write(f"reporting_enabled: {gateway.reporting_enabled}\n")
         stdout.write(f"setback_enabled: {gateway.setback_enabled}\n")
         stdout.write("setpoint_groups:\n")
@@ -551,6 +551,7 @@ def attributes_to_dict(attributes: DeviceAttributes) -> dict[str, Any]:
         "zone_cooling": attributes.zone_cooling,
         "slab_setpoint": attributes.slab_setpoint,
         "fan_percent": attributes.fan_percent,
+        "relative_humidity": attributes.relative_humidity,
         "humidity_setpoint_min": attributes.humidity_setpoint_min,
         "humidity_setpoint_max": attributes.humidity_setpoint_max,
         "setpoint_device": attributes.setpoint_device,
@@ -601,9 +602,6 @@ def gateway_snapshot_to_dict(snapshot: GatewaySnapshot) -> dict[str, Any]:
         "info": gateway_info_to_dict(snapshot.info),
         "outdoor_temp": snapshot.outdoor_temp,
         "network_error": snapshot.network_error,
-        "date_time": None
-        if snapshot.date_time is None
-        else snapshot.date_time.as_dict(),
         "decoded": {
             "outdoor_temp": decoded_to_dict(decode_degh(snapshot.outdoor_temp)),
             "network_error": decoded_to_dict(
