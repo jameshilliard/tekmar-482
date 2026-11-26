@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from collections import deque
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, contextmanager
 from dataclasses import dataclass
 from enum import IntEnum
 from typing import TYPE_CHECKING, Protocol
@@ -22,11 +22,12 @@ from .native_write import NativeBlockEditor
 from .packet import TYPE_TN4
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
+    from collections.abc import AsyncIterator, Awaitable, Callable, Iterator, Mapping
 
     from ._native_payloads.climate import ThermostatMode
     from ._native_payloads.queries import NativeStatusQuery
     from ._native_payloads.writes import NativeField
+    from .management import ErrorReporting
     from .native import NativeAddress, NativeBlockQuery, NativeTargets
     from .native_schedule import ScheduleChange, ScheduleTarget
     from .native_snow_control import SnowmeltGroupResult, SnowmeltOperation
@@ -260,6 +261,8 @@ class BridgeStream(Protocol):
 
     @property
     def diagnostics(self) -> Mapping[int, PortDiagnostic]: ...
+    @property
+    def error_reporting(self) -> ErrorReporting: ...
     async def wait_transmit_idle(self, port: int) -> None: ...
     async def send(self, port: int, body: bytes | NativeMessage) -> TxResult: ...
     async def read_status(
@@ -346,7 +349,13 @@ class BridgeStream(Protocol):
 class RawDispatcher:
     """One reader owns the wire. Each send owns exactly one port until TxResult."""
 
-    def __init__(self, write: Callable[[bytes], Awaitable[None]], backlog: int) -> None:
+    def __init__(
+        self,
+        write: Callable[[bytes], Awaitable[None]],
+        backlog: int,
+        *,
+        error_reporting: ErrorReporting | None = None,
+    ) -> None:
         if backlog < 1:
             msg = "capture backlog must be positive"
             raise ValueError(msg)
@@ -361,7 +370,16 @@ class RawDispatcher:
         self._lost = 0
         self._ready = asyncio.Event()
         self._active = False
+        self._error_reporting = error_reporting
         self._error: Exception | None = None
+
+    @property
+    def error_reporting(self) -> ErrorReporting:
+        self._check_active()
+        if self._error_reporting is None:
+            msg = "no management session attached to the Raw dispatcher"
+            raise ProtocolError(msg)
+        return self._error_reporting
 
     def _check_active(self) -> None:
         if self._error is not None:
@@ -715,6 +733,20 @@ class RawDispatcher:
         self._fail_reads(error)
         self._ready.set()
 
+    @contextmanager
+    def active(self) -> Iterator[None]:
+        self._active = True
+        try:
+            yield
+            if self._error is not None:
+                raise self._error
+        finally:
+            self._active = False
+            for event in self._tx_changed.values():
+                event.set()
+            self._ready.set()
+            self._fail_reads(ConnectionClosedError("raw session closed"))
+
     @asynccontextmanager
     async def receiving(
         self,
@@ -727,20 +759,13 @@ class RawDispatcher:
             except Exception as err:  # noqa: BLE001
                 self.fail(err)
 
-        self._active = True
-        reader = asyncio.create_task(pump(), name="tekmar 482 raw reader")
-        try:
-            yield
-            if self._error is not None:
-                raise self._error
-        finally:
-            self._active = False
-            for event in self._tx_changed.values():
-                event.set()
-            self._ready.set()
-            self._fail_reads(ConnectionClosedError("raw session closed"))
-            reader.cancel()
-            await asyncio.gather(reader, return_exceptions=True)
+        with self.active():
+            reader = asyncio.create_task(pump(), name="tekmar 482 raw reader")
+            try:
+                yield
+            finally:
+                reader.cancel()
+                await asyncio.gather(reader, return_exceptions=True)
 
     def check_drained(self) -> None:
         if self._pending:

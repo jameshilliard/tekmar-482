@@ -18,6 +18,7 @@ from .management import (
     BridgeFeature,
     BridgeMethod,
     BridgeMode,
+    ErrorReporting,
     unpack_diagnostic,
 )
 from .packet import TYPE_TN4, TYPE_TRPC, Packet
@@ -208,7 +209,7 @@ class BridgeClient:
         async with self._transaction():
             if select_mode:
                 await self._set_byte(BridgeMethod.MODE, BridgeMode.NORMAL)
-            transport = _NormalTransport(self._next_packet, self._wire)
+            transport = _SessionTransport(self._next_packet, self._wire)
             async with Tekmar482Client(
                 transport,
                 readback_methods=frozenset(
@@ -243,7 +244,23 @@ class BridgeClient:
         if not self._features & BridgeFeature.RAW:
             msg = "gateway did not advertise binary Raw support"
             raise ProtocolError(msg)
-        stream = RawDispatcher(self._write_raw, capture_backlog)
+
+        async def receive_control() -> Packet:
+            # The tRPC session owns the only physical reader in both modes.
+            try:
+                while (packet := await self._next_packet()).type == TYPE_TN4:
+                    stream.feed(packet)
+            except Exception as err:
+                stream.fail(err)
+                raise
+            return packet
+
+        client = Tekmar482Client(_SessionTransport(receive_control, self._wire))
+        stream = RawDispatcher(
+            self._write_raw,
+            capture_backlog,
+            error_reporting=ErrorReporting(client),
+        )
         async with self._transaction():
             await self._set_byte(BridgeMethod.MODE, BridgeMode.RAW)
             try:
@@ -252,8 +269,9 @@ class BridgeClient:
                     ack_mask,
                     stream.feed,
                 )
-                async with stream.receiving(self._next_packet):
-                    yield stream
+                with stream.active():
+                    async with client:
+                        yield stream
             except BaseException:
                 # Restore the hardware mode when possible, without masking the
                 # original caller cancellation, disconnect or protocol error.
@@ -285,7 +303,7 @@ class BridgeClient:
                 stream.fail(ConnectionClosedError("raw session closed"))
 
 
-class _NormalTransport:
+class _SessionTransport:
     """The session borrows the existing decoder and never reopens the physical link."""
 
     def __init__(self, receive: Callable[[], Awaitable[Packet]], wire: Wire) -> None:
@@ -299,7 +317,7 @@ class _NormalTransport:
 
     async def open(self) -> None:
         if not self.is_open:
-            msg = "Normal session has ended"
+            msg = "gateway session has ended"
             raise ConnectionClosedError(msg)
 
     async def close(self) -> None:

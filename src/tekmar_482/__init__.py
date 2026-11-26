@@ -1,5 +1,6 @@
 """Async Python client for the tekmar 482 gateway."""
 
+from ._bridge_diagnostics import ErrorReason, ErrorSource
 from ._native_payloads import SnowmeltBlock
 from ._native_payloads.climate import (
     AirReading,
@@ -140,6 +141,7 @@ from .decoding import (
     decode_temperature_map,
     decoded_to_dict,
 )
+from .error_reports import ErrorReports, GatewayErrorCounter
 from .exceptions import (
     ConnectionClosedError,
     InventoryDrainTimeoutError,
@@ -152,7 +154,13 @@ from .exceptions import (
 )
 from .firmware import FirmwareBundle, install_firmware
 from .gateway import open_gateway
-from .management import BridgeCapabilities, BridgeFeature, BridgeManagement, BridgeMode
+from .management import (
+    BridgeCapabilities,
+    BridgeFeature,
+    BridgeManagement,
+    BridgeMode,
+    ErrorReporting,
+)
 from .models import (
     AvailableInfo,
     AvailableRuntime,
@@ -453,6 +461,10 @@ __all__ = [
     "EquipmentAvailability",
     "EquipmentBank",
     "EquipmentRuntime",
+    "ErrorReason",
+    "ErrorReporting",
+    "ErrorReports",
+    "ErrorSource",
     "FailureReason",
     "FanDuctStatus",
     "FanSetup",
@@ -460,6 +472,7 @@ __all__ = [
     "FirmwareBundle",
     "GatewayAccess",
     "GatewayEndpoint",
+    "GatewayErrorCounter",
     "GatewayInfo",
     "GatewayRuntime",
     "GatewaySnapshot",

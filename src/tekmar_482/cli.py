@@ -19,6 +19,7 @@ from ._native_payloads.thermostat import TargetSlot, ThermostatTarget
 from ._native_payloads.writes import NativeField, WritableBlock
 from ._wire import GatewayEndpoint
 from .bridge import BridgeClient
+from .cli_errors import add_errors_command, run_errors
 from .cli_line import (
     LINE_COMMANDS,
     add_line_commands,
@@ -271,6 +272,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
 
     add_trace_command(subparsers, common)
+    add_errors_command(subparsers, common)
     _add_block_commands(subparsers, dump)
     _add_scene_commands(subparsers)
     add_line_commands(
@@ -648,7 +650,7 @@ def _endpoint(args: argparse.Namespace) -> GatewayEndpoint:
 async def _native(args: argparse.Namespace, stdout: TextIO) -> int:
     def emit(value: object) -> None:
         stdout.write((json.dumps(value) if args.json else str(value)) + "\n")
-        if args.command in {"watch-climate", "watch-native", "trace-normal"}:
+        if args.command in {"watch-climate", "watch-native", "trace-normal", "errors"}:
             stdout.flush()
 
     if args.command in LINE_COMMANDS:
@@ -687,6 +689,8 @@ async def _native(args: argparse.Namespace, stdout: TextIO) -> int:
             await bridge.test_leds()
         elif args.command == "probe":
             emit({"timers_mask_timestamps": await bridge.probe(duration=args.duration)})
+        elif args.command == "errors":
+            await run_errors(bridge, args, emit)
         elif args.command == "trace-normal" or (
             args.command == "request" and args.trace_port
         ):

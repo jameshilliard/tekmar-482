@@ -183,6 +183,33 @@ envelopes differ: Raw type `0x01` carries bridge operations; trace type
 `0xD0` identifies Normal RX or a gateway TX attempt with its origin and
 outcome. Trace is not an alternate encoding for sending Raw requests.
 
+**Gateway error diagnostics.** The custom firmware counts errors even when no
+host is listening. `errors` subscribes to changed counters without changing
+the current Normal/Raw mode, trace, thermostat reporting or link ACKs.
+
+```console
+tekmar-482 errors --source 1 --source gateway --duration 60 --tcp 192.0.2.10:3001 --json
+tekmar-482 errors --source 1 --read crc --tcp 192.0.2.10:3001
+```
+
+Each report identifies the port or gateway, reason, last-seen gateway uptime
+in milliseconds and lifetime count. Repeats can share one notification.
+Counts saturate at 64 bits and reset at boot. This is not a frame capture or
+a device's network alarm word. Use `errors --status` to see enabled sources
+or `errors --stop` after a host disconnect. A clean watch exit restores the
+previous selection. [Wire format and reason codes](https://github.com/jameshilliard/tekmar-482-firmware/blob/master/docs/tpck-bridge.md#error-reporting).
+
+```python
+from tekmar_482 import ErrorReason, ErrorReporting, ErrorSource
+
+# On an open tRPC client; use stream.error_reporting inside bridge.stream().
+errors = ErrorReporting(client)
+crc = await errors.counter(ErrorSource.PORT_1, ErrorReason.CRC)
+async with errors.watch([ErrorSource.PORT_1, ErrorSource.GATEWAY]) as reports:
+    async for counter in reports:
+        print(counter.source.name, counter.reason.name, counter.count)
+```
+
 Custom bridge wire version 2 uses saturating 64-bit counters for capture
 and trace drops, edge counts and panel events. They reset at gateway boot,
 not on a mode change. Older custom wire versions are rejected; only stock

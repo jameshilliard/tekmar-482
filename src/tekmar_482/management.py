@@ -8,8 +8,9 @@ from dataclasses import dataclass
 from enum import IntEnum, IntFlag
 from typing import TYPE_CHECKING, Self
 
-from ._bridge_diagnostics import TRACE_STATE, WIRE_VERSION
+from ._bridge_diagnostics import ERROR_REPORTING_METHOD, TRACE_STATE, WIRE_VERSION
 from .constants import TN4_PORTS
+from .error_reports import ALL_SOURCES, ErrorReports, GatewayErrorCounter, source_mask
 from .exceptions import ProtocolError, TekmarError
 from .normal_trace import NormalTrace, NormalTraceState
 from .trpc import ResponseMatch, TrpcCommand, TrpcMethod, TrpcPacket, TrpcService
@@ -18,6 +19,7 @@ if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Iterable
     from struct import Struct
 
+    from ._bridge_diagnostics import ErrorReason, ErrorSource
     from .client import Tekmar482Client
 
 _CAPABILITY_BYTES = 4
@@ -41,6 +43,7 @@ class BridgeFeature(IntFlag):
     RAW = 1
     ROM_UPDATE = 2
     NORMAL_TRACE = 4
+    ERROR_REPORTING = 8
 
 
 class BridgeMethod(IntEnum):
@@ -55,6 +58,7 @@ class BridgeMethod(IntEnum):
     ACK_MASK = 0x544BF009
     COUNTERS = 0x544BF00A
     NORMAL_TRACE = 0x544BF00B
+    ERROR_REPORTING = ERROR_REPORTING_METHOD
 
 
 @dataclass(frozen=True, slots=True)
@@ -81,7 +85,7 @@ class BridgeCapabilities:
 
 
 @dataclass(frozen=True, slots=True)
-class _ExtensionUpdate(TrpcCommand):
+class _ExtensionCommand(TrpcCommand):
     """Opaque custom method body; vendor field shapes are unaffected."""
 
     payload: bytes = b""
@@ -101,7 +105,7 @@ class _ManagementMatch(ResponseMatch):
         return super().matches(message)
 
 
-class BridgeManagement:
+class _Management:
     """Use with an open Tekmar482Client. Does not open or replace its transport."""
 
     def __init__(self, client: Tekmar482Client) -> None:
@@ -139,6 +143,116 @@ class BridgeManagement:
         if reply.method_id == TrpcMethod.NULL_METHOD:
             return None
         return BridgeCapabilities.from_payload(reply.extra)
+
+
+class ErrorReporting(_Management):
+    """Custom gateway diagnostics available in either application mode."""
+
+    async def _require(self) -> None:
+        caps = await self.capabilities()
+        if caps is None or not caps.features & BridgeFeature.ERROR_REPORTING:
+            msg = "gateway does not advertise error reporting"
+            raise ProtocolError(msg)
+
+    async def _command(self, service: TrpcService, data: bytes = b"") -> bytes:
+        reply = await self._exchange(
+            _ExtensionCommand(service, BridgeMethod.ERROR_REPORTING, payload=data),
+        )
+        if reply.method_id != BridgeMethod.ERROR_REPORTING:
+            msg = "error reporting method was not acknowledged"
+            raise ProtocolError(msg)
+        return reply.extra
+
+    async def _mask(self) -> int:
+        data = await self._command(TrpcService.REQUEST)
+        if len(data) != 1 or data[0] >> len(ALL_SOURCES):
+            msg = "invalid error reporting mask"
+            raise ProtocolError(msg)
+        return data[0]
+
+    async def sources(self) -> frozenset[ErrorSource]:
+        """Read the current selection without enabling reports."""
+        with self._session.connection_scope():
+            await self._require()
+            mask = await self._mask()
+        return frozenset(source for source in ALL_SOURCES if mask & (1 << source))
+
+    async def counter(
+        self,
+        source: ErrorSource,
+        reason: ErrorReason,
+    ) -> GatewayErrorCounter:
+        if not reason.supports(source):
+            msg = f"{reason.name} does not apply to {source.name}"
+            raise ValueError(msg)
+        with self._session.connection_scope():
+            await self._require()
+            body = await self._command(TrpcService.REQUEST, bytes([source, reason]))
+        value = GatewayErrorCounter.decode(body)
+        if (value.source, value.reason) != (source, reason):
+            msg = "gateway returned a different error counter"
+            raise ProtocolError(msg)
+        return value
+
+    async def _set_mask(self, mask: int) -> None:
+        value = bytes([mask])
+        if await self._command(TrpcService.UPDATE, value) != value:
+            msg = "error reporting mask was not acknowledged"
+            raise ProtocolError(msg)
+
+    async def set_sources(self, sources: Iterable[ErrorSource]) -> None:
+        """Replace the selection; use an empty iterable to stop an orphaned stream."""
+        mask = source_mask(sources)
+        with (
+            self._session.connection_scope(),
+            self._session.error_packets(ErrorReports(mask)),
+        ):
+            await self._require()
+            await self._set_mask(mask)
+
+    @asynccontextmanager
+    async def watch(
+        self,
+        sources: Iterable[ErrorSource] = ALL_SOURCES,
+    ) -> AsyncIterator[ErrorReports]:
+        """Watch changed totals. Restore the previous selection on this connection."""
+        mask = source_mask(sources)
+        if not mask:
+            msg = "select at least one error source"
+            raise ValueError(msg)
+        reports = ErrorReports(mask)
+        with self._session.connection_scope(), self._session.error_packets(reports):
+            generation = self._session.connection_generation
+            await self._require()
+            previous = await self._mask()
+
+            async def restore() -> None:
+                if (
+                    self._session.connection_generation == generation
+                    and self._session.is_open
+                    and self._session.reader_error is None
+                ):
+                    await self._set_mask(previous)
+
+            try:
+                await self._set_mask(mask)
+                yield reports
+            except BaseException as err:
+                try:
+                    await restore()
+                except (OSError, TimeoutError, TekmarError) as cleanup:
+                    err.add_note(f"Could not restore error reporting: {cleanup!r}")
+                raise
+            else:
+                await restore()
+
+
+class BridgeManagement(_Management):
+    """Management extensions on an open session; none implicitly switch modes."""
+
+    def __init__(self, client: Tekmar482Client) -> None:
+        super().__init__(client)
+        self.error_reporting = ErrorReporting(client)
 
     async def build_revision(self) -> str:
         reply = await self._exchange(TrpcCommand.request(BridgeMethod.BUILD))
@@ -184,7 +298,7 @@ class BridgeManagement:
     async def _set_trace_mask(self, mask: int) -> None:
         data = bytes([mask])
         reply = await self._exchange(
-            _ExtensionUpdate(
+            _ExtensionCommand(
                 TrpcService.UPDATE,
                 BridgeMethod.NORMAL_TRACE,
                 payload=data,

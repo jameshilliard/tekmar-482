@@ -11,6 +11,7 @@ from dataclasses import dataclass
 from enum import Enum, auto
 from typing import TYPE_CHECKING, Self
 
+from ._bridge_diagnostics import ERROR_REPORTING_METHOD
 from .constants import ThaSetback, ThaValue
 from .exceptions import ConnectionClosedError, InventoryDrainTimeoutError, ProtocolError
 from .packet import TYPE_TRPC
@@ -28,6 +29,7 @@ if TYPE_CHECKING:
     from collections.abc import Callable, Hashable, Iterator
     from types import TracebackType
 
+    from .error_reports import ErrorReports
     from .normal_trace import NormalTrace
     from .packet import Packet
     from .transport import PacketTransport
@@ -189,6 +191,7 @@ class Tekmar482Session:
         ] = {}
         self._observers: set[Callable[[TrpcPacket, TrpcCommand | None], None]] = set()
         self._trace: NormalTrace | None = None
+        self._error_reports: ErrorReports | None = None
         self._coalesced_updates: OrderedDict[Hashable, _QueuedUpdate] = OrderedDict()
         self._writer_wake = asyncio.Event()
         self._coalesced_task: asyncio.Task[None] | None = None
@@ -299,6 +302,7 @@ class Tekmar482Session:
         self._closed = True
         if self._trace is not None:
             self._trace.finish()
+        self._finish_errors()
         task = self._reader_task
         self._reader_task = None
         if task is not None:
@@ -734,6 +738,25 @@ class Tekmar482Session:
             self._observers.discard(callback)
 
     @contextmanager
+    def error_packets(self, reports: ErrorReports) -> Iterator[None]:
+        """Give one mask owner the Report stream without taking application replies."""
+        self._raise_if_unavailable()
+        if self._error_reports is not None:
+            msg = "gateway error reporting already has an owner"
+            raise ProtocolError(msg)
+        self._error_reports = reports
+        try:
+            yield
+        finally:
+            if self._error_reports is reports:
+                self._finish_errors()
+
+    def _finish_errors(self, err: BaseException | None = None) -> None:
+        if self._error_reports is not None:
+            self._error_reports.finish(err)
+            self._error_reports = None
+
+    @contextmanager
     def trace_packets(self, trace: NormalTrace) -> Iterator[None]:
         """Attach one diagnostic observer without consuming application replies."""
         self._raise_if_unavailable()
@@ -853,6 +876,13 @@ class Tekmar482Session:
             await self._dispatch_message(message)
 
     async def _dispatch_message(self, message: TrpcPacket) -> None:
+        if message.method_id == ERROR_REPORTING_METHOD:
+            if message.service == TrpcService.REPORT:
+                if self._error_reports is not None:
+                    self._error_reports.record(message.extra)
+                return
+            if message.service == TrpcService.RESPONSE_UPDATE and self._error_reports:
+                self._error_reports.acknowledge(message.extra)
         LOGGER.debug("Received tekmar 482 tRPC %s", message)
         async with self._condition:
             echo = self._take_detached_echo(message)
@@ -1140,6 +1170,7 @@ class Tekmar482Session:
         self._closed = True
         if self._trace is not None:
             self._trace.finish(err)
+        self._finish_errors(err)
         self._reader_error = err
         await self._fail_pending(err)
         self._fail_coalesced_updates(err)
