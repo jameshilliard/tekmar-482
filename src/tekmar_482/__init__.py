@@ -54,6 +54,7 @@ from ._native_payloads.sensors import (
     SensorSlot,
     ThermostatSensors,
 )
+from ._native_payloads.setpoint import SetpointReadings, SetpointStatus, SetpointTargets
 from ._native_payloads.snowmelt import (
     SnowmeltAddress,
     SnowmeltApplication,
@@ -225,6 +226,7 @@ from .native_sensors import (
     ThermostatSensorMonitor,
     read_thermostat_sensors,
 )
+from .native_setpoint import NativeSetpointControl
 from .native_snapshot import NativeSnapshot, read_native_devices, read_native_snapshot
 from .native_snow_control import (
     SnowmeltGroupResult,
@@ -481,6 +483,7 @@ __all__ = [
     "NativeProbe",
     "NativeProduct",
     "NativeScene",
+    "NativeSetpointControl",
     "NativeSnapshot",
     "NativeSnowmelt",
     "NativeState",
@@ -550,6 +553,9 @@ __all__ = [
     "SetpointDeviceData",
     "SetpointDeviceRuntime",
     "SetpointGroupFields",
+    "SetpointReadings",
+    "SetpointStatus",
+    "SetpointTargets",
     "SetpointValues",
     "SlabStatus",
     "SnowmeltAddress",

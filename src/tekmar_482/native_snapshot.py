@@ -26,6 +26,7 @@ if TYPE_CHECKING:
     from .native_io import IoDirectory
     from .native_plant_registers import PlantRegisters
     from .native_sensors import SensorObservation
+    from .native_setpoint import NativeSetpointControl
     from .native_snowmelt import NativeSnowmelt
     from .native_state import NativeClimate
     from .native_status import NativeStatusBatch
@@ -56,6 +57,11 @@ class NativeSnapshot:
     @property
     def thermostats(self) -> tuple[NativeClimate, ...]:
         return self.observed_state().thermostats
+
+    @property
+    def setpoint_controls(self) -> tuple[NativeSetpointControl, ...]:
+        """Configuration from the scan; a block request does not solicit live status."""
+        return self.observed_state().setpoint_controls
 
     @property
     def plant_configurations(self) -> tuple[tuple[NativePath, PlantRegisters], ...]:

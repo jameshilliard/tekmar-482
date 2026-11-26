@@ -20,9 +20,38 @@ if TYPE_CHECKING:
     from .native_calendar import NativeCalendar
     from .native_io import IoDirectory
     from .native_plant_registers import PlantRegisters
+    from .native_setpoint import NativeSetpointControl
     from .native_snowmelt import NativeSnowmelt, SnowmeltChannel
     from .native_state import NativeState
+    from .native_watch import NativeWatchResult
     from .raw import BridgeStream
+
+
+def setpoint_fields(control: NativeSetpointControl) -> dict[str, object]:
+    identity, app = control.identity, control.assignment.application
+    frame, readings = control.status_frame, control.readings
+    return {
+        **asdict(control.path),
+        "model": identity.product.model if identity and identity.product else None,
+        "application": app.name.lower() if app is not None else None,
+        "application_setup": control.application_setup.decoded
+        if control.application_setup
+        else None,
+        "operation_setup": control.operation_setup.decoded
+        if control.operation_setup
+        else None,
+        "remote_group": control.assignment.remote_group,
+        "stored_targets": asdict(control.targets) if control.targets else None,
+        "manual_override_time_raw": control.manual_override_time_raw,
+        "status": {
+            **frame.decoded,
+            "received_ms": frame.timestamp_ms,
+            "body": frame.body.hex(),
+        }
+        if frame
+        else None,
+        "live_readings": asdict(readings) if readings else None,
+    }
 
 
 def io_fields(directory: IoDirectory, model: str | None = None) -> dict[str, object]:
@@ -133,6 +162,7 @@ async def watch_all_from_args(
 ) -> int:
     previous: dict[NativePath, dict[str, object]] = {}
     previous_plants: dict[NativePath, PlantRegisters] = {}
+    previous_setpoints: dict[NativePath, NativeSetpointControl] = {}
     previous_io: dict[NativePath, tuple[str | None, tuple[IoDirectory, ...]]] = {}
 
     def changed(path: NativePath, state: NativeState) -> None:
@@ -151,6 +181,12 @@ async def watch_all_from_args(
                 )
         elif previous_io.pop(path, None) is not None:
             emit({"native_io_removed": asdict(path)})
+        control = state.setpoint_control(path)
+        if control is not None and control != previous_setpoints.get(path):
+            previous_setpoints[path] = control
+            emit({"setpoint_control": setpoint_fields(control)})
+        elif control is None and previous_setpoints.pop(path, None) is not None:
+            emit({"setpoint_control_removed": asdict(path)})
         if (snow := state.snowmelt(path)) is not None:
             emit({"snowmelt": snow_fields(snow)})
         elif (climate := state.climate(path)) is not None:
@@ -195,13 +231,21 @@ async def watch_all_from_args(
         schedules=not args.no_schedules,
         thermostat_targets=not args.no_thermostat_targets,
         plant_settings=not args.no_plant_settings,
+        setpoint_settings=not args.no_setpoint_settings,
         io_discovery=not args.no_io_discovery,
         on_change=changed,
     )
+    return _watch_summary(result, paths or (), args, emit)
+
+
+def _watch_summary(
+    result: NativeWatchResult,
+    paths: tuple[NativePath, ...],
+    args: argparse.Namespace,
+    emit: Callable[[object], None],
+) -> int:
     state = result.state
-    unidentified = [
-        asdict(p) for p in paths or () if p.node and state.identity(p) is None
-    ]
+    unidentified = [asdict(p) for p in paths if p.node and state.identity(p) is None]
     no_mode = [asdict(t.path) for t in state.thermostats if t.setup.mode_raw is None]
     no_targets = (
         []
@@ -248,6 +292,12 @@ async def watch_all_from_args(
         for p, d in state.io_directories
         if not d.complete and not args.no_io_discovery
     ]
+    no_setpoints = [
+        {**asdict(p), "missing_blocks": [b for b, _ in missing]}
+        for p in state.paths
+        if not args.no_setpoint_settings
+        and (missing := state.missing_setpoint_reads(p))
+    ]
     emit(
         {
             "completed_reads": result.reads,
@@ -257,6 +307,7 @@ async def watch_all_from_args(
             "missing_mode_reports": no_mode,
             "incomplete_thermostat_targets": no_targets,
             "incomplete_plant_settings": no_plants,
+            "incomplete_setpoint_settings": no_setpoints,
             "incomplete_snowmelt": no_snow,
             "incomplete_schedules": no_schedule,
             "incomplete_io": no_io,
@@ -301,6 +352,7 @@ async def watch_all_from_args(
                 or no_snow
                 or no_schedule
                 or no_plants
+                or no_setpoints
                 or no_io,
             )
         ),

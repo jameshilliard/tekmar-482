@@ -39,6 +39,7 @@ from ._native_payloads.schedules import (
     ScheduleProfile,
     ScheduleStatus,
 )
+from ._native_payloads.setpoint import SETPOINT_STATUS, SetpointStatus
 from ._native_payloads.snowmelt import SNOW_REPORT, SnowmeltReport
 from ._native_payloads.thermostat import (
     FAN_STATUS,
@@ -331,6 +332,10 @@ class NativeFrame:
             return decode(Reader(self.message.payload))
         except ShortPayload:
             return None
+
+    @property
+    def setpoint_status(self) -> SetpointStatus | None:
+        return self._read_payload(SETPOINT_STATUS, SetpointStatus.read)
 
     @property
     def io_report(self) -> IoReport | None:

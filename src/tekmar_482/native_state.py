@@ -19,6 +19,7 @@ from ._native_payloads.layouts import MULTI_WEEK
 from ._native_payloads.queries import StatusRequest
 from ._native_payloads.schedules import SCHEDULE_STATUS
 from ._native_payloads.sensors import SENSOR_BLOCKS, ThermostatSensors
+from ._native_payloads.setpoint import SETPOINT_STATUS
 from ._native_payloads.snowmelt import SNOW_REPORT
 from ._native_payloads.thermostat import FAN_STATUS, HUMIDITY_STATUS, SLAB_STATUS
 from ._water_monitor import WaterMonitor
@@ -39,6 +40,7 @@ from .native_plant_registers import (
     has_plant_registers,
 )
 from .native_schedule import ScheduleDirectory
+from .native_setpoint import SETPOINT_BLOCKS, NativeSetpointControl, SetpointBook
 from .native_snowmelt import NativeSnowmelt, SnowmeltChannels, SnowmeltConfiguration
 from .native_targets import ADJUSTMENT_BLOCKS, AdjustmentState, ThermostatAdjustments
 from .raw import CaptureGap
@@ -103,6 +105,7 @@ class _Peer:
     snow: SnowmeltChannels = field(default_factory=SnowmeltChannels)
     calendar: ScheduleBook = field(default_factory=ScheduleBook)
     outputs: AdjustmentState = field(default_factory=AdjustmentState)
+    setpoint: SetpointBook = field(default_factory=SetpointBook)
     plant: PlantRegisterBook = field(default_factory=PlantRegisterBook)
     io: dict[IoEndpoint, IoBook] = field(default_factory=dict)
 
@@ -232,6 +235,22 @@ class NativeState:
     def climate(self, path: NativePath) -> NativeClimate | None:
         return peer.climate(path) if (peer := self._peers.get(path)) else None
 
+    def setpoint_control(self, path: NativePath) -> NativeSetpointControl | None:
+        peer = self._peers.get(path)
+        return peer.setpoint.snapshot(path, peer.identity) if peer else None
+
+    @property
+    def setpoint_controls(self) -> tuple[NativeSetpointControl, ...]:
+        return tuple(
+            s for p in self.paths if (s := self.setpoint_control(p)) is not None
+        )
+
+    def missing_setpoint_reads(self, path: NativePath) -> dict[BlockKey, int]:
+        peer = self._peers.get(path)
+        if not path.node or not peer or not peer.identity:
+            return {}
+        return peer.setpoint.missing(peer.identity.product)
+
     @property
     def snowmelt_devices(self) -> tuple[NativeSnowmelt, ...]:
         return tuple(s for p in self.paths if (s := self.snowmelt(p)) is not None)
@@ -284,6 +303,8 @@ class NativeState:
         peer = self._peers.get(path)
         if peer is None:
             return 0
+        if key[0] in SETPOINT_BLOCKS:
+            return peer.setpoint.revisions.get(key[0], 0)
         if key[0] in ADJUSTMENT_BLOCKS:
             return peer.outputs.revisions.get(key[0], 0)
         if key[0] in PLANT_REGISTERS:
@@ -297,6 +318,8 @@ class NativeState:
         selector: int | None = None,
     ) -> NativeFrame | None:
         peer = self._peers.get(path)
+        if peer and block in SETPOINT_BLOCKS:
+            return peer.setpoint.reports.get(block) if selector is None else None
         if peer and block in SCHEDULE_BLOCKS:
             return peer.calendar.blocks.get((block, selector))
         if peer and block in PLANT_REGISTERS:
@@ -359,6 +382,8 @@ class NativeState:
                 self._reidentify.add(path)
             peer.identity = identity
         key = (block, selector)
+        if block in SETPOINT_BLOCKS:
+            return peer.setpoint.report(block, frame)
         if block in SCHEDULE_BLOCKS:
             return peer.calendar.report(key, frame)
         if block in PLANT_REGISTERS:
@@ -390,6 +415,7 @@ class NativeState:
             block not in SCHEDULE_BLOCKS
             and block not in ADJUSTMENT_BLOCKS
             and block not in PLANT_REGISTERS
+            and block not in SETPOINT_BLOCKS
         ) or "truncated" in frame.decoded:
             return ()
         target = NativePath(frame.port, data[0], data[1] & _NODE)
@@ -397,6 +423,9 @@ class NativeState:
         peer = self._peers.get(target)
         if peer is None or not target.node:
             return (target,) if changed_water else ()
+        if block in SETPOINT_BLOCKS:
+            peer.setpoint.invalidate(block)
+            return (target,)
         if block in PLANT_REGISTERS:
             spec = BLOCK_SELECTORS.get(block)
             selector = data[_UPDATE_HEADER] & spec[1] if spec else None
@@ -449,6 +478,13 @@ class NativeState:
             return (path,) if book.observe(sample, record) else ()
         if record.message_id == BLOCK_REPORT:
             return (path,) if self._block(path, record) or changed_water else ()
+        if record.message_id == SETPOINT_STATUS:
+            setpoint = record.setpoint_status
+            if setpoint is None:
+                return ()
+            peer = self._peers.setdefault(path, _Peer())
+            product = peer.identity.product if peer.identity else None
+            return (path,) if peer.setpoint.observe(setpoint, record, product) else ()
         if record.message_id in (FAN_STATUS, SLAB_STATUS, HUMIDITY_STATUS):
             output = record.thermostat_output
             if output is None:

@@ -3,7 +3,7 @@
 from collections.abc import Callable
 
 from .climate import AIR_MASTER, AIR_MEMBER, AirStatus, ThermostatMode
-from .codec import Fields, Reader, SETBACK, ShortPayload, status_flags, temp
+from .codec import Fields, Reader, SETBACK, ShortPayload, temp
 from .io import IO_CHANGE, IO_DISCOVER, IO_DISCOVERY, IO_REPLY, IO_REQUEST, IoReport
 from .layouts import (
     BLOCK_SELECTORS as BLOCK_SELECTORS,
@@ -20,6 +20,7 @@ from .plant import MIXING_PRESENT, MIXING_REPORT, MIXING_UPDATE, PLANT_OUTPUT, M
 from .products import identify_product
 from .scenes import SCENE_REPORT, SCENE_RESPONSE_FIELDS, SceneReport, SceneResponse
 from .schedules import DAY_NAMES, SCHEDULE_STATUS, SINGLE_WEEK, DailyEvents, ScheduleBinding, ScheduleCycle, ScheduleEvent, ScheduleStatus
+from .setpoint import SETPOINT_STATUS, SetpointStatus
 from .snowmelt import SNOW_REPORT, SNOW_REQUEST, SnowmeltApplication, SnowmeltReport
 from .thermostat import FAN_STATUS, HUMIDITY_STATUS, SLAB_STATUS, FanDuctStatus, HumidityStatus, SlabStatus
 from .water import (
@@ -27,20 +28,6 @@ from .water import (
     RELAY_HEARTBEAT, STAGE_DEMAND, TANK_STATUS, WATER_CYCLE, BoilerMaximum, DhwStatus, GeneralDemand,
     HeatSource, LoopStatus, RelayHeartbeat, StageDemand, TankStatus, WaterCycle,
 )
-
-
-def setpoint(r: Reader) -> Fields:
-    flags = status_flags(r.byte())
-    b = r.byte()
-    fields = flags | {"actuator_status": b & 3, "demand_status": (b >> 2) & 1,
-                      "heat_cool_mode": (b >> 3) & 1, "operating_mode": (b >> 4) & 3,
-                      "stat_priority": b >> 6}
-    for name in ("target_temp", "temp1", "temp2"):
-        fields.update(temp(name, r.word()))
-    aux, excuse1, excuse2 = r.take(3)
-    return fields | {"aux_relay_status": aux & 3, "requested_enable_status": (aux >> 2) & 3,
-                     "actual_enable_status": (aux >> 4) & 3, "reserved": aux >> 6,
-                     "status_excuse1": excuse1, "status_excuse2": excuse2}
 
 
 def outdoor(r: Reader) -> Fields:
@@ -377,7 +364,7 @@ DECODERS: dict[int, tuple[str, Callable[[Reader], Fields]]] = {
     MASTER_PRESENT: ("MasterPresent", master_present),
     SNOW_REPORT: ("SnowmeltZoneStatus", lambda r: SnowmeltReport.read(r).fields()),
     IO_CHANGE: ("IOChangeReport", lambda r: IoReport.read_value(r).fields()),
-    0x22f: ("SetpointStatus", setpoint),
+    SETPOINT_STATUS: ("SetpointStatus", lambda r: SetpointStatus.read(r).fields()),
     DHW_STATUS: ("DHWStatus", lambda r: DhwStatus.read(r).fields()),
     PLANT_OUTPUT: ("PlantOutputStatus", lambda r: PlantOutput.read(r).fields()),
     0x2d7: ("BlockRequest", block_request),

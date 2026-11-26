@@ -89,6 +89,10 @@ class SetpointApplication(IntEnum):
     FLOOR = 4
     POOL = 5
 
+    @property
+    def target_block(self) -> int:
+        return (0x28, 0x2a, 0x2c, 0x28, 0x2e, 0x30)[self]
+
 
 @dataclass(frozen=True, slots=True)
 class SetpointAssignment:

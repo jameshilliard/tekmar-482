@@ -295,7 +295,13 @@ class LiveCalendarTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_member_becomes_local_owner_and_row_edits_need_reports(self) -> None:
         watch = asyncio.create_task(
-            watch_native(self.stream, [TEST_PATH], duration=0.35, timeout=0.15),
+            watch_native(
+                self.stream,
+                [TEST_PATH],
+                duration=0.35,
+                timeout=0.15,
+                setpoint_settings=False,
+            ),
         )
         await self.query(0)
         self.ack()

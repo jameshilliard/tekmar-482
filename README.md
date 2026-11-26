@@ -581,6 +581,21 @@ to skip these extra reads. Passive mode still decodes any observed table.
 An RH reading does not establish that humidification or dehumidification is
 installed, and fan output states are not ventilation percentages.
 
+For a setpoint controller, `state.setpoint_control(path)` separates the live
+`22F` status from stored targets and group assignment. Status retains relay,
+enable, direction, demand, reason codes and raw words even for an unidentified
+source. On an identified 161/162, `control.readings` presents the live target
+and first sensor in Fahrenheit only when the application was known at receipt.
+The 483 uses E for live DHW and H for other applications. The second sensor
+stays raw. A later setup change never reinterprets an old sample.
+
+The watcher reads application setup, operating parameters, override time and
+the selected primary target table. All **stored** target words use H, including
+DHW. The optional wake/sleep table is not assumed; a six-byte floor table
+has no reported maximum. `--no-setpoint-settings` skips these reads.
+`snapshot.setpoint_controls` exposes configuration from a block scan, not
+a synthetic live status: there is no known request for a fresh `22F`.
+
 The library equivalent is `await watch_native(stream, paths, on_change=callback)`.
 The synchronous callback receives `(path, state)`. Use
 `state.snowmelt(path)`, `state.climate(path)`, `state.schedule(path)`,

@@ -29,6 +29,7 @@ from .cli_line import (
 from .cli_native_watch import (
     calendar_fields,
     io_fields,
+    setpoint_fields,
     snow_fields,
     snow_group_from_args,
     watch_all_from_args,
@@ -803,6 +804,8 @@ def _emit_derived(snapshot: NativeSnapshot, emit: Callable[[object], None]) -> N
         emit({"thermostat_sensors": sensor_fields(device)})
     state = snapshot.observed_state()
     _emit_io(state, emit)
+    for control in state.setpoint_controls:
+        emit({"setpoint_control": setpoint_fields(control)})
     for path, plant in state.plant_configurations:
         emit({"plant_registers": {**asdict(path), **plant_register_fields(plant)}})
     for climate in state.thermostats:
@@ -1088,6 +1091,8 @@ def _emit_capture_summary(
     if sources := observed.water_sources:
         emit({"water_sources": [water_fields(s) for s in sources]})
     _emit_io(observed, emit, passive=True)
+    for control in observed.setpoint_controls:
+        emit({"setpoint_control": setpoint_fields(control)})
     for path, plant in observed.plant_configurations:
         emit({"plant_registers": {**asdict(path), **plant_register_fields(plant)}})
     for thermostat in observed.thermostats:

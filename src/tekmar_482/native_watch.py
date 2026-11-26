@@ -17,6 +17,7 @@ from ._native_payloads.schedules import SCHEDULE_STATUS, SETUP_BLOCK
 from ._snow_watch import SnowRead, SnowWatch
 from .native import NativeAddress, NativeBlockQuery, NativeFrame
 from .native_plant_registers import PLANT_REGISTERS
+from .native_setpoint import SETPOINT_BLOCKS
 from .native_state import BLOCK_UPDATE, TAKING_ADDRESS, NativePath, NativeState
 from .native_targets import ADJUSTMENT_BLOCKS
 from .raw import CaptureGap
@@ -110,6 +111,7 @@ class _Watch:
         schedules: bool = False,
         thermostat_targets: bool = False,
         plant_settings: bool = False,
+        setpoint_settings: bool = False,
         io_discovery: bool = False,
         on_native: Callable[[NativePath, NativeState], None] | None = None,
     ) -> None:
@@ -134,8 +136,10 @@ class _Watch:
                 schedules=schedules,
                 targets=thermostat_targets,
                 plants=plant_settings,
+                setpoints=setpoint_settings,
             )
-            if (schedules or thermostat_targets or plant_settings) and active
+            if (schedules or thermostat_targets or plant_settings or setpoint_settings)
+            and active
             else None
         )
         self.on_native = on_native
@@ -158,6 +162,7 @@ class _Watch:
                     block[0] in (SETUP_BLOCK, MULTI_WEEK.start)
                     or block[0] in ADJUSTMENT_BLOCKS
                     or block[0] in PLANT_REGISTERS
+                    or block[0] in SETPOINT_BLOCKS
                 )
                 and self.state.block_revision(path, block) > 0
             )
@@ -487,11 +492,12 @@ async def watch_native(
     schedules: bool = True,
     thermostat_targets: bool = True,
     plant_settings: bool = True,
+    setpoint_settings: bool = True,
     io_discovery: bool = True,
     on_change: Callable[[NativePath, NativeState], None] | None = None,
     on_record: Callable[[CaptureRecord], None] | None = None,
 ) -> NativeWatchResult:
-    """Observe selected paths and read thermostat, snowmelt and schedule setup.
+    """Observe selected paths and read configuration for identified devices.
 
     Synchronous callbacks may inspect immutable snapshots in the current state.
     Passive mode (source=None) never sends. Use a new watch on each connection.
@@ -505,6 +511,7 @@ async def watch_native(
         schedules=schedules,
         thermostat_targets=thermostat_targets,
         plant_settings=plant_settings,
+        setpoint_settings=setpoint_settings,
         io_discovery=io_discovery,
         on_native=on_change,
     )

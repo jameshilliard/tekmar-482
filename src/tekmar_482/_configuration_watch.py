@@ -115,12 +115,14 @@ class ConfigurationWatch:
         schedules: bool,
         targets: bool,
         plants: bool,
+        setpoints: bool,
     ) -> None:
         self.state = state
         self.queue = queue
         self.schedules = schedules
         self.targets = targets
         self.plants = plants
+        self.setpoints = setpoints
         self.wanted: dict[NativePath, dict[BlockKey, int]] = {}
         self.planned: dict[tuple[NativePath, BlockKey], int] = {}
         self.latest: dict[tuple[NativePath, BlockKey], NativeBlockBatch] = {}
@@ -138,6 +140,8 @@ class ConfigurationWatch:
         missing = self.state.missing_schedule_reads(path) if self.schedules else {}
         if self.plants:
             missing.update(self.state.missing_plant_reads(path))
+        if self.setpoints:
+            missing.update(self.state.missing_setpoint_reads(path))
         if self.targets and path.node and climate is not None:
             for b in climate.adjustments.missing_blocks:
                 missing[b, None] = self.state.block_revision(path, (b, None))
