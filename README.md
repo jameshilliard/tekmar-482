@@ -347,9 +347,19 @@ inventory walk, retaining measurements for controls that still exist.
 See the [firmware 06 compatibility notes](docs/firmware-06.md) for the scope
 of the protocol review and the distinction between gateway and device state.
 
-Firmware 06 supports setting the clock with `set_datetime()`, not reading it.
-A successful write echoes the supplied time; a rejection raises `ProtocolError`.
-Discovery and dumps do not request or report a live clock.
+In Normal mode, both the custom firmware and vendor firmware 06 support
+`await client.set_datetime(value)`. Supply local wall time in years 2000
+through 2255; seconds and timezone offsets are not transmitted. A successful
+echo confirms the gateway queued a clock broadcast, not that each thermostat
+applied it. A rejection raises `ProtocolError`; timeout returns `None`.
+There is no Normal-mode clock read or report. Discovery and dumps do not
+manufacture a live clock from the last accepted write.
+
+In Raw mode, `NativeMessage.request_clock(source=...)` builds a native 317
+for one line. Listen for 31F frames and use the frame's port and source to
+identify the responding clock; a link ACK is not a clock reading.
+`NativeMessage.clock_report(value, source=...)` builds the five-byte 482
+payload. Supply `dst` and optionally `dst_mode` for peers using those fields.
 
 Humidity measurement and minimum/maximum humidity setpoints use independent
 device attribute bits. When attributes are unavailable, a humidity-capable model

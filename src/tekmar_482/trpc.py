@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Iterable, Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from enum import IntEnum
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Protocol, Self, runtime_checkable
@@ -253,6 +253,23 @@ class DateTimeFields:
             "hour": self.hour,
             "minute": self.minute,
         }
+
+    def accepts_echo(self, message: TrpcPacket) -> bool:
+        """Match the admitted wall time or the gateway's undated rejection."""
+        return message.body == self.as_fields() or message.body == REJECTED_CLOCK
+
+
+REJECTED_CLOCK = MappingProxyType(
+    dict(DateTimeFields(0xFFFF, 255, 255, 255, 255, 255).as_fields()),
+)
+_CLOCK_BOUNDS = {
+    "year": (2000, 2255),
+    "month": (1, 12),
+    "day": (1, 31),
+    "weekday": (1, 7),
+    "hour": (0, 23),
+    "minute": (0, 59),
+}
 
 
 @dataclass(frozen=True, slots=True)
@@ -535,6 +552,12 @@ def _validate_update(
 ) -> None:
     if service != TrpcService.UPDATE:
         return
+    if method == TrpcMethod.DATE_TIME:
+        for name, (low, high) in _CLOCK_BOUNDS.items():
+            value = fields.get(name)
+            if value is None or not low <= value <= high:
+                msg = f"DateTime {name} must be in {low}..{high}, got {value}"
+                raise ValueError(msg)
     if (
         method in _SETBACK_INDEXED_METHODS
         and "setback" in fields
@@ -642,6 +665,7 @@ class ReplySelector:
     address: int | None
     slot: int | None
     echo: tuple[str, int] | None
+    clock: DateTimeFields | None = None
 
     @classmethod
     def from_fields(
@@ -673,6 +697,8 @@ class ReplySelector:
             elif slot is not None:
                 key = _echo_field(method)
         echo = (key, sent.get(key, 0)) if key is not None else None
+        if method == TrpcMethod.DATE_TIME and service == TrpcService.UPDATE:
+            return cls(reply, method, address, slot, echo, DateTimeFields(**sent))
         return cls(reply, method, address, slot, echo)
 
     @property
@@ -688,6 +714,7 @@ class ReplySelector:
                 TrpcMethod.DATE_TIME,
             }
         return self.slot is not None or self.method in (
+            TrpcMethod.DATE_TIME,
             TrpcMethod.OUTDOOR_TEMP,
             TrpcMethod.MODE_SETTING,
             TrpcMethod.DEVICE_ATTRIBUTES,
@@ -751,6 +778,7 @@ class ReplySelector:
         return (
             message.service is self.service
             and message.method_id == self.method
+            and (self.clock is None or self.clock.accepts_echo(message))
             and message.get("address") == self.address
             and (self.echo is None or message.get(self.echo[0]) == self.echo[1])
             and (
@@ -769,6 +797,7 @@ class ResponseMatch:
     service_ids: frozenset[int] | None = None
     address: int | None = None
     fields: TrpcFieldMap = field(default_factory=dict)
+    clock: DateTimeFields | None = None
 
     def __post_init__(self) -> None:
         """Freeze field predicates so matches cannot change while pending."""
@@ -815,6 +844,7 @@ class ResponseMatch:
             services = response_services
 
         method = command.method if response_method is None else response_method
+        clock = None
         spec = method_spec(method)
         if (
             method == command.method
@@ -829,6 +859,8 @@ class ResponseMatch:
             )
             predicates = spec.normalize_fields(freeze_fields(fields))
             if selector is not None:
+                if fields is None:
+                    clock = selector.clock
                 if address is None and "address" not in predicates:
                     address = selector.address
                 if selector.slot is not None:
@@ -837,18 +869,21 @@ class ResponseMatch:
                     predicates.setdefault(*selector.echo)
             fields = predicates
 
-        return cls.create(
+        match = cls.create(
             method,
             services=services,
             address=address,
             fields=fields,
         )
+        return match if clock is None else replace(match, clock=clock)
 
     def matches(self, message: TrpcPacket) -> bool:
         """Return whether a tRPC message satisfies this match."""
         if self.service_ids is not None and message.service_id not in self.service_ids:
             return False
         if message.method_id != self.method_id:
+            return False
+        if self.clock is not None and not self.clock.accepts_echo(message):
             return False
         if self.address is not None and message.get("address") != self.address:
             return False

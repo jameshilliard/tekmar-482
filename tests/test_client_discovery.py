@@ -282,6 +282,65 @@ class ClientDiscoveryTest(unittest.IsolatedAsyncioTestCase):
                 await client.set_datetime(when, timeout=None)
         transport.assert_complete()
 
+    async def test_late_clock_rejection_does_not_answer_the_next_write(self) -> None:
+        transport = BlockingWriteTransport()
+        first = datetime(2000, 1, 2, tzinfo=UTC)  # Sunday
+        last = datetime(2255, 12, 31, 23, 59, 58, tzinfo=UTC)
+        async with Tekmar482Client(transport) as client, asyncio.timeout(1):
+            for year in (1999, 2256):
+                with (
+                    self.subTest(year=year),
+                    self.assertRaisesRegex(ValueError, "year"),
+                ):
+                    await client.set_datetime(first.replace(year=year))
+            assert not transport.written
+            old = asyncio.create_task(client.set_datetime(first, timeout=0.02))
+            assert (await transport.next_write()).data == bytes.fromhex(
+                "00 a7010000 d007 0102 07 0000",
+            )
+            transport.release_write()
+            assert await old is None
+            # A different positive echo cannot clear the debt. A negative
+            # echo is undated and must be consumed before the next write.
+            transport.queue_packet(
+                update_response(
+                    "DateTime",
+                    year=2000,
+                    month=1,
+                    day=2,
+                    weekday=7,
+                    hour=0,
+                    minute=1,
+                ).to_packet(),
+            )
+            assert await client.set_datetime(last, timeout=0.02) is None
+            assert len(transport.written) == 1
+            next_write = asyncio.create_task(client.set_datetime(last))
+            transport.queue_packet(
+                update_response(
+                    "DateTime",
+                    year=65535,
+                    month=255,
+                    day=255,
+                    weekday=255,
+                    hour=255,
+                    minute=255,
+                ).to_packet(),
+            )
+            sent = TrpcPacket.from_packet(await transport.next_write())
+            assert sent.body == {
+                "year": 2255,
+                "month": 12,
+                "day": 31,
+                "weekday": last.isoweekday(),
+                "hour": 23,
+                "minute": 59,
+            }
+            transport.release_write()
+            accepted = update_response("DateTime", **sent.body)
+            transport.queue_packet(accepted.to_packet())
+            assert await next_write == accepted
+
     async def test_discovery_deadline_includes_transaction_queue(self) -> None:
         transport = BlockingWriteTransport()
         async with Tekmar482Client(transport) as client, asyncio.timeout(1):

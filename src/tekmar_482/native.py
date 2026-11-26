@@ -12,6 +12,7 @@ from .constants import SETPOINT_GROUP_IDS, TN4_PORTS
 
 if TYPE_CHECKING:
     from calendar import Day
+    from datetime import datetime
 
 _HEADER = 4
 _MAX_PAYLOAD = 63
@@ -94,6 +95,34 @@ class NativeMessage:
             body[_HEADER:],
             header >> 30,
         )
+
+    @classmethod
+    def request_clock(cls, *, source: NativeAddress) -> Self:
+        """Ask for a native clock report on one line, not for a gateway clock."""
+        return cls(0x317, source, b"")
+
+    @classmethod
+    def clock_report(
+        cls,
+        value: datetime,
+        *,
+        source: NativeAddress,
+        dst: bool = False,
+        dst_mode: int | None = None,
+    ) -> Self:
+        """Supply wall time. Omit dst_mode for the five-byte 482 layout."""
+        payload = bytes(
+            (
+                value.minute,
+                value.hour << 3 | value.isoweekday(),
+                (value.month - 1) | int(dst) << 4,
+                value.day - 1,
+                _uint(value.year - 2000, 8),
+            ),
+        )
+        if dst_mode is not None:
+            payload += bytes([_uint(dst_mode, 8)])
+        return cls(0x31F, source, payload)
 
     @classmethod
     def setpoint_group(

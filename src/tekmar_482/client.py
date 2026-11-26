@@ -38,6 +38,7 @@ from .transport import (
     SerialxTpckTransport,
 )
 from .trpc import (
+    REJECTED_CLOCK,
     AddressFields,
     AddressSetbackFields,
     DateTimeFields,
@@ -75,27 +76,6 @@ if TYPE_CHECKING:
 
 _REPORTING_ACK_TIMEOUT = 5
 _OUTDOOR_LIMIT = 0x0BEA  # Exclusive bound in J1196J's host sample handler.
-
-_REJECTED_CLOCK = DateTimeFields(
-    year=ThaValue.NA_16,
-    month=ThaValue.NA_8,
-    day=ThaValue.NA_8,
-    weekday=ThaValue.NA_8,
-    hour=ThaValue.NA_8,
-    minute=ThaValue.NA_8,
-).as_fields()
-
-
-class _ClockWriteMatch(ResponseMatch):
-    """Accept the requested echo or the firmware's explicit rejection."""
-
-    def matches(self, message: TrpcPacket) -> bool:
-        return super().matches(message) or (
-            message.service is TrpcService.RESPONSE_UPDATE
-            and message.method is TrpcMethod.DATE_TIME
-            and message.body == _REJECTED_CLOCK
-        )
-
 
 type _SetbackPayload = (
     AddressSetbackFields
@@ -815,10 +795,9 @@ class Tekmar482Client:
         command = TrpcCommand.update(TrpcMethod.DATE_TIME, fields)
         response = await self.session.update_response(
             command,
-            response_match=_ClockWriteMatch.for_command(command, fields=fields),
             timeout=timeout,
         )
-        if response is not None and response.body == _REJECTED_CLOCK:
+        if response is not None and response.body == REJECTED_CLOCK:
             msg = "Gateway rejected DateTime update"
             raise ProtocolError(msg)
         return response

@@ -1,6 +1,6 @@
 import unittest
 from calendar import Day
-from datetime import UTC, time
+from datetime import UTC, datetime, time
 
 from tekmar_482 import (
     NativeAddress,
@@ -12,6 +12,27 @@ from tekmar_482 import (
 
 
 class NativeTests(unittest.TestCase):
+    def test_native_clock_vectors_and_optional_dst_mode(self) -> None:
+        source = NativeAddress(0, 0)
+        assert NativeMessage.request_clock(source=source).to_bytes() == bytes.fromhex(
+            "71700000",
+        )
+        published = datetime(2012, 6, 26, 10, 27, tzinfo=UTC)
+        assert NativeMessage.clock_report(published, source=source).to_bytes() == (
+            bytes.fromhex("71f00005 1b5205190c")
+        )
+        last = published.replace(year=2255)
+        report = NativeMessage.clock_report(last, source=source, dst=True, dst_mode=0)
+        assert report.payload == bytes([27, 80 | last.isoweekday(), 0x15, 25, 255, 0])
+        assert report.decoded["year"] == 2255
+        assert report.decoded["dst"] == 1
+        assert report.decoded["dst_mode"] == 0
+        assert "dst_mode" not in NativeMessage.clock_report(last, source=source).decoded
+        with self.assertRaises(ValueError):
+            NativeMessage.clock_report(published.replace(year=2256), source=source)
+        with self.assertRaises(ValueError):
+            NativeMessage.clock_report(last, source=source, dst_mode=256)
+
     def test_display_address_excludes_non_device_nodes(self) -> None:
         assert NativeAddress(0, 24).tha_address(0) == 1
         assert NativeAddress(0, 23).tha_address(0) == 2
