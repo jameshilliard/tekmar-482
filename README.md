@@ -510,6 +510,40 @@ and a link ACK without a report never constitute a complete answer.
 Partial data are available even when the CLI exits with status 1. These
 commands do not change device settings or enable a snowmelt group.
 
+**Read native I/O channels.** I/O discovery, explicit channel replies and
+unsolicited changes are separate from block reads. For example, with
+reporter `0x12:3` on port 2 and I/O payload address `0x43:0xa5`:
+
+```bash
+tekmar-482 read-status io-discovery 2 0x43 0xa5 --peer 0x12 3 --tcp 192.0.2.10:3001 --json
+tekmar-482 read-status io-channel 2 0x43 0xa5 7 --peer 0x12 3 --tcp 192.0.2.10:3001 --json
+tekmar-482 read-device 2 0x12 3 --io-endpoint 0x43 0xa5 --tcp 192.0.2.10:3001 --json
+```
+
+Keep both I/O address bytes exactly as reported; do not convert the node
+to a block bitmap or derive it from a thermostat display address. The
+same channel number can exist on multiple endpoints, peers and physical
+ports. The CLI's `dump` and `read_native_snapshot` query endpoints seen
+during discovery or explicitly supplied in `NativeDevice.io_endpoints`.
+A node-zero I/O reporter needs no block request.
+
+`frame.io_report` provides the typed value, raw type ID and discovery
+label bytes. `IoDirectory.from_batch(answer)` describes one discovery
+exchange. `state.io_directory(path, endpoint)` combines live observations;
+a complete, source-matched discovery can retire missing channels, but a
+partial scan or silence cannot. A newer change seen during a scan wins.
+Stream frames have a connection-local `capture_index` in addition to the
+gateway's millisecond timestamp. The live watcher uses receive order, so
+two reports in the same timestamp tick cannot reverse a channel update.
+A `CaptureGap`, address move or identity replacement invalidates old
+routes. A board-terminal name is not a discovered label or proof of an
+output, and there is no generic I/O channel write in these services.
+
+An active `watch-native` discovers the first time it sees an I/O endpoint
+and can rediscover when a later report supplies a new channel, type or count.
+It does not poll or scan guessed channel numbers. `--no-io-discovery`
+keeps I/O observation passive while other requested reads continue.
+
 **Watch several devices on one connection.** `watch-native` can watch an
 identified snowmelt controller and thermostats together. It reads identity
 and configuration on each selected path. For a snowmelt control it then

@@ -283,6 +283,11 @@ def _add_watch(
     )
     if name == "watch-native":
         watch.add_argument(
+            "--no-io-discovery",
+            action="store_true",
+            help="observe I/O telemetry without querying channel directories",
+        )
+        watch.add_argument(
             "--no-plant-settings",
             action="store_true",
             help="skip addressed plant setup and runtime reads",

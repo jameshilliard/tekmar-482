@@ -7,6 +7,7 @@ from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING
 
 from ._native_payloads import SnowmeltBlock
+from ._native_payloads.io import IoEndpoint
 from ._native_payloads.products import AVAILABILITY_FIELDS, block_selectors
 from ._native_payloads.queries import NativeStatusQuery, StatusRequest
 from .constants import TN4_PORTS
@@ -14,7 +15,7 @@ from .native import NativeAddress, NativeBlockQuery, NativeTargets
 from .native_discovery import NativeInventory
 from .native_schedule import ScheduleDirectory
 from .native_sensors import ThermostatSensorMonitor
-from .native_state import NativeState
+from .native_state import NativePath, NativeState
 from .raw import RejectReason, TxStatus
 
 if TYPE_CHECKING:
@@ -22,10 +23,11 @@ if TYPE_CHECKING:
 
     from ._native_payloads.products import NativeProduct
     from .native_discovery import NativeDevice
+    from .native_io import IoDirectory
     from .native_plant_registers import PlantRegisters
     from .native_sensors import SensorObservation
     from .native_snowmelt import NativeSnowmelt
-    from .native_state import NativeClimate, NativePath
+    from .native_state import NativeClimate
     from .native_status import NativeStatusBatch
     from .raw import BridgeStream, NativeBlockBatch
 
@@ -59,6 +61,10 @@ class NativeSnapshot:
     def plant_configurations(self) -> tuple[tuple[NativePath, PlantRegisters], ...]:
         return self.observed_state().plant_configurations
 
+    @property
+    def io_directories(self) -> tuple[tuple[NativePath, IoDirectory], ...]:
+        return self.observed_state().io_directories
+
     def observed_state(self) -> NativeState:
         """Project the reports from the scan without issuing further requests."""
         state = NativeState()
@@ -66,6 +72,11 @@ class NativeSnapshot:
             for frame in batch.reports:
                 state.observe(frame)
         for status in self.statuses:
+            if status.query.kind is StatusRequest.IO_DISCOVERY and status.peer:
+                path = NativePath(status.port, status.peer.subnet, status.peer.node)
+                before = state.io_directory(path, IoEndpoint(*status.query.payload))
+                state.reconcile_io(status, before=before)
+                continue
             for frame in status.reports:
                 state.observe(frame)
         return state
@@ -222,6 +233,8 @@ async def read_native_devices(
         if device.port not in TN4_PORTS:
             msg = f"no physical tN4 port {device.port}"
             raise ValueError(msg)
+        if not (device.address.node & 31) and device.io_endpoints:
+            continue  # A status-only source is not selectable by a block bitmap.
         device.address.request_mask()
         ports.setdefault(device.port, {}).setdefault(device.address.subnet, []).append(
             device,
@@ -256,10 +269,12 @@ async def read_native_devices(
 
 def _status_queries(
     batches: Iterable[NativeBlockBatch],
+    devices: Iterable[NativeDevice],
     *,
     include_line_status: bool,
 ) -> dict[int, list[tuple[NativeAddress | None, NativeStatusQuery]]]:
     state = NativeState()
+    inventory = NativeInventory(devices)
     busy: set[int] = set()
     active: set[int] = set()
     for batch in batches:
@@ -278,6 +293,8 @@ def _status_queries(
         }:
             for frame in batch.reports:
                 state.observe(frame)
+                if batch.query.block_id == 0:
+                    inventory.observe(frame)
     ports: dict[int, list[tuple[NativeAddress | None, NativeStatusQuery]]] = {}
     for device in state.snowmelt_devices:
         if (
@@ -285,6 +302,12 @@ def _status_queries(
             and (query := device.status_query()) is not None
         ):
             ports.setdefault(device.path.port, []).append((device.path.address, query))
+    for peer in inventory.devices:
+        if peer.io_endpoints and peer.port not in busy:
+            ports.setdefault(peer.port, []).extend(
+                (peer.address, NativeStatusQuery.io(e.subnet, e.node))
+                for e in sorted(peer.io_endpoints)
+            )
     if include_line_status:
         for port in active - busy:
             ports.setdefault(port, []).extend(
@@ -313,6 +336,7 @@ async def read_native_snapshot(
     on_status: Callable[[NativeStatusBatch], None] | None = None,
 ) -> NativeSnapshot:
     """Read blocks, then application-specific telemetry from identified devices."""
+    devices = tuple(devices)
     blocks = await read_native_devices(
         stream,
         devices,
@@ -342,7 +366,7 @@ async def read_native_snapshot(
                 break
         return batches
 
-    ports = _status_queries(blocks, include_line_status=include_line_status)
+    ports = _status_queries(blocks, devices, include_line_status=include_line_status)
     tasks = [
         asyncio.create_task(sample(p, queries)) for p, queries in sorted(ports.items())
     ]

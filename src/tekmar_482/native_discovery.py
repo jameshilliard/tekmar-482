@@ -15,6 +15,7 @@ from .raw import CaptureGap
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterable
 
+    from ._native_payloads.io import IoEndpoint
     from .raw import BridgeStream, CaptureRecord, TxResult
 
 _REPORT = 0x2E7
@@ -34,6 +35,7 @@ class NativeDevice:
     identity: NativeIdentity | None = None
     reported_blocks: frozenset[int] = frozenset()
     reported_selectors: frozenset[tuple[int, int]] = frozenset()
+    io_endpoints: frozenset[IoEndpoint] = frozenset()
 
 
 class NativeInventory:
@@ -51,10 +53,9 @@ class NativeInventory:
 
     def observe(self, frame: NativeFrame) -> NativeDevice | None:
         node = frame.node & _NODE_BITS
-        if not node:
-            return None  # Not selectable by a block request.
         key = (frame.port, frame.subnet, node)
         data = frame.message.payload
+        io = frame.io_report
         last = self._nodes.get(key)
         if frame.message_id == _MOVE and len(data) >= _MOVE_HEADER:
             old = (frame.port, data[0], data[1] & _NODE_BITS)
@@ -62,8 +63,17 @@ class NativeInventory:
                 previous = self._nodes.pop(old, None)
                 self._moved_from.pop(old, None)
                 if previous is not None or self._moved_from.get(key) != old:
-                    last = previous  # Never inherit a different occupant's identity.
+                    # A known moving device keeps its identity, not its old I/O routes.
+                    self._nodes.pop(key, None)
+                    last = (
+                        replace(previous, io_endpoints=frozenset())
+                        if previous
+                        else None
+                    )
                 self._moved_from[key] = old
+        if not node and io is None:
+            # A reported I/O endpoint is selectable without a block bitmap.
+            return None
         device = (
             replace(last, address=frame.message.source)
             if last is not None
@@ -83,6 +93,7 @@ class NativeInventory:
                     ):
                         blocks = frozenset()
                         selectors = frozenset()
+                        device = replace(device, io_endpoints=frozenset())
                     current = identity
                 spec = BLOCK_SELECTORS.get(block)
                 if spec and data[2] & 1 and len(data) > _BLOCK_HEADER:
@@ -93,6 +104,8 @@ class NativeInventory:
                     reported_blocks=blocks | {block},
                     reported_selectors=selectors,
                 )
+        elif io is not None:
+            device = replace(device, io_endpoints=device.io_endpoints | {io.endpoint})
         self._nodes[key] = device
         return device
 
@@ -142,17 +155,23 @@ async def discover_native(
         enqueue(port, NativeTargets(subnet).subnet)
 
     async def receive() -> None:
-        nonlocal dropped
+        nonlocal dropped, inventory
         while True:
             record = await stream.read()
             if on_record is not None:
                 on_record(record)
             if isinstance(record, CaptureGap):
                 dropped += record.dropped
+                # An address reassignment could be missing.
+                inventory = NativeInventory()
+                # Keep queued or in-flight identity probes; fresh traffic can
+                # request a previously completed probe again after the gap.
+                seen.difference_update(k for k, v in probes.items() if v is not None)
             elif (
                 isinstance(record, NativeFrame)
                 and inventory.observe(record) is not None
                 and source is not None
+                and record.node & _NODE_BITS
             ):
                 enqueue(record.port, record.subnet)
 

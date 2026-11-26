@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from enum import IntEnum
 
 from . import decode_payload
+from .io import IO_DISCOVER, IO_DISCOVERY, IO_REPLY, IO_REQUEST
 from .line import ACCESS_STATUS
 from .snowmelt import SNOW_REPORT, SNOW_REQUEST, SnowmeltAddress, SnowmeltApplication, SnowmeltKey as SnowmeltKey, SnowmeltRole as SnowmeltRole
 
@@ -11,8 +12,8 @@ from .snowmelt import SNOW_REPORT, SNOW_REQUEST, SnowmeltAddress, SnowmeltApplic
 class StatusRequest(IntEnum):
     ZONE_SYNC = 0x011
     SNOWMELT = SNOW_REQUEST
-    IO_CHANNEL = 0x1f4
-    IO_DISCOVERY = 0x1f6
+    IO_CHANNEL = IO_REQUEST
+    IO_DISCOVERY = IO_DISCOVER
     GATEWAY_ACCESS = ACCESS_STATUS
     WWSD = 0x307
     CLOCK = 0x317
@@ -27,7 +28,7 @@ class StatusRequest(IntEnum):
 
 _REPLIES = {
     StatusRequest.ZONE_SYNC: 0x010, StatusRequest.SNOWMELT: SNOW_REPORT,
-    StatusRequest.IO_CHANNEL: 0x1f3, StatusRequest.IO_DISCOVERY: 0x1f5,
+    StatusRequest.IO_CHANNEL: IO_REPLY, StatusRequest.IO_DISCOVERY: IO_DISCOVERY,
     StatusRequest.WWSD: 0x30f, StatusRequest.CLOCK: 0x31f,
     StatusRequest.HUMIDITY: 0x323, StatusRequest.OUTDOOR: 0x32f,
     StatusRequest.MASTER: 0x3ff,

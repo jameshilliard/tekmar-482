@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import asdict
 from typing import TYPE_CHECKING
 
+from ._native_payloads.io import io_terminal
 from .cli_schedule import schedule_fields
 from .cli_status import climate_fields, plant_register_fields, water_fields
 from .native import NativeAddress
@@ -17,10 +18,37 @@ if TYPE_CHECKING:
     from collections.abc import Callable
 
     from .native_calendar import NativeCalendar
+    from .native_io import IoDirectory
     from .native_plant_registers import PlantRegisters
     from .native_snowmelt import NativeSnowmelt, SnowmeltChannel
     from .native_state import NativeState
     from .raw import BridgeStream
+
+
+def io_fields(directory: IoDirectory, model: str | None = None) -> dict[str, object]:
+    endpoint = directory.endpoint
+    channels = []
+    for channel in directory.channels:
+        sample, frame = channel.sample, channel.frame
+        fields: dict[str, object] = {
+            **sample.fields(),
+            "received_ms": frame.timestamp_ms,
+            "body": frame.body.hex(),
+        }
+        if (
+            model is not None
+            and frame.subnet == endpoint.subnet
+            and endpoint.node in (frame.node, frame.node & 31)
+            and (name := io_terminal(model, sample.channel)) is not None
+        ):
+            fields["board_terminal"] = name
+        channels.append(fields)
+    return {
+        "endpoint": asdict(endpoint),
+        "advertised_count": directory.advertised_count,
+        "complete": directory.complete,
+        "channels": channels,
+    }
 
 
 def _channel_fields(channel: SnowmeltChannel) -> dict[str, object]:
@@ -105,8 +133,24 @@ async def watch_all_from_args(
 ) -> int:
     previous: dict[NativePath, dict[str, object]] = {}
     previous_plants: dict[NativePath, PlantRegisters] = {}
+    previous_io: dict[NativePath, tuple[str | None, tuple[IoDirectory, ...]]] = {}
 
     def changed(path: NativePath, state: NativeState) -> None:
+        identity = state.identity(path)
+        model = identity.product.model if identity and identity.product else None
+        if dirs := state.io_for(path):
+            if (model, dirs) != previous_io.get(path):
+                previous_io[path] = model, dirs
+                emit(
+                    {
+                        "native_io": {
+                            **asdict(path),
+                            "directories": [io_fields(d, model) for d in dirs],
+                        },
+                    },
+                )
+        elif previous_io.pop(path, None) is not None:
+            emit({"native_io_removed": asdict(path)})
         if (snow := state.snowmelt(path)) is not None:
             emit({"snowmelt": snow_fields(snow)})
         elif (climate := state.climate(path)) is not None:
@@ -151,10 +195,13 @@ async def watch_all_from_args(
         schedules=not args.no_schedules,
         thermostat_targets=not args.no_thermostat_targets,
         plant_settings=not args.no_plant_settings,
+        io_discovery=not args.no_io_discovery,
         on_change=changed,
     )
     state = result.state
-    unidentified = [asdict(p) for p in paths or () if state.identity(p) is None]
+    unidentified = [
+        asdict(p) for p in paths or () if p.node and state.identity(p) is None
+    ]
     no_mode = [asdict(t.path) for t in state.thermostats if t.setup.mode_raw is None]
     no_targets = (
         []
@@ -196,6 +243,11 @@ async def watch_all_from_args(
             if (c := state.schedule(p)) is not None and c.incomplete
         ]
     )
+    no_io = [
+        {**asdict(p), "endpoint": asdict(d.endpoint)}
+        for p, d in state.io_directories
+        if not d.complete and not args.no_io_discovery
+    ]
     emit(
         {
             "completed_reads": result.reads,
@@ -207,6 +259,7 @@ async def watch_all_from_args(
             "incomplete_plant_settings": no_plants,
             "incomplete_snowmelt": no_snow,
             "incomplete_schedules": no_schedule,
+            "incomplete_io": no_io,
             "status_reads": [
                 {
                     "port": s.port,
@@ -247,7 +300,8 @@ async def watch_all_from_args(
                 or no_targets
                 or no_snow
                 or no_schedule
-                or no_plants,
+                or no_plants
+                or no_io,
             )
         ),
     )

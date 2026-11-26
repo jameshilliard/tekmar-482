@@ -14,7 +14,9 @@ from ._native_payloads.climate import (
     ThermostatConfiguration,
 )
 from ._native_payloads.codec import Reader, ShortPayload
+from ._native_payloads.io import IoEndpoint
 from ._native_payloads.layouts import MULTI_WEEK
+from ._native_payloads.queries import StatusRequest
 from ._native_payloads.schedules import SCHEDULE_STATUS
 from ._native_payloads.sensors import SENSOR_BLOCKS, ThermostatSensors
 from ._native_payloads.snowmelt import SNOW_REPORT
@@ -29,6 +31,7 @@ from .native_calendar import (
     schedule_profile,
 )
 from .native_identity import NativeIdentity
+from .native_io import IoBook, IoDirectory
 from .native_plant_registers import (
     PLANT_REGISTERS,
     PlantRegisterBook,
@@ -45,6 +48,7 @@ if TYPE_CHECKING:
 
     from ._water_monitor import WaterSource
     from .native_snowmelt import SnowmeltChannel
+    from .native_status import NativeStatusBatch
     from .raw import CaptureRecord
 
 BLOCK_REPORT = 0x2E7
@@ -100,6 +104,7 @@ class _Peer:
     calendar: ScheduleBook = field(default_factory=ScheduleBook)
     outputs: AdjustmentState = field(default_factory=AdjustmentState)
     plant: PlantRegisterBook = field(default_factory=PlantRegisterBook)
+    io: dict[IoEndpoint, IoBook] = field(default_factory=dict)
 
     def climate(self, path: NativePath) -> NativeClimate | None:
         identity = self.identity
@@ -146,6 +151,48 @@ class NativeState:
 
     def water_source(self, path: NativePath) -> WaterSource | None:
         return self._water.source(path.port, path.address)
+
+    def io_directory(
+        self,
+        path: NativePath,
+        endpoint: IoEndpoint,
+    ) -> IoDirectory | None:
+        peer = self._peers.get(path)
+        book = peer.io.get(endpoint) if peer else None
+        return book.snapshot() if book else None
+
+    def io_for(self, path: NativePath) -> tuple[IoDirectory, ...]:
+        peer = self._peers.get(path)
+        return tuple(peer.io[k].snapshot() for k in sorted(peer.io)) if peer else ()
+
+    @property
+    def io_directories(self) -> tuple[tuple[NativePath, IoDirectory], ...]:
+        return tuple((p, d) for p in sorted(self._peers) for d in self.io_for(p))
+
+    def reconcile_io(
+        self,
+        batch: NativeStatusBatch,
+        *,
+        before: IoDirectory | None,
+    ) -> bool:
+        """Merge a completed exchange against the snapshot taken before sending."""
+        if batch.query.kind is not StatusRequest.IO_DISCOVERY:
+            msg = "expected an I/O discovery batch"
+            raise ValueError(msg)
+        if batch.peer is None or not batch.reports:
+            return False
+        path = NativePath(batch.port, batch.peer.subnet, batch.peer.node)
+        if self._selected is not None and path not in self._selected:
+            return False
+        endpoint = IoEndpoint(*batch.query.payload)
+        if before is not None and before.endpoint != endpoint:
+            msg = "I/O discovery baseline belongs to a different endpoint"
+            raise ValueError(msg)
+        books = self._peers.setdefault(path, _Peer()).io
+        book = books.setdefault(endpoint, IoBook(endpoint))
+        old = book.snapshot()
+        book.reconcile(batch, before)
+        return book.snapshot() != old
 
     def plant_registers(self, path: NativePath) -> PlantRegisters | None:
         peer = self._peers.get(path)
@@ -396,6 +443,10 @@ class NativeState:
         if self._selected is not None and path not in self._selected:
             return ()
         changed_water = self._water.observe(record)
+        if (sample := record.io_report) is not None:
+            peer = self._peers.setdefault(path, _Peer())
+            book = peer.io.setdefault(sample.endpoint, IoBook(sample.endpoint))
+            return (path,) if book.observe(sample, record) else ()
         if record.message_id == BLOCK_REPORT:
             return (path,) if self._block(path, record) or changed_water else ()
         if record.message_id in (FAN_STATUS, SLAB_STATUS, HUMIDITY_STATUS):

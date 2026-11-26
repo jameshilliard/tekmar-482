@@ -11,7 +11,9 @@ from dataclasses import asdict
 from typing import TYPE_CHECKING, Any, TextIO
 
 from ._native_payloads.climate import REMOTE_MODES, ThermostatMode
+from ._native_payloads.io import IoEndpoint
 from ._native_payloads.line import GROUP_IDS
+from ._native_payloads.queries import StatusRequest
 from ._native_payloads.scenes import NativeScene, SceneResponse
 from ._native_payloads.thermostat import TargetSlot, ThermostatTarget
 from ._native_payloads.writes import NativeField, WritableBlock
@@ -26,6 +28,7 @@ from .cli_line import (
 )
 from .cli_native_watch import (
     calendar_fields,
+    io_fields,
     snow_fields,
     snow_group_from_args,
     watch_all_from_args,
@@ -57,6 +60,7 @@ from .firmware import install_firmware
 from .gateway import open_gateway
 from .native import NativeAddress, NativeBlockQuery
 from .native_discovery import NativeDevice, discover_native
+from .native_io import IoDirectory
 from .native_scene import write_scene_response
 from .native_schedule import read_weekly_schedule
 from .native_sensors import read_thermostat_sensors
@@ -332,6 +336,14 @@ def _add_block_commands(
         "read-device",
         parents=[parent],
         help="identify and read one native device",
+    )
+    device.add_argument(
+        "--io-endpoint",
+        nargs=2,
+        action="append",
+        type=_int_value,
+        metavar=("IO_SUBNET", "IO_NODE"),
+        help="also discover channels at these exact I/O payload bytes (repeatable)",
     )
     sensors = subparsers.add_parser(
         "read-sensors",
@@ -790,12 +802,26 @@ def _emit_derived(snapshot: NativeSnapshot, emit: Callable[[object], None]) -> N
     for device in snapshot.thermostat_sensors:
         emit({"thermostat_sensors": sensor_fields(device)})
     state = snapshot.observed_state()
+    _emit_io(state, emit)
     for path, plant in state.plant_configurations:
         emit({"plant_registers": {**asdict(path), **plant_register_fields(plant)}})
     for climate in state.thermostats:
         emit({"thermostat_climate": climate_fields(climate)})
     for snow in state.snowmelt_devices:
         emit({"snowmelt": snow_fields(snow)})
+
+
+def _emit_io(
+    state: NativeState,
+    emit: Callable[[object], None],
+    *,
+    passive: bool = False,
+) -> None:
+    for path, directory in state.io_directories:
+        identity = state.identity(path)
+        model = identity.product.model if identity and identity.product else None
+        key = "observed_io" if passive else "io_directory"
+        emit({key: {**asdict(path), **io_fields(directory, model)}})
 
 
 async def _native_addressed(
@@ -816,7 +842,15 @@ async def _native_addressed(
         if args.command == "read-device":
             snapshot = await read_native_snapshot(
                 stream,
-                [NativeDevice(args.port, address)],
+                [
+                    NativeDevice(
+                        args.port,
+                        address,
+                        io_endpoints=frozenset(
+                            IoEndpoint(*pair) for pair in args.io_endpoint or ()
+                        ),
+                    ),
+                ],
                 source=source,
                 timeout=args.timeout,
                 attempts=getattr(args, "block_attempts", 2),
@@ -1053,6 +1087,7 @@ def _emit_capture_summary(
         emit(asdict(diagnostic))
     if sources := observed.water_sources:
         emit({"water_sources": [water_fields(s) for s in sources]})
+    _emit_io(observed, emit, passive=True)
     for path, plant in observed.plant_configurations:
         emit({"plant_registers": {**asdict(path), **plant_register_fields(plant)}})
     for thermostat in observed.thermostats:
@@ -1114,6 +1149,11 @@ def _status_fields(batch: NativeStatusBatch) -> dict[str, object]:
             "complete": batch.complete,
             "missing_keys": batch.missing_keys,
             "expected_count": batch.expected_count,
+            **(
+                {"io_directory": io_fields(IoDirectory.from_batch(batch))}
+                if batch.query.kind is StatusRequest.IO_DISCOVERY
+                else {}
+            ),
             "tx_status": result.status.name if result else None,
             "tx_reason": result.reason if result else None,
             "reports": [_frame_fields(f) for f in batch.reports],
@@ -1164,6 +1204,7 @@ def _native_device_fields(device: NativeDevice) -> dict[str, object]:
         "candidate_blocks": product.candidate_blocks if product else (),
         "reported_blocks": sorted(device.reported_blocks),
         "reported_selectors": sorted(device.reported_selectors),
+        "io_endpoints": [asdict(e) for e in sorted(device.io_endpoints)],
     }
 
 

@@ -4,6 +4,7 @@ from collections.abc import Callable
 
 from .climate import AIR_MASTER, AIR_MEMBER, AirStatus, ThermostatMode
 from .codec import Fields, Reader, SETBACK, ShortPayload, status_flags, temp
+from .io import IO_CHANGE, IO_DISCOVER, IO_DISCOVERY, IO_REPLY, IO_REQUEST, IoReport
 from .layouts import (
     BLOCK_SELECTORS as BLOCK_SELECTORS,
     FIXED_BLOCKS,
@@ -26,12 +27,6 @@ from .water import (
     RELAY_HEARTBEAT, STAGE_DEMAND, TANK_STATUS, WATER_CYCLE, BoilerMaximum, DhwStatus, GeneralDemand,
     HeatSource, LoopStatus, RelayHeartbeat, StageDemand, TankStatus, WaterCycle,
 )
-
-
-def io_change(r: Reader) -> Fields:
-    sub, node, channel, kind = r.take(4)
-    return {"subnet_id": sub, "node_id": node, "channel_id": channel,
-            "type_id": kind, "io_value": r.word()}
 
 
 def setpoint(r: Reader) -> Fields:
@@ -323,12 +318,6 @@ def snow_request(r: Reader) -> Fields:
             "count": count, "keys_hex": r.take(count).hex()}
 
 
-def io_discovery(r: Reader) -> Fields:
-    fields = octets("subnet_id", "node_id", "channel_id", "channel_count")(r)
-    # Preserve embedded NULs and non-ASCII labels exactly.
-    return fields | {"label_hex": r.take(6).hex(), "type_id": r.byte(), "io_value": r.word()}
-
-
 def bits(value: int, *fields: tuple[str, int, int]) -> Fields:
     return {name: (value >> shift) & mask for name, shift, mask in fields}
 
@@ -345,10 +334,10 @@ DECODERS: dict[int, tuple[str, Callable[[Reader], Fields]]] = {
     0x011: ("ZoneSynchQuery", octets()),
     TANK_STATUS: ("TankStatus", lambda r: TankStatus.read(r).fields()),
     SNOW_REQUEST: ("SnowmeltZoneStatusRequest", snow_request),
-    0x1f3: ("IORequestResponse", io_change),
-    0x1f4: ("IORequest", octets("subnet_id", "node_id", "channel_id")),
-    0x1f5: ("IODiscoverReport", io_discovery),
-    0x1f6: ("IODiscoverRequest", octets("subnet_id", "node_id")),
+    IO_REPLY: ("IORequestResponse", lambda r: IoReport.read_value(r).fields()),
+    IO_REQUEST: ("IORequest", octets("subnet_id", "node_id", "channel_id")),
+    IO_DISCOVERY: ("IODiscoverReport", lambda r: IoReport.read_discovery(r).fields()),
+    IO_DISCOVER: ("IODiscoverRequest", octets("subnet_id", "node_id")),
     ACCESS_STATUS: ("SecureGatewayAccess", lambda r: bits(r.byte(), ("request", 0, 1), ("access_open", 1, 1))),
     GROUP_REPORT: ("SetpointEnableReport", group_report),
     GROUP_UPDATE: ("SetpointRemoteEnable", octets("group_id", "enable")),
@@ -387,7 +376,7 @@ DECODERS: dict[int, tuple[str, Callable[[Reader], Fields]]] = {
     0x3ef: ("AddressTaken", octets()),
     MASTER_PRESENT: ("MasterPresent", master_present),
     SNOW_REPORT: ("SnowmeltZoneStatus", lambda r: SnowmeltReport.read(r).fields()),
-    0x1f2: ("IOChangeReport", io_change),
+    IO_CHANGE: ("IOChangeReport", lambda r: IoReport.read_value(r).fields()),
     0x22f: ("SetpointStatus", setpoint),
     DHW_STATUS: ("DHWStatus", lambda r: DhwStatus.read(r).fields()),
     PLANT_OUTPUT: ("PlantOutputStatus", lambda r: PlantOutput.read(r).fields()),

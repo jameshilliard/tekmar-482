@@ -493,6 +493,84 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
             assert answer["tx_status"] == "ACK" and answer["service"] == "snowmelt"
             assert answer["reports"][0]["fields"]["pair0_water_detect_state"] == 2
 
+    async def test_cli_io_directory_queries_exact_payload_without_a_block_address(
+        self,
+    ) -> None:
+        async def app(
+            reader: asyncio.StreamReader,
+            writer: asyncio.StreamWriter,
+        ) -> None:
+            first = await reader.readexactly(1)
+            if first == b"?":
+                assert await reader.readexactly(5) == b"\r\nJ\r\n"
+                assert not await reader.read()
+                return
+            caps = management(1, 1)
+            assert first + await reader.readexactly(len(caps) - 1) == caps
+            writer.write(management(1, 4, bytes([1, 0, 5, 3])))
+            request = serialize(Packet(1, bytes.fromhex("0103 1f600002 43a5")))
+            response = serialize(
+                Packet(
+                    1,
+                    bytes.fromhex(
+                        "0003 22000000 5f58100e 43a5 e701 410042caff00 08 3412 e4",
+                    ),
+                ),
+            )
+            for outgoing, incoming in (
+                (management(2, 0, b"\x01"), management(2, 3, b"\x01")),
+                (management(9, 0, b"\0"), management(9, 3, b"\0")),
+                (request, response + serialize(Packet(1, bytes([2, 3, 0])))),
+                (management(2, 0, b"\0"), management(2, 3, b"\0")),
+            ):
+                assert await reader.readexactly(len(outgoing)) == outgoing
+                writer.write(incoming)
+
+        async with listen(app) as endpoint, asyncio.timeout(5):
+            for command in (
+                [
+                    "read-status",
+                    "io-discovery",
+                    "3",
+                    "0x43",
+                    "0xa5",
+                    "--peer",
+                    "0x81",
+                    "0",
+                ],
+                ["read-device", "3", "0x81", "0", "--io-endpoint", "0x43", "0xa5"],
+            ):
+                out = StringIO()
+                args = build_parser().parse_args(
+                    [
+                        *command,
+                        "--json",
+                        "--tcp",
+                        f"{endpoint.address}:{endpoint.port}",
+                    ],
+                )
+                assert await run(args, stdout=out) == 0
+                rows = [json.loads(line) for line in out.getvalue().splitlines()]
+                view = rows[0]["status_read"]["io_directory"]
+                assert view["complete"] and view["endpoint"] == {
+                    "subnet": 0x43,
+                    "node": 0xA5,
+                }
+                (only,) = view["channels"]
+                assert (only["channel_id"], only["io_value"], only["label_hex"]) == (
+                    0xE7,
+                    0x1234,
+                    "410042caff00",
+                )
+                assert only["body"].endswith("e4")
+                if command[0] == "read-device":
+                    assert rows[1]["io_directory"] == {
+                        "port": 3,
+                        "subnet": 0x81,
+                        "node": 0,
+                        **view,
+                    }
+
     async def test_cli_discovery_probes_quiet_subnet_and_preserves_ack_mask(
         self,
     ) -> None:

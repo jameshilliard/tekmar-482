@@ -130,7 +130,7 @@ class NativeStatusTests(unittest.IsolatedAsyncioTestCase):
         assert (await self.sent()).to_bytes() == bytes.fromhex("1f600002a581")
         self.result(TxStatus.ACK)
         first = self.capture(0x1F5, "a581 0702 414243444546 010200")
-        self.capture(0x1F5, "a581 0702 414243444546 010300")
+        revised = self.capture(0x1F5, "a581 0702 414243444546 010300")
         self.capture(
             0x1F5,
             "a581 1002 414243444546 010400",
@@ -140,7 +140,8 @@ class NativeStatusTests(unittest.IsolatedAsyncioTestCase):
         last = self.capture(0x1F5, "a581 1002 414243444546 010600")
         batch = await task
         assert batch.answered and batch.covered == {7, 16}
-        assert batch.reports == (first, last) and batch.peer == _PEER
+        assert batch.reports == (revised, last) and batch.peer == _PEER
+        assert await self.stream.read() == first  # The complete capture is independent.
         task = asyncio.create_task(
             self.stream.read_status(2, query, source=_HOST, timeout=0.03),
         )

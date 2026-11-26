@@ -7,6 +7,7 @@ from ._native_payloads.climate import (
     ThermostatConfiguration,
     ThermostatMode,
 )
+from ._native_payloads.io import IoEndpoint, IoReport, IoType, io_terminal
 from ._native_payloads.line import (
     ClockReport,
     GroupReport,
@@ -184,6 +185,7 @@ from .native_discovery import (
     discover_native,
 )
 from .native_identity import NativeIdentity
+from .native_io import IoChannel, IoDirectory
 from .native_line import (
     BroadcastIssue,
     BroadcastResult,
@@ -443,6 +445,11 @@ __all__ = [
     "InvalidCapture",
     "InvalidReason",
     "InventoryDrainTimeoutError",
+    "IoChannel",
+    "IoDirectory",
+    "IoEndpoint",
+    "IoReport",
+    "IoType",
     "LineBroadcast",
     "LoopAssignment",
     "LoopKind",
@@ -640,6 +647,7 @@ __all__ = [
     "fahrenheit_to_degh",
     "freeze_fields",
     "install_firmware",
+    "io_terminal",
     "is_runtime_message",
     "is_topology_message",
     "load_trace",

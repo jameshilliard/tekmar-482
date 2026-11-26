@@ -207,7 +207,7 @@ def _valid_body(body: bytes) -> bool:
     return len(body) >= _HEADER and body[3] & 63 == len(body) - _HEADER
 
 
-def _decode(packet: Packet) -> _Record | TxResult:
+def _decode(packet: Packet, capture_index: int) -> _Record | TxResult:
     data = packet.data
     if packet.type == TYPE_TN4 and len(data) >= _RAW_HEADER:
         kind, port = data[:2]
@@ -216,7 +216,12 @@ def _decode(packet: Packet) -> _Record | TxResult:
             return PortError(port, _reason(PortErrorReason, data[2]))
         if port in TN4_PORTS:
             if kind == _Service.RX and _valid_body(data[_RX_HEADER:]):
-                return NativeFrame(port, int.from_bytes(data[2:6], "little"), data[6:])
+                return NativeFrame(
+                    port,
+                    int.from_bytes(data[2:6], "little"),
+                    data[6:],
+                    capture_index=capture_index,
+                )
             if kind == _Service.TX_RESULT:
                 match tuple(data[2:]):
                     case (TxStatus.ACK,):
@@ -352,6 +357,7 @@ class RawDispatcher:
         self._waiters: dict[int, _ReportWaiter] = {}
         self._edits = {port: asyncio.Lock() for port in TN4_PORTS}
         self._records: deque[_Record] = deque(maxlen=backlog)
+        self._capture_index = 0
         self._lost = 0
         self._ready = asyncio.Event()
         self._active = False
@@ -658,7 +664,7 @@ class RawDispatcher:
         return result
 
     def feed(self, packet: Packet) -> None:
-        record = _decode(packet)
+        record = _decode(packet, self._capture_index + 1)
         if isinstance(record, TxResult):
             future = self._pending.pop(record.port, None)
             if future is None:
@@ -668,10 +674,10 @@ class RawDispatcher:
                 future.set_result(record)
             self._tx_changed[record.port].set()
         else:
-            if isinstance(record, NativeFrame) and (
-                waiter := self._waiters.get(record.port)
-            ):
-                waiter.observe(record)
+            if isinstance(record, NativeFrame):
+                self._capture_index = record.capture_index
+                if waiter := self._waiters.get(record.port):
+                    waiter.observe(record)
             if len(self._records) == self._records.maxlen:
                 self._lost += 1
             self._records.append(record)

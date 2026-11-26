@@ -62,7 +62,7 @@ class StatusCollector:
     reports: list[NativeFrame] = field(default_factory=list, init=False)
     covered: set[int] = field(default_factory=set, init=False)
     expected_count: int | None = field(default=None, init=False)
-    _snow_latest: dict[int, NativeFrame] = field(default_factory=dict, init=False)
+    _latest: dict[int, NativeFrame] = field(default_factory=dict, init=False)
 
     def observe(self, frame: NativeFrame) -> bool:
         if self.peer is not None and (
@@ -79,11 +79,11 @@ class StatusCollector:
             self.expected_count = part.expected_count
         elif self.expected_count != part.expected_count:
             self.expected_count = 0  # Conflicting discovery counts are not completion.
-        if self.query.kind is StatusRequest.SNOWMELT:
-            # Keep the newest report for every requested key, in arrival order.
-            # A partial reply may revise an earlier value before the final key.
-            self._snow_latest.update(dict.fromkeys(part.items, frame))
-            active = {id(f) for f in self._snow_latest.values()}
+        if self.query.kind in (StatusRequest.SNOWMELT, StatusRequest.IO_DISCOVERY):
+            # A partial answer can revise a key or channel before the last
+            # arrives. Retain the latest evidence per item, in arrival order.
+            self._latest.update(dict.fromkeys(part.items, frame))
+            active = {id(f) for f in self._latest.values()}
             self.reports = [f for f in self.reports if id(f) in active]
             self.reports.append(frame)
             self.covered.update(part.items)

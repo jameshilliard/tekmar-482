@@ -14,6 +14,7 @@ from ._native_payloads import (
     decode_payload,
 )
 from ._native_payloads.codec import Reader, ShortPayload
+from ._native_payloads.io import IO_CHANGE, IO_DISCOVERY, IO_REPLY, IoReport
 from ._native_payloads.line import (
     CLOCK_REPORT,
     GROUP_REPORT,
@@ -284,6 +285,8 @@ class NativeFrame:
     port: int
     timestamp_ms: int
     body: bytes
+    # Connection-local receive order; zero for frames constructed outside a stream.
+    capture_index: int = field(default=0, kw_only=True, compare=False, repr=False)
     message: NativeMessage = field(init=False, repr=False, compare=False)
 
     def __post_init__(self) -> None:
@@ -328,6 +331,16 @@ class NativeFrame:
             return decode(Reader(self.message.payload))
         except ShortPayload:
             return None
+
+    @property
+    def io_report(self) -> IoReport | None:
+        """An observed value; I/O requests and short reports are not samples."""
+        mid = self.message_id
+        if mid == IO_DISCOVERY:
+            return self._read_payload(mid, IoReport.read_discovery)
+        if mid in (IO_CHANGE, IO_REPLY):
+            return self._read_payload(mid, IoReport.read_value)
+        return None
 
     @property
     def schedule_status(self) -> ScheduleStatus | None:
