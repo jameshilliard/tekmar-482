@@ -15,6 +15,25 @@ from tekmar_482 import (
 
 
 class NativeTests(unittest.TestCase):
+    def test_plant_report_matches_whole_pump_selector(self) -> None:
+        master = NativeAddress(0x15, 31)
+        query = NativeBlockQuery(master, 0x44, selector=129)
+        assert query.request(NativeAddress(0, 0)).payload == bytes.fromhex(
+            "4400 15 00000040 81000000",
+        )
+        for data, matches in (
+            ("440007 813412", True),
+            ("440007 013412", False),
+            ("440006 813412", False),  # Unsupported selector, positional padding.
+        ):
+            msg = NativeMessage(0x2E7, master, bytes.fromhex(data))
+            assert query.matches(msg) is matches
+            assert NativeFrame(3, 1, msg.to_bytes()).decoded["pump_hours"] == 0x1234
+        partial = NativeMessage(0x2E7, master, bytes.fromhex("440005 8134"))
+        assert query.matches(partial)
+        assert "pump_hours" not in partial.decoded
+        assert partial.decoded["byte3_raw"] == 0x34
+
     def test_addressed_block_query_checks_report_and_selector(self) -> None:
         peer = NativeAddress(0x12, 3)
         locked = NativeAddress(0x12, 35)

@@ -23,12 +23,11 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--check", action="store_true")
     args = parser.parse_args()
-    for name, data in {
-        "_native_payloads.py": (SOURCE / "tools/payloads.py").read_bytes(),
-    }.items():
-        path = PACKAGE / name
+    for name in ("__init__.py", "layouts.py"):
+        data = (SOURCE / "tools" / "payloads" / name).read_bytes()
+        path = PACKAGE / "_native_payloads" / name
         if args.check:
-            if path.read_bytes() != data:
+            if not path.is_file() or path.read_bytes() != data:
                 parser.exit(1, f"Stale bundled file: {name}\n")
         else:
             path.parent.mkdir(exist_ok=True)

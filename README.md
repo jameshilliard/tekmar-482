@@ -133,6 +133,14 @@ request caused it. A zero support mask conveys no value. An indexed
 report without a supported selector remains in the capture stream, but
 cannot complete a read for a particular selector.
 
+The shared decoder covers all 166 addressed block layouts registered in
+the 483 SW 11 reference. For example, on a 402,
+`NativeBlockQuery(peer, 0x44, selector=129)` reads the DHW pump's
+`pump_hours`; selector 0 reads the primary pump. Check that the field
+is present before using it: an unsupported byte is not zero hours.
+The firmware's [addressed block catalog](https://github.com/jameshilliard/tekmar-482-firmware/blob/master/docs/tn4-blocks.md)
+lists the plant, thermostat, heat pump, schedule and snowmelt layouts.
+
 The CLI uses the same reader. For example, with an **observed** native node
 on a dedicated single-peer line (addresses below are examples):
 
