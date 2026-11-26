@@ -55,7 +55,7 @@ class ManagementTest(unittest.IsolatedAsyncioTestCase):
         assert not script.rows
 
     async def test_stock_and_unknown_wire_version_never_enter_isp(self) -> None:
-        for response in ("0400000000", "0401f04b5402000502", "0401f04b5401000500"):
+        for response in ("0400000000", "0401f04b54ff000502", "0401f04b5401000500"):
             script = Script(("0101f04b54", response))
             async with Tekmar482Client(script) as client:
                 with self.assertRaises(ProtocolError):

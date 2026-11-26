@@ -120,6 +120,8 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
             writer.write(management(4, 4, revision.encode()))
 
     async def test_custom_panel_stream_and_echo(self) -> None:
+        high = 1 << 40
+
         async def app(
             reader: asyncio.StreamReader,
             writer: asyncio.StreamWriter,
@@ -130,12 +132,34 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
                 return
             caps = b"\xca" * 301 + management(1, 1)
             assert first + await reader.readexactly(len(caps) - 1) == caps
-            writer.write(management(1, 4, bytes([1, 0, 5, 3])))
+            writer.write(management(1, 4, bytes([2, 0, 5, 3])))
             for method, request, reply in [
                 (
                     7,
                     management(7, 1),
-                    management(7, 4, struct.pack("<7I", 1, 1, 0, 0, 0, 0, 0)),
+                    management(
+                        7,
+                        4,
+                        struct.pack("<2I2Q3I", 1, 1, high, high + 1, 0, 0, 0),
+                    ),
+                ),
+                (
+                    10,
+                    management(10, 1),
+                    management(
+                        10,
+                        4,
+                        struct.pack("<2I5Q5I", 0xFFFFFFFF, 4, *([3] * 5), *([0] * 5)),
+                    ),
+                ),
+                (
+                    10,
+                    management(10, 1),
+                    management(
+                        10,
+                        4,
+                        struct.pack("<2I5Q5I", 2, 9, 3, 3, high + 3, 3, 3, *range(5)),
+                    ),
                 ),
                 (2, management(2, 0, bytes([1])), management(2, 3, bytes([1]))),
                 (9, management(9, 0, bytes([0])), management(9, 3, bytes([0]))),
@@ -153,11 +177,19 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
             for port in range(5):
                 req = management(3, 1, bytes([port]))
                 assert await reader.readexactly(len(req)) == req
-                writer.write(management(3, 4, struct.pack("<BII", port, 0, 1)))
+                writer.write(
+                    management(3, 4, struct.pack("<BQQ", port, high + port, high + 1)),
+                )
 
         async with listen(app) as endpoint, open_gateway(endpoint) as client:
             assert isinstance(client, BridgeClient)
-            assert (await client.panel()).inputs == 1
+            panel = await client.panel()
+            assert (panel.inputs, panel.test_presses, panel.dip_changes) == (
+                1,
+                high,
+                high + 1,
+            )
+            assert await client.probe(duration=0.001) == (3, 5, 4, 0, 1, 2, 3, 4)
             async with client.stream() as stream:
                 result = await stream.send(0, bytes.fromhex("12300001a5"))
                 assert result == TxResult(0, TxStatus.ACK)
@@ -167,7 +199,8 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
                     and frame.message_id == 0x123
                     and frame.decoded == {}
                 )
-            assert stream.diagnostics[0].invalid_dropped == 1
+            assert stream.diagnostics[0].invalid_dropped == high + 1
+            assert stream.diagnostics[4].valid_dropped == high + 4
             assert set(stream.diagnostics) == set(range(5))
 
     async def test_normal_inventory_borrows_the_negotiated_link(self) -> None:

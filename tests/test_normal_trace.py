@@ -115,18 +115,61 @@ class NormalTraceTests(unittest.IsolatedAsyncioTestCase):
     async def test_inspect_and_stop_orphaned_trace_without_switching_modes(
         self,
     ) -> None:
-        counters = struct.pack("<5I", 4, 0, 2, 0, 8).hex()
+        high = 1 << 42
+        counters = struct.pack("<5Q", 4, 0, high, 0, 8).hex()
+        caps = ("0101f04b54", "0401f04b5402000507")
         script = Script(
+            caps,
             ("010bf04b54", "040bf04b5411" + counters),
-            ("0101f04b54", "0401f04b5401000507"),
+            caps,
             ("000bf04b5400", "030bf04b5400"),
             ("010bf04b54", "040bf04b5400" + counters),
         )
         async with Tekmar482Client(script) as client:
             manager = BridgeManagement(client)
-            assert await manager.trace_state() == NormalTraceState(17, (4, 0, 2, 0, 8))
-            assert await manager.stop_trace() == NormalTraceState(0, (4, 0, 2, 0, 8))
+            assert await manager.trace_state() == NormalTraceState(
+                17,
+                (4, 0, high, 0, 8),
+            )
+            assert await manager.stop_trace() == NormalTraceState(0, (4, 0, high, 0, 8))
         assert not script.rows
+
+    async def test_wide_trace_delta_is_not_truncated_or_wrapped_on_reset(self) -> None:
+        high = 1 << 48
+        for last in (9, high * 2):
+            script = Script(
+                ("0101f04b54", "0401f04b5402000507"),
+                (
+                    "010bf04b54",
+                    "040bf04b5400" + struct.pack("<5Q", high, 0, 0, 0, 0).hex(),
+                ),
+                ("000bf04b5401", "030bf04b5401"),
+                ("000bf04b5400", "030bf04b5400"),
+                (
+                    "010bf04b54",
+                    "040bf04b5400" + struct.pack("<5Q", last, 0, 0, 0, 0).hex(),
+                ),
+            )
+            async with Tekmar482Client(script) as client:
+                manager = BridgeManagement(client)
+                if last < high:
+                    with self.assertRaisesRegex(ProtocolError, "decreased"):
+                        async with manager.trace([0]):
+                            pass
+                else:
+                    async with manager.trace([0]) as trace:
+                        pass
+                    assert trace.gateway_drops == (high, 0, 0, 0, 0)
+            assert not script.rows
+
+    async def test_wide_firmware_rejects_truncated_trace_counters(self) -> None:
+        script = Script(
+            ("0101f04b54", "0401f04b5402000507"),
+            ("010bf04b54", "040bf04b54" + "00" * 21),
+        )
+        async with Tekmar482Client(script) as client:
+            with self.assertRaisesRegex(ProtocolError, "diagnostic length"):
+                await BridgeManagement(client).trace_state()
 
     async def test_reconnect_does_not_restore_a_mask_to_the_new_gateway(self) -> None:
         script = Script(

@@ -10,10 +10,11 @@ from contextlib import asynccontextmanager, suppress
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
+from ._bridge_diagnostics import LAYOUTS
 from .client import Tekmar482Client
 from .constants import TN4_PORTS
 from .exceptions import ConnectionClosedError, ProtocolError, TekmarError
-from .management import BridgeFeature, BridgeMethod, BridgeMode
+from .management import BridgeFeature, BridgeMethod, BridgeMode, unpack_diagnostic
 from .packet import TYPE_TN4, TYPE_TRPC, Packet
 from .raw import PortDiagnostic, RawDispatcher
 from .tpck import TpckParser, serialize
@@ -28,9 +29,6 @@ if TYPE_CHECKING:
 _DEFAULT_BAUD = 9600
 _TICK_MASK = 0xFFFFFFFF
 _CAPABILITIES = struct.Struct("4B")
-_PANEL = struct.Struct("<7I")
-_COUNTERS = struct.Struct("<12I")
-_DROPS = struct.Struct("<BII")
 
 
 @dataclass(frozen=True, slots=True)
@@ -53,6 +51,7 @@ class BridgeClient:
         self._packets: deque[Packet] = deque()
         self._busy = asyncio.Lock()
         self._features = BridgeFeature(0)
+        self._counters = LAYOUTS[1]
 
     @asynccontextmanager
     async def _transaction(self) -> AsyncIterator[None]:
@@ -132,13 +131,14 @@ class BridgeClient:
             data = await self._call(BridgeMethod.CAPABILITIES)
             if (
                 len(data) != _CAPABILITIES.size
-                or data[:1] != b"\x01"
+                or data[0] not in LAYOUTS
                 or data[1] > 1
                 or data[2] != len(TN4_PORTS)
             ):
                 msg = "invalid binary bridge capabilities"
                 raise ProtocolError(msg)
             self._features = BridgeFeature(data[3])
+            self._counters = LAYOUTS[data[0]]
 
     async def enter_update_mode(self) -> None:
         async with self._transaction():
@@ -161,7 +161,8 @@ class BridgeClient:
 
     async def panel(self) -> PanelState:
         async with self._transaction():
-            boot, inputs, presses, changes, leds, pins, testing = _PANEL.unpack(
+            boot, inputs, presses, changes, leds, pins, testing = unpack_diagnostic(
+                self._counters.panel,
                 await self._call(BridgeMethod.PANEL),
             )
             return PanelState(boot, inputs, presses, changes, leds, pins, bool(testing))
@@ -175,9 +176,15 @@ class BridgeClient:
             msg = "invalid capture window"
             raise ValueError(msg)
         async with self._transaction():
-            before = _COUNTERS.unpack(await self._call(BridgeMethod.COUNTERS))
+            before = unpack_diagnostic(
+                self._counters.capture,
+                await self._call(BridgeMethod.COUNTERS),
+            )
             await asyncio.sleep(duration)
-            after = _COUNTERS.unpack(await self._call(BridgeMethod.COUNTERS))
+            after = unpack_diagnostic(
+                self._counters.capture,
+                await self._call(BridgeMethod.COUNTERS),
+            )
             seen = sum(1 << i for i in TN4_PORTS if before[2 + i] != after[2 + i])
             return (
                 (after[0] - before[0]) & _TICK_MASK,
@@ -272,7 +279,8 @@ class BridgeClient:
                 stream.check_drained()
                 if diagnostics:
                     for p in TN4_PORTS:
-                        port, valid, invalid = _DROPS.unpack(
+                        port, valid, invalid = unpack_diagnostic(
+                            self._counters.drops,
                             await self._call(BridgeMethod.STATS, bytes([p])),
                         )
                         if p != port:

@@ -23,7 +23,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--check", action="store_true")
     args = parser.parse_args()
-    for name in (
+    native = (
         "__init__.py",
         "climate.py",
         "codec.py",
@@ -42,9 +42,11 @@ def main() -> None:
         "thermostat.py",
         "water.py",
         "writes.py",
-    ):
-        data = (SOURCE / "tools" / "payloads" / name).read_bytes()
-        path = PACKAGE / "_native_payloads" / name
+    )
+    files = [(Path("payloads") / n, PACKAGE / "_native_payloads" / n) for n in native]
+    files.append((Path("bridge_diagnostics.py"), PACKAGE / "_bridge_diagnostics.py"))
+    for name, path in files:
+        data = (SOURCE / "tools" / name).read_bytes()
         if args.check:
             if not path.is_file() or path.read_bytes() != data:
                 parser.exit(1, f"Stale bundled file: {name}\n")

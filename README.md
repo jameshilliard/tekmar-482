@@ -178,6 +178,16 @@ Tracing never enables reporting, changes mode, or grants raw transmit access.
 Use `trace-normal --status` to inspect the gateway's mask and lifetime
 drop counts, or `trace-normal --stop` to clear a trace after a disconnect.
 
+Raw and Normal trace carry the same native tN4 body inside TPCK. Their
+envelopes differ: Raw type `0x01` carries bridge operations; trace type
+`0xD0` identifies Normal RX or a gateway TX attempt with its origin and
+outcome. Trace is not an alternate encoding for sending Raw requests.
+
+Custom bridge wire version 2 uses saturating 64-bit counters for capture
+and trace drops, edge counts and panel events. They reset at gateway boot,
+not on a mode change. The client also reads older version 1 diagnostics.
+Per-frame uptime and hardware timer readings are still 32-bit timestamps.
+
 Custom Normal mode obtains missing fields from the device on its own port.
 A changed demand, setback or active room target can trigger a targeted
 ModeSetting read; demand is not interpreted as configured mode. The gateway

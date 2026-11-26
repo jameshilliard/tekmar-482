@@ -3,12 +3,12 @@
 from __future__ import annotations
 
 import re
-import struct
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from enum import IntEnum, IntFlag
 from typing import TYPE_CHECKING
 
+from ._bridge_diagnostics import LAYOUTS
 from .constants import TN4_PORTS
 from .exceptions import ProtocolError, TekmarError
 from .normal_trace import NormalTrace, NormalTraceState
@@ -16,12 +16,21 @@ from .trpc import ResponseMatch, TrpcCommand, TrpcMethod, TrpcPacket, TrpcServic
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Iterable
+    from struct import Struct
 
+    from ._bridge_diagnostics import CounterLayout
     from .client import Tekmar482Client
 
 _CAPABILITY_BYTES = 4
-_TRACE_STATE = struct.Struct("<B5I")
-_COUNTER_MASK = 0xFFFFFFFF
+
+
+def unpack_diagnostic(layout: Struct, data: bytes) -> tuple[int, ...]:
+    if len(data) != layout.size:
+        msg = (
+            f"invalid diagnostic length: expected {layout.size} bytes, got {len(data)}"
+        )
+        raise ProtocolError(msg)
+    return layout.unpack(data)
 
 
 class BridgeMode(IntEnum):
@@ -117,7 +126,7 @@ class BridgeManagement:
             return None
         if len(reply.extra) == _CAPABILITY_BYTES:
             version, mode, ports, flags = reply.extra
-            if version == 1 and mode in BridgeMode and ports:
+            if version in LAYOUTS and mode in BridgeMode and ports:
                 return BridgeCapabilities(
                     version,
                     BridgeMode(mode),
@@ -136,20 +145,21 @@ class BridgeManagement:
 
     async def trace_state(self) -> NormalTraceState:
         """Read the active port mask and lifetime drop counts without enabling trace."""
+        with self._session.connection_scope():
+            return await self._trace_state(await self._require_trace())
+
+    async def _trace_state(self, layout: CounterLayout) -> NormalTraceState:
         reply = await self._exchange(TrpcCommand.request(BridgeMethod.NORMAL_TRACE))
-        if (
-            reply.method_id != BridgeMethod.NORMAL_TRACE
-            or len(reply.extra) != _TRACE_STATE.size
-        ):
+        if reply.method_id != BridgeMethod.NORMAL_TRACE:
             msg = "invalid Normal trace state"
             raise ProtocolError(msg)
-        mask, *counts = _TRACE_STATE.unpack(reply.extra)
+        mask, *counts = unpack_diagnostic(layout.trace, reply.extra)
         if mask >= 1 << len(TN4_PORTS):
             msg = "invalid Normal trace port mask"
             raise ProtocolError(msg)
         return NormalTraceState(mask, tuple(counts))
 
-    async def _require_trace(self) -> None:
+    async def _require_trace(self) -> CounterLayout:
         caps = await self.capabilities()
         if (
             caps is None
@@ -158,13 +168,14 @@ class BridgeManagement:
         ):
             msg = "Normal trace requires capable custom firmware in Normal mode"
             raise ProtocolError(msg)
+        return LAYOUTS[caps.wire_version]
 
     async def stop_trace(self) -> NormalTraceState:
         """Disable an orphaned trace after a debugger disconnected."""
         with self._session.connection_scope():
-            await self._require_trace()
+            layout = await self._require_trace()
             await self._set_trace_mask(0)
-            return await self.trace_state()
+            return await self._trace_state(layout)
 
     async def _set_trace_mask(self, mask: int) -> None:
         data = bytes([mask])
@@ -198,21 +209,27 @@ class BridgeManagement:
             raise ValueError(msg)
         trace = NormalTrace(backlog)
         with self._session.connection_scope(), self._session.trace_packets(trace):
-            await self._require_trace()
-            before = await self.trace_state()
+            layout = await self._require_trace()
+            before = await self._trace_state(layout)
 
             async def restore() -> None:
                 if self._session.is_open and self._session.reader_error is None:
                     await self._set_trace_mask(before.port_mask)
-                    after = await self.trace_state()
-                    trace.gateway_drops = tuple(
-                        (b - a) & _COUNTER_MASK
+                    after = await self._trace_state(layout)
+                    deltas = tuple(
+                        b - a
                         for a, b in zip(
                             before.gateway_drops,
                             after.gateway_drops,
                             strict=True,
                         )
                     )
+                    if layout is LAYOUTS[1]:
+                        deltas = tuple(d & layout.maximum for d in deltas)
+                    elif any(d < 0 for d in deltas):
+                        msg = "lifetime trace drop count decreased during capture"
+                        raise ProtocolError(msg)
+                    trace.gateway_drops = deltas
 
             try:
                 await self._set_trace_mask(mask)
