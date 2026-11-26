@@ -16,6 +16,13 @@ from ._native_payloads.schedules import (
     ScheduleEvent,
     ScheduleProfile,
 )
+from ._native_payloads.sensors import (
+    RoomTemperatures,
+    SensorInput,
+    SensorRole,
+    SensorSlot,
+    ThermostatSensors,
+)
 from ._native_payloads.writes import NativeField, WritableBlock
 from ._wire import GatewayEndpoint
 from .bridge import BridgeClient, PanelState
@@ -130,6 +137,12 @@ from .native_schedule import (
     ScheduleTarget,
     SystemSchedule,
     read_weekly_schedule,
+)
+from .native_sensors import (
+    SensorObservation,
+    SensorRead,
+    ThermostatSensorMonitor,
+    read_thermostat_sensors,
 )
 from .native_snapshot import NativeSnapshot, read_native_devices, read_native_snapshot
 from .native_status import NativeStatusBatch, read_snowmelt_status
@@ -340,6 +353,7 @@ __all__ = [
     "ReportSubscription",
     "ReportingStateFields",
     "ResponseMatch",
+    "RoomTemperatures",
     "ScenePortResult",
     "SceneReport",
     "SceneResponse",
@@ -356,6 +370,11 @@ __all__ = [
     "ScheduleProfile",
     "ScheduleRow",
     "ScheduleTarget",
+    "SensorInput",
+    "SensorObservation",
+    "SensorRead",
+    "SensorRole",
+    "SensorSlot",
     "SerialxTpckTransport",
     "SetbackPercentFields",
     "SetbackSetpointFields",
@@ -382,6 +401,8 @@ __all__ = [
     "ThaValue",
     "ThermostatData",
     "ThermostatRuntime",
+    "ThermostatSensorMonitor",
+    "ThermostatSensors",
     "TraceReplayTransport",
     "TraceStep",
     "TransportError",
@@ -438,6 +459,7 @@ __all__ = [
     "read_native_devices",
     "read_native_snapshot",
     "read_snowmelt_status",
+    "read_thermostat_sensors",
     "read_weekly_schedule",
     "require_device_support",
     "response_service_for",

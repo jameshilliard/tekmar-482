@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from enum import IntEnum
 
 from .layouts import MULTI_WEEK
-from .products import NativeProduct, identify_product
+from .products import NativeProduct, product_revision
 
 SINGLE_WEEK = range(0x10, 0x14)
 SETUP_BLOCK = 0x0f
@@ -87,9 +87,7 @@ class ScheduleProfile:
 
     @classmethod
     def from_identification(cls, fields: Mapping[str, object]) -> "ScheduleProfile":
-        number, part, revision = (fields.get(k) for k in ("product_number", "j_number", "z_number"))
-        product = identify_product(number, part if isinstance(part, int) else None) if isinstance(number, int) else None
-        return cls(product, revision if isinstance(revision, int) and 0 <= revision < 26 else None)
+        return cls(*product_revision(fields))
 
     def wire_day(self, block: int, day: int) -> int:
         """Calendar weekday to physical slot; the same mapping is used for readback."""

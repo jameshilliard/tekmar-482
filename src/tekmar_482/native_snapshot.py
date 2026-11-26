@@ -13,6 +13,7 @@ from .constants import TN4_PORTS
 from .native import NativeAddress, NativeBlockQuery, NativeTargets
 from .native_discovery import NativeInventory
 from .native_schedule import ScheduleDirectory
+from .native_sensors import ThermostatSensorMonitor
 from .raw import RejectReason, TxStatus
 
 if TYPE_CHECKING:
@@ -20,6 +21,7 @@ if TYPE_CHECKING:
 
     from ._native_payloads.products import NativeProduct
     from .native_discovery import NativeDevice
+    from .native_sensors import SensorObservation
     from .native_status import NativeStatusBatch
     from .raw import BridgeStream, NativeBlockBatch
 
@@ -35,6 +37,11 @@ class NativeSnapshot:
     def schedule_directory(self) -> ScheduleDirectory:
         """Build calendar tables and system membership without additional I/O."""
         return ScheduleDirectory.from_batches(self.blocks)
+
+    @property
+    def thermostat_sensors(self) -> tuple[SensorObservation, ...]:
+        """Interpret each identified thermostat's sensor replies without more I/O."""
+        return ThermostatSensorMonitor.from_batches(self.blocks).devices
 
 
 @dataclass(slots=True)

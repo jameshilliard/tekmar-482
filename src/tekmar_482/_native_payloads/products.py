@@ -118,6 +118,13 @@ def identify_product(product_number: int, j_number: int | None = None) -> Native
     return candidates[0] if len(candidates) == 1 else None
 
 
+def product_revision(fields: Mapping[str, object]) -> tuple[NativeProduct | None, int | None]:
+    """Identify a device from supported identification fields; Z is zero-based A..Z."""
+    number, part, z = (fields.get(k) for k in ("product_number", "j_number", "z_number"))
+    product = identify_product(number, part if isinstance(part, int) else None) if isinstance(number, int) else None
+    return product, z if isinstance(z, int) and z in range(26) else None
+
+
 # SW 11 per-model read tables, including zero-mask rows. Always allow the
 # identity probe. 654 block CD is also known from an addressed readback.
 _BLOCKS: dict[str, tuple[int, ...]] = {

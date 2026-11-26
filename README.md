@@ -260,6 +260,28 @@ number of oldest records dropped by the host; set `capture_backlog` on
 `bridge.stream()` to change the default of 512 records. Gateway drop counts
 are separate and available in `stream.diagnostics` after a normal exit.
 
+### Thermostat sensors
+
+```bash
+tekmar-482 read-sensors 2 0x12 3 --tcp 192.0.2.10:3001 --json
+```
+
+This read-only command identifies the thermostat before querying its room
+statistics and individual sensor inputs. Output separates the setup byte,
+reported byte, revision-corrected status role and display role. Unknown or
+conflicting roles and unusable words are not reported as temperatures.
+`unanswered_blocks` lists missing replies, not absent hardware.
+`read-device` and active `dump` include the same interpretation without
+extra reads.
+
+Use `await read_thermostat_sensors(stream, port, address)` for an addressed
+read. Its `device.sensors` contains the room statistics, per-slot readings
+and floor mean; `batches` retains the underlying responses. For passive
+updates, pass every record from `stream.read()` to a
+`ThermostatSensorMonitor`. It starts interpreting inputs after seeing the
+source's identity. A capture gap clears its observations; an address move
+invalidates the affected paths. Start a new monitor on reconnect.
+
 ### Weekly schedules
 
 Read an addressed device's assignment and the event times it actually

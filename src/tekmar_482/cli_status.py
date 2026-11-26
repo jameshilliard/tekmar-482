@@ -13,8 +13,53 @@ if TYPE_CHECKING:
     import argparse
     from collections.abc import Callable
 
+    from .native_sensors import SensorObservation
     from .native_status import NativeStatusBatch
     from .raw import BridgeStream
+
+
+def sensor_fields(device: SensorObservation) -> dict[str, object]:
+    sensors = device.sensors
+    room = sensors.room
+    return {
+        "port": device.port,
+        "subnet": device.address.subnet,
+        "node": device.address.node,
+        "model": sensors.product.model,
+        "z_number": sensors.z_number,
+        "room": None
+        if room is None
+        else {
+            "average_raw": room.average_raw,
+            "minimum_raw": room.minimum_raw,
+            "maximum_raw": room.maximum_raw,
+            "average_f": room.average_f,
+            "minimum_f": room.minimum_f,
+            "maximum_f": room.maximum_f,
+        },
+        "average_floor_f": sensors.average_floor_f,
+        "inputs": [
+            {
+                "slot": s.slot.name.lower(),
+                "setup_raw": s.setup_raw,
+                "reported_raw": s.reported_raw,
+                "status_role": None
+                if s.status_role is None
+                else s.status_role.name.lower(),
+                "display_role": None
+                if s.display_role is None
+                else s.display_role.name.lower(),
+                "conflict": s.conflict,
+                "current_raw": s.current_raw,
+                "minimum_raw": s.minimum_raw,
+                "maximum_raw": s.maximum_raw,
+                "current_f": s.current_f,
+                "minimum_f": s.minimum_f,
+                "maximum_f": s.maximum_f,
+            }
+            for s in sensors.inputs
+        ],
+    }
 
 
 def add_status_commands(

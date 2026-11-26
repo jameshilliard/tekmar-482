@@ -20,7 +20,7 @@ from .cli_schedule import (
     schedule_fields,
     schedule_target,
 )
-from .cli_status import add_status_commands, read_status_from_args
+from .cli_status import add_status_commands, read_status_from_args, sensor_fields
 from .client import Tekmar482Client
 from .constants import DEFAULT_BAUDRATE, TN4_PORTS
 from .decoding import (
@@ -35,6 +35,7 @@ from .native import NativeAddress, NativeBlockQuery
 from .native_discovery import NativeDevice, discover_native
 from .native_scene import SceneSelection, SceneSendIssue, write_scene_response
 from .native_schedule import read_weekly_schedule
+from .native_sensors import read_thermostat_sensors
 from .native_snapshot import read_native_snapshot
 from .native_write import NativeWriteStatus
 from .raw import CaptureGap, InvalidCapture, PortError, TxStatus
@@ -60,6 +61,7 @@ if TYPE_CHECKING:
         GatewaySnapshot,
     )
     from .native import NativeFrame
+    from .native_snapshot import NativeSnapshot
     from .native_status import NativeStatusBatch
     from .native_write import NativeWriteResult
     from .raw import BridgeStream, CaptureRecord, NativeBlockBatch
@@ -298,6 +300,11 @@ def _add_block_commands(
         parents=[parent],
         help="identify and read one native device",
     )
+    sensors = subparsers.add_parser(
+        "read-sensors",
+        parents=[parent],
+        help="read the room statistics and sensor inputs of one native thermostat",
+    )
     write = subparsers.add_parser(
         "write-block",
         parents=[parent],
@@ -310,7 +317,7 @@ def _add_block_commands(
             default=argparse.SUPPRESS,
             help="maximum attempts for missing native block replies (default 2)",
         )
-    for command in (block, device, write):
+    for command in (block, device, sensors, write):
         _add_native_target(command)
     for command in (block, write):
         command.add_argument("block", type=_int_value, help="numeric native block ID")
@@ -562,6 +569,7 @@ async def _native(args: argparse.Namespace, stdout: TextIO) -> int:
         elif args.command in {
             "read-block",
             "read-device",
+            "read-sensors",
             "write-block",
             "scene-response",
             "read-schedule",
@@ -659,6 +667,13 @@ def _native_edits(items: Sequence[str]) -> dict[NativeField, int]:
     return edits
 
 
+def _emit_derived(snapshot: NativeSnapshot, emit: Callable[[object], None]) -> None:
+    for week in snapshot.schedule_directory.schedules:
+        emit({"weekly_schedule": schedule_fields(week)})
+    for device in snapshot.thermostat_sensors:
+        emit({"thermostat_sensors": sensor_fields(device)})
+
+
 async def _native_addressed(
     bridge: BridgeClient,
     args: argparse.Namespace,
@@ -680,9 +695,21 @@ async def _native_addressed(
                 on_block=lambda b: emit(_batch_fields(b)),
                 on_status=lambda s: emit(_status_fields(s)),
             )
-            for week in snapshot.schedule_directory.schedules:
-                emit({"weekly_schedule": schedule_fields(week)})
+            _emit_derived(snapshot, emit)
             return 0
+        if args.command == "read-sensors":
+            sample = await read_thermostat_sensors(
+                stream,
+                args.port,
+                address,
+                source=source,
+                timeout=args.timeout,
+            )
+            emit(
+                sensor_fields(sample.device)
+                | {"unanswered_blocks": sample.unanswered_blocks},
+            )
+            return int(bool(sample.unanswered_blocks))
         if args.command == "read-schedule":
             week = await read_weekly_schedule(
                 stream,
@@ -888,8 +915,7 @@ async def _dump_blocks(
             on_block=lambda b: emit(_batch_fields(b)),
             on_status=lambda s: emit(_status_fields(s)),
         )
-        for week in snapshot.schedule_directory.schedules:
-            emit({"weekly_schedule": schedule_fields(week)})
+        _emit_derived(snapshot, emit)
 
     tasks = (asyncio.create_task(listen()), asyncio.create_task(sample()))
     try:

@@ -43,6 +43,32 @@ class NativeIdentity:
     def product(self) -> NativeProduct | None:
         return identify_product(self.product_number, self.j_number)
 
+    @classmethod
+    def from_report(
+        cls,
+        fields: Mapping[str, object],
+        previous: NativeIdentity | None = None,
+    ) -> NativeIdentity | None:
+        """Merge fields; a changed revision alone cannot identify a replacement."""
+        number = _number(fields, "product_number")
+        if number is None:
+            if previous is None:
+                return None
+            product_number = previous.product_number
+        else:
+            product_number = number
+        current = cls(
+            product_number,
+            _number(fields, "j_number"),
+            _number(fields, "z_number"),
+            _number(fields, "max_tn4_version"),
+        )
+        if previous is not None:
+            merged = current.merge(previous)
+            if merged is not None or number is None:
+                return merged
+        return current
+
     def _consistent_with(self, previous: NativeIdentity) -> bool:
         return self.product_number == previous.product_number and all(
             a is None or b is None or a == b
@@ -118,21 +144,14 @@ class NativeInventory:
                 current = device.identity
                 blocks = device.reported_blocks
                 selectors = device.reported_selectors
-                if (
-                    block == 0
-                    and (number := _number(fields, "product_number")) is not None
-                ):
-                    identity = NativeIdentity(
-                        number,
-                        _number(fields, "j_number"),
-                        _number(fields, "z_number"),
-                        _number(fields, "max_tn4_version"),
-                    )
-                    merged = identity.merge(current) if current is not None else None
-                    if current is not None and merged is None:
+                if block == 0:
+                    identity = NativeIdentity.from_report(fields, current)
+                    if current is not None and (
+                        identity is None or identity.merge(current) is None
+                    ):
                         blocks = frozenset()
                         selectors = frozenset()
-                    current = merged or identity
+                    current = identity
                 spec = BLOCK_SELECTORS.get(block)
                 if spec and data[2] & 1 and len(data) > _BLOCK_HEADER:
                     selectors |= {(block, data[_BLOCK_HEADER] & spec[1])}
