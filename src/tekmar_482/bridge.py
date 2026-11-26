@@ -317,6 +317,10 @@ class BridgeClient:
                         TrpcMethod.MODE_SETTING,
                         TrpcMethod.HEAT_SETPOINT,
                         TrpcMethod.COOL_SETPOINT,
+                        TrpcMethod.SLAB_SETPOINT,
+                        TrpcMethod.FAN_PERCENT,
+                        TrpcMethod.HUMIDITY_SET_MIN,
+                        TrpcMethod.HUMIDITY_SET_MAX,
                     },
                 ),
             ) as client:

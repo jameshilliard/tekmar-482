@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING, Self, assert_never
 
 from .constants import (
     DEVICE_FEATURES,
+    MAX_PERCENT,
     SETBACK_SETPOINT_MAP,
     DeviceAttributeBit,
     DeviceFeature,
@@ -139,6 +140,26 @@ class DiscoveredDevice:
     version: int | None = None
     attributes: DeviceAttributes = DeviceAttributes()
     setback_events: int | None = None
+
+    @property
+    def fan_percent_step(self) -> int:
+        """Physical percentage represented by one tHA FanPercent unit."""
+        return 10 if self.model in {"544", "545", "546"} else 1
+
+    def encode_fan_percent(self, percent: int) -> int:
+        """Convert a representable physical percentage to its device wire value."""
+        step = self.fan_percent_step
+        if not 0 <= percent <= MAX_PERCENT or percent % step:
+            msg = f"fan percentage must be 0..100 in steps of {step}"
+            raise ValueError(msg)
+        return percent // step
+
+    def decode_fan_percent(self, raw: object) -> int | None:
+        """Return the physical percentage, or None for unavailable wire values."""
+        value = decode_percent(raw)
+        if value is None or not 0 <= value <= MAX_PERCENT // self.fan_percent_step:
+            return None
+        return value * self.fan_percent_step
 
     @property
     def feature(self) -> DeviceFeature | None:
@@ -705,7 +726,7 @@ class DecodedDeviceRuntime:
             heat_setpoints=runtime.heat_setpoints.decoded(decode_dege),
             cool_setpoints=runtime.cool_setpoints.decoded(decode_dege),
             slab_setpoints=runtime.slab_setpoints.decoded(decode_dege),
-            fan_percent=runtime.fan_percent.decoded(decode_percent),
+            fan_percent=runtime.fan_percent.decoded(runtime.info.decode_fan_percent),
         )
 
     def raw_value(self, value: DeviceValue) -> object:
@@ -878,7 +899,7 @@ class DeviceRuntime:
     @property
     def current_fan_percent(self) -> int | None:
         """Return the active fan percent."""
-        return self.fan_percent.current
+        return self.info.decode_fan_percent(self.fan_percent.current)
 
     @property
     def decoded(self) -> DecodedDeviceRuntime:

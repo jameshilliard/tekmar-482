@@ -239,6 +239,12 @@ def event_time(day: str, value: int) -> Fields:
 
 
 def block_fields(block: int, index: int, value: int) -> Fields:
+    if block == 13 and index < 5:
+        return {("onboard_sensor", "sensor1", "sensor2", "sensor3", "sensor4")[index]: value}
+    if block == 0xa3 and index < 2:
+        return {("humidity_mode_setup", "dehumidity_mode_setup")[index]: value}
+    if block in (0xa4, 0xa5) and index < len(SETPOINT_FIELDS):
+        return {SETPOINT_FIELDS[index] + "_target_rh_percent": value}
     if block in (5, 6, 7) and index < len(SETPOINT_FIELDS):
         return temp(SETPOINT_FIELDS[index], value, deg_e=True)
     if block == 7 and index == 5:
@@ -299,7 +305,7 @@ def block_update(r: Reader) -> Fields:
     fields: Fields = {"target_subnet": dest, "target_node": node & 31,
                       "target_node_flags": node >> 5, "block_id": block}
     # Updates have no support mask. Decode only layouts with known ordering.
-    sizes = {3: 3, 5: 5, 6: 5, 7: 6, 9: 5, 15: 6}
+    sizes = {3: 3, 5: 5, 6: 5, 7: 6, 9: 5, 13: 5, 15: 6, 0xa3: 2, 0xa4: 5, 0xa5: 5}
     size = 7 if block in SINGLE_WEEK else 8 if block in MULTI_WEEK else sizes.get(block)
     if size is not None:
         for index in range(size):

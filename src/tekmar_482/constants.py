@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from enum import IntEnum, IntFlag, StrEnum
 
 DEFAULT_BAUDRATE = 9600
+MAX_PERCENT = 100
 NO_SETBACK_EVENTS = 0
 TWO_EVENT_SETBACK_SCHEDULE = 2
 FOUR_EVENT_SETBACK_SCHEDULE = 4
@@ -183,15 +184,7 @@ SETBACK_SETPOINT_MAP: dict[int, int] = {
     ThaSetback.AWAY: 0x02,
 }
 
-SETBACK_FAN_MAP: dict[int, int] = {
-    ThaSetback.WAKE_4: 0x00,
-    ThaSetback.UNOCC_4: 0x01,
-    ThaSetback.OCC_4: 0x00,
-    ThaSetback.SLEEP_4: 0x01,
-    ThaSetback.OCC_2: 0x00,
-    ThaSetback.UNOCC_2: 0x01,
-    ThaSetback.AWAY: 0x01,
-}
+SETBACK_FAN_MAP = SETBACK_SETPOINT_MAP.copy()
 
 
 def schedule_setbacks_for_events(events: int | None) -> tuple[ThaSetback, ...] | None:

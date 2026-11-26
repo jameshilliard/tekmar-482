@@ -8,7 +8,7 @@ from enum import IntEnum
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Protocol, Self, runtime_checkable
 
-from .constants import SETBACK_FAN_MAP, SETBACK_SETPOINT_MAP, ThaSetback, ThaValue
+from .constants import SETBACK_SETPOINT_MAP, ThaSetback, ThaValue
 from .exceptions import (
     ProtocolError,
     UnknownFieldError,
@@ -653,6 +653,8 @@ class DeviceReplySelector:
         if (
             command.method not in _SETBACK_INDEXED_METHODS
             and command.method != TrpcMethod.MODE_SETTING
+            and command.method
+            not in {TrpcMethod.HUMIDITY_SET_MIN, TrpcMethod.HUMIDITY_SET_MAX}
         ):
             return None
         return cls.for_message(command.to_message(), readback=readback)
@@ -660,6 +662,20 @@ class DeviceReplySelector:
     @classmethod
     def for_message(cls, message: TrpcPacket, *, readback: bool = False) -> Self | None:
         service = response_service_for(message.service_id)
+        if message.method in {
+            TrpcMethod.HUMIDITY_SET_MIN,
+            TrpcMethod.HUMIDITY_SET_MAX,
+        } and (
+            service is TrpcService.RESPONSE_UPDATE
+            or service is TrpcService.RESPONSE_REQUEST
+        ):
+            return cls(
+                service,
+                message.method_id,
+                message.body.get("address", 0),
+                None,
+                None,
+            )
         if message.method is TrpcMethod.MODE_SETTING and (
             service is TrpcService.RESPONSE_UPDATE
             or (readback and service is TrpcService.RESPONSE_REQUEST)
@@ -732,11 +748,7 @@ class DeviceReplySelector:
             or ThaSetback.CURRENT in (self.slot, other.slot)
         ):
             return True
-        slots = (
-            SETBACK_FAN_MAP
-            if self.method == TrpcMethod.FAN_PERCENT
-            else SETBACK_SETPOINT_MAP
-        )
+        slots = SETBACK_SETPOINT_MAP
         return slots.get(self.slot, self.slot) == slots.get(other.slot, other.slot)
 
     def accepts(self, message: TrpcPacket) -> bool:

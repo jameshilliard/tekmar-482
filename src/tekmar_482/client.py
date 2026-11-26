@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING, Self
 from ._poll import RuntimePoll, filter_discovery_events, observe_runtime
 from .constants import (
     DEFAULT_BAUDRATE,
+    MAX_PERCENT,
     DeviceMode,
     ThaSetback,
     ThaValue,
@@ -70,8 +71,6 @@ if TYPE_CHECKING:
     from .session import ReportSubscription
     from .transport import PacketTransport
 
-_MIN_PERCENT = 0
-_MAX_PERCENT = 100
 _REPORTING_ACK_TIMEOUT = 5
 
 _REJECTED_CLOCK = DateTimeFields(
@@ -956,6 +955,52 @@ class Tekmar482Client:
             timeout=timeout,
         )
 
+    async def set_humidity_min(
+        self,
+        address: int,
+        percent: int,
+        *,
+        timeout: float | None = 5,
+    ) -> TrpcPacket | None:
+        """Set the humidification target and return the accepted percentage."""
+        return await self._set_humidity_limit(
+            TrpcMethod.HUMIDITY_SET_MIN,
+            address,
+            percent,
+            timeout,
+        )
+
+    async def set_humidity_max(
+        self,
+        address: int,
+        percent: int,
+        *,
+        timeout: float | None = 5,
+    ) -> TrpcPacket | None:
+        """Set the dehumidification target and return the accepted percentage."""
+        return await self._set_humidity_limit(
+            TrpcMethod.HUMIDITY_SET_MAX,
+            address,
+            percent,
+            timeout,
+        )
+
+    async def _set_humidity_limit(
+        self,
+        method: TrpcMethod,
+        address: int,
+        percent: int,
+        timeout: float | None,
+    ) -> TrpcPacket | None:
+        self._validate_percent(percent)
+        return await self.coalesced_update_response(
+            method,
+            coalesce_key=(method, address),
+            match_address=address,
+            fields={"address": address, "percent": percent},
+            timeout=timeout,
+        )
+
     async def set_setpoint_device(
         self,
         address: int,
@@ -1108,6 +1153,6 @@ class Tekmar482Client:
 
     @staticmethod
     def _validate_percent(value: int) -> None:
-        if not _MIN_PERCENT <= value <= _MAX_PERCENT:
-            msg = f"percent must be between {_MIN_PERCENT} and {_MAX_PERCENT}: {value}"
+        if not 0 <= value <= MAX_PERCENT:
+            msg = f"percent must be between 0 and {MAX_PERCENT}: {value}"
             raise ValueError(msg)

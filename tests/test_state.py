@@ -64,6 +64,27 @@ def _state() -> Tekmar482State:
 
 
 class StateTest(unittest.TestCase):
+    def test_fan_percent_step_is_model_specific_and_raw_values_survive(self) -> None:
+        for code, expected in [
+            (99201, 70),
+            (99202, 70),
+            (99203, 70),
+            (107201, 7),
+            (None, 7),
+        ]:
+            device = DiscoveredDevice(1, type_code=code)
+            snapshot = DeviceSnapshot.from_raw_values(
+                device,
+                {"fan_percent": {"current": 7}},
+            )
+            assert snapshot.runtime.current_fan_percent == expected
+            assert snapshot.decoded.fan_percent.current == expected
+            assert snapshot.values["fan_percent"] == {"current": 7}
+            assert device.encode_fan_percent(expected) == 7
+            assert device.decode_fan_percent(255) is None
+        with self.assertRaises(ValueError):
+            DiscoveredDevice(1, type_code=99201).encode_fan_percent(73)
+
     def test_reported_setpoint_capability_takes_precedence_over_model(self) -> None:
         for attrs, expected in ((None, True), (0, False), (128, True)):
             device = DiscoveredDevice(

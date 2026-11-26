@@ -222,6 +222,10 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
                 (0x127, bytes.fromhex("010002"), bytes.fromhex("010001")),
                 (0x13F, bytes.fromhex("01000762"), bytes.fromhex("01000360")),
                 (0x147, bytes.fromhex("01000662"), bytes.fromhex("010006ff")),
+                (0x14F, bytes.fromhex("01000762"), bytes.fromhex("01000260")),
+                (0x157, bytes.fromhex("01000632"), bytes.fromhex("01000628")),
+                (0x152, bytes.fromhex("010023"), bytes.fromhex("010020")),
+                (0x151, bytes.fromhex("010032"), bytes.fromhex("0100ff")),
             ]:
                 update = packet(0, method, request)
                 assert await reader.readexactly(len(update)) == update
@@ -252,6 +256,14 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
                 timeout=1,
             )
             assert cool is not None and cool.require("setpoint") == 255
+            slab = await client.set_slab_setpoint(1, 98, timeout=1)
+            assert slab is not None and slab.require("setpoint") == 96
+            fan = await client.set_latest_fan_percent(1, 50, setback=6, timeout=1)
+            assert fan is not None and fan.require("percent") == 40
+            minimum = await client.set_humidity_min(1, 35, timeout=1)
+            assert minimum is not None and minimum.require("percent") == 32
+            maximum = await client.set_humidity_max(1, 50, timeout=1)
+            assert maximum is not None and maximum.require("percent") == 255
 
     async def test_wrong_rom_id_fails_before_unlock(self) -> None:
         async def rom(

@@ -819,9 +819,37 @@ class Tekmar482DeviceHandle:
         with self.controller.device_write(self.address, TrpcMethod.FAN_PERCENT):
             return await self.controller.client.set_latest_fan_percent(
                 self.address,
-                percent,
+                self.info.encode_fan_percent(percent),
                 setback=setback,
                 confirm=confirm,
+                timeout=timeout,
+            )
+
+    async def set_humidity_min(
+        self,
+        percent: int,
+        *,
+        timeout: float | None = 5,
+    ) -> TrpcPacket | None:
+        """Set the humidification target on devices configured for it."""
+        with self.controller.device_write(self.address, TrpcMethod.HUMIDITY_SET_MIN):
+            return await self.controller.client.set_humidity_min(
+                self.address,
+                percent,
+                timeout=timeout,
+            )
+
+    async def set_humidity_max(
+        self,
+        percent: int,
+        *,
+        timeout: float | None = 5,
+    ) -> TrpcPacket | None:
+        """Set the dehumidification target on devices configured for it."""
+        with self.controller.device_write(self.address, TrpcMethod.HUMIDITY_SET_MAX):
+            return await self.controller.client.set_humidity_max(
+                self.address,
+                percent,
                 timeout=timeout,
             )
 

@@ -16,7 +16,6 @@ from .client import Tekmar482Client
 from .constants import DEFAULT_BAUDRATE
 from .decoding import (
     decode_degh,
-    decode_device_values,
     decode_network_error,
     decoded_to_dict,
 )
@@ -804,7 +803,7 @@ def device_snapshot_to_dict(snapshot: DeviceSnapshot) -> dict[str, Any]:
     return {
         "info": device_to_dict(snapshot.info),
         "values": snapshot.values,
-        "decoded_values": decoded_to_dict(decode_device_values(snapshot.values)),
+        "decoded_values": decoded_to_dict(snapshot.decoded_values),
     }
 
 
