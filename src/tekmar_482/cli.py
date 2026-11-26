@@ -329,9 +329,6 @@ async def _native(args: argparse.Namespace, stdout: TextIO) -> int:
     def emit(value: object) -> None:
         stdout.write((json.dumps(value) if args.json else str(value)) + "\n")
 
-    if args.command == "request":
-        msg = "tRPC request requires --vendor; use send for a native tN4 frame"
-        raise CliError(msg)
     if args.command in {"install", "update"}:
         changed = await install_firmware(
             endpoint,
@@ -351,6 +348,9 @@ async def _native(args: argparse.Namespace, stdout: TextIO) -> int:
             await bridge.test_leds()
         elif args.command == "probe":
             emit({"timers_mask_timestamps": await bridge.probe(duration=args.duration)})
+        elif args.command == "request":
+            async with bridge.normal() as client:
+                await _request(client, args, stdout)
         else:
             await _native_capture(bridge, args, emit)
     return 0

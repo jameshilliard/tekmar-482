@@ -54,7 +54,7 @@ def build_image() -> Path:
         check=True,
         env={**os.environ, "TEKMAR_BUILD_REVISION": revision},
     )
-    image = SOURCE / "target/armv4t-none-eabi/release/tekmar-482-firmware.bin"
+    image = SOURCE / "target/thumbv4t-none-eabi/release/tekmar-482-firmware.bin"
     if image.read_bytes()[0x100:0x130] != b"TK48REV\0" + revision.encode("ascii"):
         msg = "Flash image does not identify the pinned firmware revision"
         raise RuntimeError(msg)

@@ -11,7 +11,7 @@ def check(paths: list[str], image: bytes) -> None:
     if (
         image
         != (
-            SOURCE / "target/armv4t-none-eabi/release/tekmar-482-firmware.bin"
+            SOURCE / "target/thumbv4t-none-eabi/release/tekmar-482-firmware.bin"
         ).read_bytes()
     ):
         msg = "distribution firmware differs from the tested image"

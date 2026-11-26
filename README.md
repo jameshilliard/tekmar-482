@@ -69,6 +69,16 @@ its inventory is not the same as the list of all native frame sources. See
 [Normal method coverage](https://github.com/jameshilliard/tekmar-482-firmware/blob/master/docs/normal-mode.md)
 before using other vendor client methods on custom firmware.
 
+The CLI `request` command uses Normal mode on custom firmware by default.
+For example, with a previously discovered tHA address:
+
+```bash
+tekmar-482 request CurrentTemperature address=1001 --tcp 192.0.2.10:3001 --json
+```
+
+Use `client.reports()` inside `bridge.normal()` for unsolicited temperature
+and demand updates; enable them with `await client.set_reporting_state(enabled=True)`.
+
 For an addressed native read, use the physical port and wire address
 from a frame observed on that line. These are not tRPC decimal addresses:
 

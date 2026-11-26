@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import asyncio
 import binascii
+import json
 import struct
 import unittest
 from contextlib import asynccontextmanager
+from io import StringIO
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import TYPE_CHECKING
@@ -22,6 +24,7 @@ from tekmar_482 import (
     install_firmware,
     open_gateway,
 )
+from tekmar_482.cli import build_parser, run
 from tekmar_482.tpck import serialize
 
 if TYPE_CHECKING:
@@ -216,6 +219,50 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
             with self.assertRaises(ProtocolError):
                 async with open_gateway(endpoint):
                     self.fail("wrong MCU accepted")
+
+    async def test_unsolicited_report_is_not_an_isp_banner(self) -> None:
+        report = serialize(Packet(6, bytes.fromhex("023701000001000a06")))
+
+        async def app(
+            reader: asyncio.StreamReader,
+            writer: asyncio.StreamWriter,
+        ) -> None:
+            first = await reader.readexactly(1)
+            if first == b"?":
+                writer.write(report)
+                assert not await reader.read()
+                return
+            caps = b"\xca" * 301 + management(1, 1)
+            assert first + await reader.readexactly(len(caps) - 1) == caps
+            writer.write(report + management(1, 4, bytes([1, 0, 5, 3])))
+            mode = management(2, 0, b"\0")
+            assert await reader.readexactly(len(mode)) == mode
+            writer.write(management(2, 3, b"\0"))
+            req = serialize(Packet(6, bytes.fromhex("013701000001000000")))
+            assert await reader.readexactly(len(req)) == req
+            writer.write(
+                report + serialize(Packet(6, bytes.fromhex("043701000001000a06"))),
+            )
+
+        async with listen(app) as endpoint:
+            stdout = StringIO()
+            args = build_parser().parse_args(
+                [
+                    "request",
+                    "CurrentTemperature",
+                    "address=1",
+                    "--tcp",
+                    f"{endpoint.address}:{endpoint.port}",
+                    "--baudrate",
+                    "187500",
+                    "--json",
+                ],
+            )
+            assert await run(args, stdout=stdout) == 0
+            assert json.loads(stdout.getvalue())["response"]["body"] == {
+                "address": 1,
+                "temp": 1546,
+            }
 
     async def sync(
         self,

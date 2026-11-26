@@ -11,7 +11,7 @@ from importlib.resources import files
 from typing import TYPE_CHECKING
 
 from .bridge import BridgeClient
-from .exceptions import ProtocolError
+from .exceptions import ConnectionClosedError, ProtocolError
 
 if TYPE_CHECKING:
     from ._wire import GatewayEndpoint, Wire
@@ -82,37 +82,56 @@ async def _finish_sync(wire: Wire) -> None:
     await wire.expect(str(_PART).encode())
 
 
+async def _probe_line(wire: Wire) -> bytes | None:
+    """Read a short ROM identification line, declining unsolicited binary traffic."""
+    buf = bytearray()
+    while len(buf) <= len(b"Synchronized\r"):
+        byte = await wire.reader.read(1)
+        if not byte:
+            msg = "gateway disconnected during identification"
+            raise ConnectionClosedError(msg)
+        if byte == b"\n":
+            return bytes(buf[:-1]) if buf.endswith(b"\r") else None
+        if byte != b"\r" and not byte.isalnum() and byte != b"?":
+            return None
+        buf.extend(byte)
+    return None
+
+
 async def _rom_ready(wire: Wire) -> bool:
     """Identify a fresh or synchronized ROM without unlocking it."""
     await wire.write(b"?")
     try:
         async with asyncio.timeout(0.4):
-            banner = await wire.line()
+            banner = await _probe_line(wire)
     except TimeoutError:
         pass
     else:
-        if banner != b"Synchronized":
-            msg = "unexpected reply to ROM identification; refusing to program"
-            raise ProtocolError(msg)
-        await _finish_sync(wire)
-        return True
+        if banner == b"Synchronized":
+            await _finish_sync(wire)
+            return True
+        if banner not in {b"?", b""}:
+            return False
 
     # Terminate the probe byte in an already synchronized command parser.
     # '?' is not an ISP command; J is the read-only part identification.
     await wire.write(b"\r\nJ\r\n")
     try:
         async with asyncio.timeout(0.4):
-            row = await wire.line()
+            row = await _probe_line(wire)
     except TimeoutError:
+        return False
+    if row is None:
         return False
     async with asyncio.timeout(2):
         for _ in range(5):
             if row == b"0":
                 break
             if row not in {b"", b"?", b"1", b"J"}:
-                msg = "unexpected ISP identification prefix"
-                raise ProtocolError(msg)
-            row = await wire.line()
+                return False
+            row = await _probe_line(wire)
+            if row is None:
+                return False
         else:
             msg = "no ISP part identification status"
             raise ProtocolError(msg)
