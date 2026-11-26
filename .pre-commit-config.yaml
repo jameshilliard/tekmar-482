@@ -27,7 +27,5 @@ repos:
     hooks:
       - id: mypy
         args: []
-        # The copied wire auditor is checked through its adjacent typed stub.
-        exclude: ^src/tekmar_482/_native_records\.py$
         additional_dependencies:
           - serialx==1.8.1

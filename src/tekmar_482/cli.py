@@ -11,7 +11,7 @@ from dataclasses import asdict
 from typing import TYPE_CHECKING, Any, TextIO
 
 from ._wire import GatewayEndpoint
-from .bridge import BridgeClient
+from .bridge import BridgeClient, InvalidCapture
 from .client import Tekmar482Client
 from .constants import DEFAULT_BAUDRATE
 from .decoding import (
@@ -383,6 +383,18 @@ async def _native_capture(
             async with window:
                 while limit is None or frames < limit:
                     frame = await stream.read()
+                    if isinstance(frame, InvalidCapture):
+                        if args.command in {"diagnostics", "dump", "monitor"}:
+                            emit(
+                                {
+                                    "invalid": frame.reason,
+                                    "port": frame.port,
+                                    "timestamp_ms": frame.timestamp_ms,
+                                    "bit_count": frame.bit_count,
+                                    "bits": frame.bits.hex(),
+                                },
+                            )
+                        continue
                     if frame is not None:
                         frames += 1
                         nodes.add((frame.port, frame.subnet, frame.node))
@@ -390,12 +402,10 @@ async def _native_capture(
                             emit(
                                 {
                                     "port": frame.port,
-                                    "start_us": frame.start_us,
+                                    "timestamp_ms": frame.timestamp_ms,
                                     "id": frame.message_id,
                                     "subnet": frame.subnet,
                                     "node": frame.node,
-                                    "trailer": frame.trailer,
-                                    "crc": frame.crc,
                                     "body": frame.body.hex(),
                                     "fields": frame.decoded,
                                 },
@@ -409,13 +419,7 @@ async def _native_capture(
         emit({"observed_nodes": sorted(nodes)})
     if args.command in {"diagnostics", "dump"}:
         for summary in stream.diagnostics.values():
-            values = asdict(summary)
-            values["rejected_body"] = (
-                summary.rejected_body.hex() if summary.rejected_body else None
-            )
-            emit(values)
-        if stream.ack_summary:
-            emit({"ack_summary": stream.ack_summary})
+            emit(asdict(summary))
     if sending:
         emit({"tx_result": stream.tx_result})
         if not stream.tx_result or stream.tx_result[1] != "ACK":

@@ -84,6 +84,3 @@ class Wire:
         if actual != expected:
             msg = f"expected {expected!r}, received {actual!r}"
             raise ProtocolError(msg)
-
-    async def command(self, command: bytes) -> None:
-        await self.write(b"A\n" + command + b"\n")

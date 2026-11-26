@@ -1,7 +1,14 @@
 """Async Python client for the tekmar 482 gateway."""
 
 from ._wire import GatewayEndpoint
-from .bridge import BridgeClient, BridgeStream, NativeFrame, PanelState, PortDiagnostic
+from .bridge import (
+    BridgeClient,
+    BridgeStream,
+    InvalidCapture,
+    NativeFrame,
+    PanelState,
+    PortDiagnostic,
+)
 from .client import Tekmar482Client
 from .constants import (
     DEFAULT_BAUDRATE,
@@ -55,6 +62,7 @@ from .exceptions import (
 )
 from .firmware import FirmwareBundle, install_firmware
 from .gateway import open_gateway
+from .management import BridgeCapabilities, BridgeFeature, BridgeManagement, BridgeMode
 from .models import (
     AvailableInfo,
     AvailableRuntime,
@@ -192,7 +200,11 @@ __all__ = [
     "AddressSetbackPayload",
     "AvailableInfo",
     "AvailableRuntime",
+    "BridgeCapabilities",
     "BridgeClient",
+    "BridgeFeature",
+    "BridgeManagement",
+    "BridgeMode",
     "BridgeStream",
     "ConnectionClosedError",
     "DateTimeFields",
@@ -218,6 +230,7 @@ __all__ = [
     "GatewayInfo",
     "GatewayRuntime",
     "GatewaySnapshot",
+    "InvalidCapture",
     "InventoryDrainTimeoutError",
     "MessageApplyResult",
     "MethodSpec",

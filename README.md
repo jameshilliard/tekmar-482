@@ -34,7 +34,7 @@ uv run pre-commit install
 ## Native bridge
 
 ```python
-from tekmar_482 import BridgeClient, GatewayEndpoint, open_gateway
+from tekmar_482 import BridgeClient, GatewayEndpoint, NativeFrame, open_gateway
 
 async def read_frame() -> None:
     endpoint = GatewayEndpoint.tcp("192.0.2.10", 3001)
@@ -42,9 +42,11 @@ async def read_frame() -> None:
         assert isinstance(bridge, BridgeClient)
         print(await bridge.panel())
         async with bridge.stream() as stream:
-            while (frame := await stream.read()) is None:
-                pass
-            print(frame.port, frame.message_id, frame.decoded)
+            while True:
+                frame = await stream.read()
+                if isinstance(frame, NativeFrame):
+                    print(frame.port, frame.message_id, frame.decoded)
+                    break
         print(stream.diagnostics)
 ```
 
@@ -52,7 +54,7 @@ async def read_frame() -> None:
 and `dump` includes panel state, frames and receiver summaries. Discovery is
 passive: a quiet device will not appear during a short scan. See the firmware's
 [frame catalog](https://github.com/jameshilliard/tekmar-482-firmware/blob/master/docs/tn4-frames.md)
-and [UART command reference](https://github.com/jameshilliard/tekmar-482-firmware/blob/master/docs/interfaces.md).
+and [binary UART protocol](https://github.com/jameshilliard/tekmar-482-firmware/blob/master/docs/tpck-bridge.md).
 
 ### Installation and updates
 

@@ -10,7 +10,7 @@ from dataclasses import dataclass
 from importlib.resources import files
 from typing import TYPE_CHECKING
 
-from .bridge import IDENTITY, BridgeClient
+from .bridge import BridgeClient
 from .exceptions import ProtocolError
 
 if TYPE_CHECKING:
@@ -40,9 +40,10 @@ class FirmwareBundle:
         except FileNotFoundError as err:
             msg = "No flash image in this source checkout; install from the sdist"
             raise ProtocolError(msg) from err
-        revisions = re.findall(rb"BUILD ([0-9a-f]{40})\r\n", image)
+        revision = image[0x108:0x130]
         if (
-            len(revisions) != 1
+            image[0x100:0x108] != b"TK48REV\x00"
+            or not re.fullmatch(rb"[0-9a-f]{40}", revision)
             or not _TEXT_START < len(image) <= _MAX_IMAGE
             or sum(struct.unpack_from("<8I", image)) & 0xFFFFFFFF
             or image[0x1FC:0x200] != b"\xff" * 4
@@ -58,7 +59,7 @@ class FirmwareBundle:
         ):
             msg = "invalid bundled flash image or revision"
             raise ProtocolError(msg)
-        return cls(revisions[0].decode("ascii"), image)
+        return cls(revision.decode("ascii"), image)
 
 
 async def _command(wire: Wire, command: str) -> None:
@@ -194,8 +195,7 @@ async def install_firmware(
             revision = await bridge.revision()
             if revision == bundle.revision:
                 return False
-            await wire.command(b"ENTER-ISP")
-            await wire.expect(b"OK ISP")
+            await bridge.enter_update_mode()
             await asyncio.sleep(0.1)
             await _synchronize(wire)
         await _program(wire, bundle.image)
@@ -219,8 +219,8 @@ async def provision_if_rom(endpoint: GatewayEndpoint) -> bool:
 async def _verify_boot(endpoint: GatewayEndpoint, bundle: FirmwareBundle) -> None:
     # Open a fresh stream: some ROMs leave a partial Go reply behind.
     async with endpoint.connect() as wire:
-        await wire.command(b"ID?")
-        await wire.expect(IDENTITY)
-        if await BridgeClient(wire).revision() != bundle.revision:
+        bridge = BridgeClient(wire)
+        await bridge.identify()
+        if await bridge.revision() != bundle.revision:
             msg = "gateway did not boot the programmed revision"
             raise ProtocolError(msg)

@@ -25,12 +25,6 @@ def main() -> None:
     args = parser.parse_args()
     for name, data in {
         "_native_payloads.py": (SOURCE / "tools/payloads.py").read_bytes(),
-        "_native_records.py": (SOURCE / "tools/frames.py")
-        .read_bytes()
-        .replace(
-            b"from payloads import details",
-            b"from ._native_payloads import details",
-        ),
     }.items():
         path = PACKAGE / name
         if args.check:
@@ -61,7 +55,7 @@ def build_image() -> Path:
         env={**os.environ, "TEKMAR_BUILD_REVISION": revision},
     )
     image = SOURCE / "target/armv4t-none-eabi/release/tekmar-482-firmware.bin"
-    if image.read_bytes().count(f"BUILD {revision}\r\n".encode("ascii")) != 1:
+    if image.read_bytes()[0x100:0x130] != b"TK48REV\0" + revision.encode("ascii"):
         msg = "Flash image does not identify the pinned firmware revision"
         raise RuntimeError(msg)
     return image

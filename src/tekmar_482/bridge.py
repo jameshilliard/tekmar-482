@@ -1,37 +1,47 @@
-"""Async client for the native tN4 bridge firmware."""
+"""Async binary tRPC management and opaque type-1 tN4 records."""
 
 from __future__ import annotations
 
 import asyncio
-import binascii
 import re
+import struct
+from collections import deque
 from contextlib import asynccontextmanager
-from dataclasses import KW_ONLY, dataclass, field
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 from ._native_payloads import decode_payload
-from ._native_records import FrameAudit, dropped_records
-from .exceptions import ProtocolError
+from .exceptions import ConnectionClosedError, ProtocolError
+from .management import BridgeFeature, BridgeMethod, BridgeMode
+from .packet import TYPE_TN4, TYPE_TRPC, Packet
+from .tpck import TpckParser, serialize
+from .trpc import TrpcService
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator
+    from collections.abc import AsyncIterator, Callable
 
     from ._wire import Wire
 
-IDENTITY = b"TEKMAR-482-DEV"
 _PORTS = range(5)
+_DEFAULT_BAUD = 9600
+_RAW_HEADER = 2
+_INVALID_SERVICE = 4
+_RESULT_SERVICE = 2
+_RESULT_WITH_REASON = 4
 _HEADER = 4
-_INPUT_MASK = 0b11
-_LED_MASK = 0b111111
-_TIMER_WRAP_SECONDS = 2**32 / 1_000_000
+_RX_HEADER = 6
+_INVALID_HEADER = 9
+_TICK_MASK = 0xFFFFFFFF
+_CAPABILITIES = struct.Struct("4B")
+_PANEL = struct.Struct("<7I")
+_COUNTERS = struct.Struct("<12I")
+_DROPS = struct.Struct("<BII")
 
 
 @dataclass(frozen=True, slots=True)
 class NativeFrame:
     port: int
-    start_us: int
-    crc: int
-    trailer: str
+    timestamp_ms: int
     body: bytes
 
     @property
@@ -65,115 +75,109 @@ class PanelState:
 @dataclass(frozen=True, slots=True)
 class PortDiagnostic:
     port: int
-    edges: int
-    starts: int
-    stuffing_errors: int
-    crc_errors: int
-    ack: int
-    no_ack: int
-    bad_trailer: int
-    partial: int
-    dropped: int
-    max_delay_us: int
-    received_crc: int
-    expected_crc: int
-    _: KW_ONLY
-    levels: int | None
-    rejected_start_us: int | None
-    rejected_body: bytes | None
+    valid_dropped: int
+    invalid_dropped: int
+
+
+@dataclass(frozen=True, slots=True)
+class InvalidCapture:
+    port: int
+    timestamp_ms: int
+    reason: int
+    bit_count: int
+    bits: bytes
+
+
+def valid_body(body: bytes) -> bool:
+    return len(body) >= _HEADER and body[3] & 63 == len(body) - _HEADER
 
 
 @dataclass(slots=True)
 class BridgeStream:
-    """A stream owns the UART until its enclosing context exits."""
+    """One raw session, with one reader and independent per-port submissions."""
 
-    _wire: Wire
-    _audit: FrameAudit
-    _ack_port: int | None
-    _tx: tuple[int, bytes] | None
+    _client: BridgeClient
     diagnostics: dict[int, PortDiagnostic] = field(default_factory=dict, init=False)
-    _echoes: set[str] = field(default_factory=set, init=False)
-    _ended: bool = False
+    _pending: set[int] = field(default_factory=set, init=False)
+    _early: deque[NativeFrame | InvalidCapture] = field(
+        default_factory=deque,
+        init=False,
+    )
+    tx_result: tuple[int, str] | None = None
+    _closed: bool = False
 
-    @property
-    def tx_result(self) -> tuple[int, str] | None:
-        return self._audit.tx_result
+    async def submit(self, port: int, body: bytes) -> None:
+        if self._closed or port in self._pending:
+            msg = f"raw session closed or send already in progress on port {port}"
+            raise ProtocolError(msg)
+        if port not in _PORTS or not valid_body(body):
+            msg = "expected a physical port and complete native frame"
+            raise ValueError(msg)
+        self._pending.add(port)
+        await self._client.write_raw(bytes((1, port)) + body)
 
-    @property
-    def ack_summary(self) -> tuple[int, int, int] | None:
-        return self._audit.ack_summary
-
-    def _record(self, row: bytes) -> NativeFrame | None:
-        line = row + b"\r\n"
-        if (drops := dropped_records(line)) is not None:
-            self._audit.finish(drops)
-            self._ended = True
+    def consume(self, packet: Packet) -> NativeFrame | InvalidCapture | None:
+        data = packet.data
+        if packet.type != TYPE_TN4 or len(data) < _RAW_HEADER or data[1] not in _PORTS:
+            msg = "unexpected raw packet type, length or port"
+            raise ProtocolError(msg)
+        kind, port = data[:2]
+        if kind == 0 and valid_body(data[_RX_HEADER:]):
+            return NativeFrame(port, int.from_bytes(data[2:6], "little"), data[6:])
+        if kind == _INVALID_SERVICE and len(data) >= _INVALID_HEADER:
+            count = int.from_bytes(data[7:9], "little")
+            bits = data[9:]
+            if (count + 7) // 8 == len(bits) and (
+                not count % 8 or not bits[-1] & ((1 << (8 - count % 8)) - 1)
+            ):
+                return InvalidCapture(
+                    port,
+                    int.from_bytes(data[2:6], "little"),
+                    data[6],
+                    count,
+                    bits,
+                )
+        if kind == _RESULT_SERVICE and port in self._pending:
+            if data[2:] == b"\x00":
+                result = "ACK"
+            elif len(data) == _RESULT_WITH_REASON and data[2] in (1, 2):
+                result = f"{'REJECTED' if data[2] == 1 else 'FAILED'}:{data[3]}"
+            else:
+                msg = "malformed transmit result"
+                raise ProtocolError(msg)
+            self._pending.remove(port)
+            self.tx_result = (port, result)
             return None
-        self._audit.record(line)
-        parts = row.split()
-        port = int(parts[1])
-        if parts[0] == b"F":
-            frame = NativeFrame(
-                port,
-                int(parts[2], 16),
-                int(parts[3], 16),
-                parts[4].decode("ascii"),
-                bytes.fromhex(parts[5].decode("ascii")),
-            )
-            if self._tx == (port, frame.body):
-                self._echoes.add(frame.trailer)
-            return frame
-        if parts[0] == b"D":
-            words = [int(v, 16) for v in parts[2:14]]
-            tail = iter(parts[14:])
-            levels, start, raw = (next(tail, b"") for _ in range(3))
-            self.diagnostics[port] = PortDiagnostic(
-                port,
-                *words,
-                levels=int(levels, 16) if levels else None,
-                rejected_start_us=int(start, 16) if start else None,
-                rejected_body=bytes.fromhex(raw.decode("ascii")) if raw else None,
-            )
-        return None
+        msg = f"unexpected raw service {kind} on port {port}"
+        raise ProtocolError(msg)
 
-    async def read(self) -> NativeFrame | None:
-        """Read one UART record; TX results and summaries update this object."""
-        if self._ended:
-            msg = "bridge stream already ended"
+    async def read(self) -> NativeFrame | InvalidCapture | None:
+        if self._closed:
+            msg = "raw session closed"
             raise ProtocolError(msg)
-        try:
-            return self._record(await self._wire.line())
-        except ValueError as err:
-            raise ProtocolError(str(err)) from err
+        return (
+            self._early.popleft()
+            if self._early
+            else self.consume(await self._client.next_packet())
+        )
 
-    async def _stop(self) -> None:
-        async with asyncio.timeout(5):
-            await self._wire.write(b"\n")
-            while not self._ended:
-                await self.read()
-        if (self.ack_summary[0] if self.ack_summary else None) != self._ack_port:
-            msg = "receive ACK summary does not match requested port"
-            raise ProtocolError(msg)
-        if self._tx is not None:
-            result = self.tx_result
-            if result is None or result[0] != self._tx[0]:
-                msg = "missing transmit result for requested port"
-                raise ProtocolError(msg)
-            expected = {"ACK": "A", "NOACK": "N"}.get(result[1])
-            if expected is not None and expected not in self._echoes:
-                msg = "transmit result lacks matching CRC-verified bus echo"
-                raise ProtocolError(msg)
-        elif self.tx_result is not None:
-            msg = "unexpected transmit result on receiver"
-            raise ProtocolError(msg)
+    def buffer(self, packet: Packet) -> None:
+        if (record := self.consume(packet)) is not None:
+            self._early.append(record)
+
+    def close(self) -> None:
+        self._closed = True
 
 
 class BridgeClient:
-    """Native bridge connection. Use open_gateway() to manage its lifetime."""
+    """Negotiated binary application connection. Use open_gateway for its lifetime."""
 
     def __init__(self, wire: Wire) -> None:
         self._wire = wire
+        self._parser = TpckParser(strict_checksum=True)
+        self._packets: deque[Packet] = deque()
         self._busy = asyncio.Lock()
+        self._features = BridgeFeature(0)
 
     @asynccontextmanager
     async def _transaction(self) -> AsyncIterator[None]:
@@ -187,73 +191,131 @@ class BridgeClient:
                 self._wire.writer.close()
                 raise
 
+    async def next_packet(self) -> Packet:
+        while not self._packets:
+            chunk = await self._wire.reader.read(256)
+            if not chunk:
+                msg = "gateway disconnected"
+                raise ConnectionClosedError(msg)
+            self._packets.extend(self._parser.feed_many(chunk))
+        return self._packets.popleft()
+
+    async def write_raw(self, body: bytes) -> None:
+        await self._wire.write(serialize(Packet(TYPE_TN4, body)))
+
+    async def _call(
+        self,
+        method: BridgeMethod,
+        body: bytes = b"",
+        *,
+        update: bool = False,
+        consume: Callable[[Packet], object] | None = None,
+    ) -> bytes:
+        service = TrpcService.UPDATE if update else TrpcService.REQUEST
+        response = (
+            TrpcService.RESPONSE_UPDATE if update else TrpcService.RESPONSE_REQUEST
+        )
+        key = method.to_bytes(4, "little")
+        async with asyncio.timeout(5):
+            await self._wire.write(
+                serialize(Packet(TYPE_TRPC, bytes([service]) + key + body)),
+            )
+            while True:
+                packet = await self.next_packet()
+                if packet.type != TYPE_TRPC:
+                    if consume and packet.type == TYPE_TN4:
+                        consume(packet)
+                    continue
+                header, payload = packet.data[:5], packet.data[5:]
+                if header == bytes([response]) + key:
+                    return payload
+                if header == bytes([response]) + bytes(4):
+                    msg = "gateway does not implement this extension"
+                    raise ProtocolError(msg)
+                if (
+                    header
+                    == bytes([response]) + BridgeMethod.ERROR.to_bytes(4, "little")
+                    and payload[:4] == key
+                ):
+                    msg = f"bridge management rejection: {payload[4:].hex()}"
+                    raise ProtocolError(msg)
+
     async def identify(self) -> None:
         async with self._transaction():
-            await self._wire.command(b"ID?")
-            await self._wire.expect(IDENTITY)
+            if self._wire.baudrate != _DEFAULT_BAUD:
+                burst = b"\xca" * max(1, self._wire.baudrate // 1250)
+                for preamble in (burst, burst, b"\xca"):
+                    await self._wire.write(preamble)
+                    await asyncio.sleep(0.08)
+            data = await self._call(BridgeMethod.CAPABILITIES)
+            if (
+                len(data) != _CAPABILITIES.size
+                or data[:1] != b"\x01"
+                or data[1] > 1
+                or data[2] != len(_PORTS)
+            ):
+                msg = "invalid binary bridge capabilities"
+                raise ProtocolError(msg)
+            self._features = BridgeFeature(data[3])
+
+    async def enter_update_mode(self) -> None:
+        async with self._transaction():
+            if not self._features & BridgeFeature.ROM_UPDATE or await self._call(
+                BridgeMethod.ENTER_UPDATE,
+                update=True,
+            ):
+                msg = "gateway did not confirm firmware update handoff"
+                raise ProtocolError(msg)
 
     async def revision(self) -> str | None:
-        """Return None for unstamped builds and legacy images without BUILD?."""
         async with self._transaction():
-            await self._wire.command(b"BUILD?")
-            try:
-                async with asyncio.timeout(1):
-                    reply = await self._wire.line()
-            except TimeoutError:
-                # Prove the gateway is still in application command mode.
-                await self._wire.command(b"ID?")
-                await self._wire.expect(IDENTITY)
+            data = await self._call(BridgeMethod.BUILD)
+            if data == b"unversioned":
                 return None
-            if reply == b"BUILD unversioned":
-                return None
-            if not re.fullmatch(rb"BUILD [0-9a-f]{40}", reply):
-                msg = "invalid bridge build revision"
+            if not re.fullmatch(rb"[0-9a-f]{40}", data):
+                msg = "invalid firmware revision"
                 raise ProtocolError(msg)
-            return reply[6:].decode("ascii")
+            return data.decode("ascii")
 
     async def panel(self) -> PanelState:
-        async with self._transaction(), asyncio.timeout(5):
-            await self._wire.command(b"PANEL?")
-            reply = await self._wire.line()
-            if not re.fullmatch(rb"PANEL(?: [0-9a-f]{8}){7}", reply):
-                msg = "invalid panel state"
-                raise ProtocolError(msg)
-            boot, inputs, presses, changes, leds, pins, test = (
-                int(v, 16) for v in reply.split()[1:]
+        async with self._transaction():
+            boot, inputs, presses, changes, leds, pins, testing = _PANEL.unpack(
+                await self._call(BridgeMethod.PANEL),
             )
-            if (
-                max(boot, inputs) > _INPUT_MASK
-                or leds != pins
-                or pins > _LED_MASK
-                or test > 1
-            ):
-                msg = "invalid panel flags or LED readback mismatch"
-                raise ProtocolError(msg)
-            return PanelState(boot, inputs, presses, changes, leds, pins, bool(test))
+            return PanelState(boot, inputs, presses, changes, leds, pins, bool(testing))
 
     async def test_leds(self) -> None:
         async with self._transaction():
-            await self._wire.command(b"LED-TEST")
-            await self._wire.expect(b"OK LED")
+            await self._call(BridgeMethod.LED_TEST, update=True)
 
     async def probe(self, *, duration: float = 1) -> tuple[int, ...]:
-        """Return timer counts, port mask and five edge timestamps."""
-        if not 0 < duration < _TIMER_WRAP_SECONDS:
-            msg = "probe window must fit in a 32-bit microsecond timer"
+        if not 0 < duration < 2**32 / 1_000_000:
+            msg = "invalid capture window"
             raise ValueError(msg)
         async with self._transaction():
-            await self._wire.command(b"RX-BEGIN")
-            await self._wire.expect(b"OK RX")
-            try:
-                await asyncio.sleep(duration)
-            finally:
-                await self._wire.command(b"RX-END")
-                async with asyncio.timeout(5):
-                    reply = await self._wire.line()
-            if not re.fullmatch(rb"RX(?: [0-9a-f]{8}){8}", reply):
-                msg = "invalid edge probe reply"
-                raise ProtocolError(msg)
-            return tuple(int(v, 16) for v in reply.split()[1:])
+            before = _COUNTERS.unpack(await self._call(BridgeMethod.COUNTERS))
+            await asyncio.sleep(duration)
+            after = _COUNTERS.unpack(await self._call(BridgeMethod.COUNTERS))
+            seen = sum(1 << i for i in _PORTS if before[2 + i] != after[2 + i])
+            return (
+                (after[0] - before[0]) & _TICK_MASK,
+                (after[1] - before[1]) & _TICK_MASK,
+                seen,
+                *after[7:],
+            )
+
+    async def _mode(
+        self,
+        mode: BridgeMode,
+        consume: Callable[[Packet], object] | None = None,
+    ) -> None:
+        value = bytes([mode])
+        if (
+            await self._call(BridgeMethod.MODE, value, update=True, consume=consume)
+            != value
+        ):
+            msg = "mode change not acknowledged"
+            raise ProtocolError(msg)
 
     @asynccontextmanager
     async def stream(
@@ -263,41 +325,42 @@ class BridgeClient:
         ack_port: int | None = None,
         tx: tuple[int, bytes] | None = None,
     ) -> AsyncIterator[BridgeStream]:
-        if ack_port is not None and (ack_port not in _PORTS or tx is not None):
-            msg = "receive ACK requires one port (0..4) and no transmission"
+        if ack_port is not None and ack_port not in _PORTS:
+            msg = "invalid ACK port"
             raise ValueError(msg)
-        if tx is not None:
-            port, body = tx
-            if (
-                port not in _PORTS
-                or len(body) < _HEADER
-                or body[3] & 63 != len(body) - _HEADER
-            ):
-                msg = "expected a valid port and complete native frame body"
-                raise ValueError(msg)
-            check = binascii.crc_hqx(bytes([port]) + body, 0xFFFF)
-            command, greeting = f"TX {port} {body.hex()} {check:04x}".encode(), b"OK TX"
-        elif ack_port is not None:
-            command, greeting = (
-                f"RX-ACK {ack_port}".encode(),
-                f"OK ACK {ack_port}".encode(),
-            )
-        else:
-            command, greeting = (
-                (b"RX-DIAG", b"OK DIAG")
-                if diagnostics
-                else (b"RX-STREAM", b"OK FRAMES")
-            )
+        if not self._features & BridgeFeature.RAW:
+            msg = "gateway did not advertise binary Raw support"
+            raise ProtocolError(msg)
         async with self._transaction():
-            await self._wire.command(command)
-            await self._wire.expect(greeting)
-            stream = BridgeStream(
-                self._wire,
-                FrameAudit(diagnostics or tx is not None or ack_port is not None),
-                ack_port,
-                tx,
-            )
+            await self._mode(BridgeMode.RAW)
+            stream = BridgeStream(self)
             try:
+                mask = bytes([0 if ack_port is None else 1 << ack_port])
+                if (
+                    await self._call(
+                        BridgeMethod.ACK_MASK,
+                        mask,
+                        update=True,
+                        consume=stream.buffer,
+                    )
+                    != mask
+                ):
+                    msg = "ACK mask not acknowledged"
+                    raise ProtocolError(msg)
+                if tx is not None:
+                    await stream.submit(*tx)
                 yield stream
             finally:
-                await stream._stop()  # noqa: SLF001
+                try:
+                    await self._mode(BridgeMode.NORMAL, stream.consume)
+                    if diagnostics:
+                        for p in _PORTS:
+                            port, valid, invalid = _DROPS.unpack(
+                                await self._call(BridgeMethod.STATS, bytes([p])),
+                            )
+                            if p != port:
+                                msg = "drop counter port mismatch"
+                                raise ProtocolError(msg)
+                            stream.diagnostics[p] = PortDiagnostic(p, valid, invalid)
+                finally:
+                    stream.close()

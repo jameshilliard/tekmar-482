@@ -14,11 +14,14 @@ from tekmar_482 import (
     BridgeClient,
     FirmwareBundle,
     GatewayEndpoint,
+    NativeFrame,
+    Packet,
     ProtocolError,
     Tekmar482Client,
     install_firmware,
     open_gateway,
 )
+from tekmar_482.tpck import serialize
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Awaitable, Callable
@@ -54,6 +57,12 @@ async def listen(handler: Handler) -> AsyncIterator[GatewayEndpoint]:
             await asyncio.gather(*tasks)
 
 
+def management(method: int, service: int, body: bytes = b"") -> bytes:
+    return serialize(
+        Packet(6, bytes([service]) + struct.pack("<I", 0x544BF000 + method) + body),
+    )
+
+
 class BridgeTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self) -> None:
         # Exercise two flash pages and real image validation without a binary fixture.
@@ -63,8 +72,7 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         vectors[5] = (-7 * vectors[0]) & 0xFFFFFFFF
         struct.pack_into("<16I", image, 0, *vectors, *([0x200] * 8))
         image[0x1FC:0x200] = b"\xff" * 4
-        stamp = b"BUILD " + b"1" * 40 + b"\r\n"
-        image[-len(stamp) :] = stamp
+        image[0x100:0x130] = b"TK48REV\x00" + b"1" * 40
         (resources / "_images").mkdir()
         (resources / "_images/bridge.bin").write_bytes(image)
         self.enterContext(patch("tekmar_482.firmware.files", return_value=resources))
@@ -92,11 +100,13 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         writer: asyncio.StreamWriter,
         revision: str,
     ) -> None:
-        assert await reader.readline() + await reader.readline() == b"A\nID?\n"
-        writer.write(b"TEKMAR-482-DEV\r\n")
-        if await reader.readline():
-            assert await reader.readline() == b"BUILD?\n"
-            writer.write(f"BUILD {revision}\r\n".encode())
+        caps = b"\xca" * 301 + management(1, 1)
+        assert await reader.readexactly(len(caps)) == caps
+        writer.write(management(1, 4, bytes([1, 0, 5, 3])))
+        request = management(4, 1)
+        if first := await reader.read(1):
+            assert first + await reader.readexactly(len(request) - 1) == request
+            writer.write(management(4, 4, revision.encode()))
 
     async def test_custom_panel_stream_and_echo(self) -> None:
         async def app(
@@ -107,36 +117,46 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
                 assert await reader.readexactly(5) == b"\r\nJ\r\n"
                 assert not await reader.read()
                 return
-            assert first + await reader.readuntil(b"?\n") == b"A\nID?\n"
-            writer.write(b"TEKMAR-482-DEV\r\n")
-            assert await reader.readuntil(b"?\n") == b"A\nPANEL?\n"
-            writer.write(b"PANEL" + b" 00000001" * 2 + b" 00000000" * 5 + b"\r\n")
-            assert (
-                await reader.readline() + await reader.readline()
-                == b"A\nTX 0 12300001a5 b45e\n"
-            )
-            writer.write(b"OK TX\r\nF 0 00001000 0e2f A 12300001a5\r\nT 0 ACK\r\n")
-            assert await reader.readline() == b"\n"
+            caps = b"\xca" * 301 + management(1, 1)
+            assert first + await reader.readexactly(len(caps) - 1) == caps
+            writer.write(management(1, 4, bytes([1, 0, 5, 3])))
+            for method, request, reply in [
+                (
+                    7,
+                    management(7, 1),
+                    management(7, 4, struct.pack("<7I", 1, 1, 0, 0, 0, 0, 0)),
+                ),
+                (2, management(2, 0, bytes([1])), management(2, 3, bytes([1]))),
+                (9, management(9, 0, bytes([0])), management(9, 3, bytes([0]))),
+            ]:
+                assert await reader.readexactly(len(request)) == request, method
+                writer.write(reply)
+            body = bytes.fromhex("12300001a5")
+            send = serialize(Packet(1, bytes([1, 0]) + body))
+            assert await reader.readexactly(len(send)) == send
+            writer.write(serialize(Packet(1, bytes(6) + body)))
+            writer.write(serialize(Packet(1, bytes([2, 0, 0]))))
+            mode = management(2, 0, bytes(1))
+            assert await reader.readexactly(len(mode)) == mode
+            writer.write(management(2, 3, bytes(1)))
             for port in range(5):
-                counters = [0] * 13
-                if port == 0:
-                    counters[:5] = [28, 1, 0, 0, 1]
-                writer.write(
-                    (
-                        f"D {port}" + "".join(f" {n:08x}" for n in counters) + "\r\n"
-                    ).encode(),
-                )
-            writer.write(b"END 00000000\r\n")
+                req = management(3, 1, bytes([port]))
+                assert await reader.readexactly(len(req)) == req
+                writer.write(management(3, 4, struct.pack("<BII", port, 0, 1)))
 
         async with listen(app) as endpoint, open_gateway(endpoint) as client:
             assert isinstance(client, BridgeClient)
             assert (await client.panel()).inputs == 1
             async with client.stream(tx=(0, bytes.fromhex("12300001a5"))) as stream:
                 frame = await stream.read()
-                assert frame and frame.message_id == 0x123 and frame.decoded == {}
+                assert (
+                    isinstance(frame, NativeFrame)
+                    and frame.message_id == 0x123
+                    and frame.decoded == {}
+                )
                 assert await stream.read() is None
             assert stream.tx_result == (0, "ACK")
-            assert stream.diagnostics[0].ack == 1
+            assert stream.diagnostics[0].invalid_dropped == 1
             assert set(stream.diagnostics) == set(range(5))
 
     async def test_vendor_opt_in_never_probes_rom(self) -> None:
@@ -221,10 +241,9 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
     ) -> None:
         if running is not None:
             await self.app_revision(reader, writer, running)
-            assert (
-                await reader.readline() + await reader.readline() == b"A\nENTER-ISP\n"
-            )
-            writer.write(b"OK ISP\r\n")
+            request = management(5, 0)
+            assert await reader.readexactly(len(request)) == request
+            writer.write(management(5, 3))
         await self.sync(reader, writer, part=0x0402FF23)
 
     async def check_auto_program(self, running: str | None) -> None:
