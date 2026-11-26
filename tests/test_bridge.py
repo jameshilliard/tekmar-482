@@ -73,6 +73,9 @@ def management(method: int, service: int, body: bytes = b"") -> bytes:
     )
 
 
+RAW_CAPABILITIES = management(1, 4, bytes([2, 0, 5, 3]))
+
+
 class BridgeTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self) -> None:
         # Exercise two flash pages and real image validation without a binary fixture.
@@ -113,7 +116,7 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
     ) -> None:
         caps = b"\xca" * 301 + management(1, 1)
         assert await reader.readexactly(len(caps)) == caps
-        writer.write(management(1, 4, bytes([1, 0, 5, 3])))
+        writer.write(RAW_CAPABILITIES)
         request = management(4, 1)
         if first := await reader.read(1):
             assert first + await reader.readexactly(len(request) - 1) == request
@@ -132,7 +135,7 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
                 return
             caps = b"\xca" * 301 + management(1, 1)
             assert first + await reader.readexactly(len(caps) - 1) == caps
-            writer.write(management(1, 4, bytes([2, 0, 5, 3])))
+            writer.write(RAW_CAPABILITIES)
             for method, request, reply in [
                 (
                     7,
@@ -246,7 +249,7 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
             for request, reply in (
                 (
                     b"\xca" * 301 + management(1, 1),
-                    management(1, 4, bytes([1, 0, 5, 3])),
+                    RAW_CAPABILITIES,
                 ),
                 (management(2, 0, b"\x01"), management(2, 3, b"\x01")),
                 (management(9, 0, b"\0"), raw_frame + management(9, 3, b"\0")),
@@ -300,7 +303,7 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
                 return
             caps = management(1, 1)
             assert first + await reader.readexactly(len(caps) - 1) == caps
-            writer.write(management(1, 4, bytes([1, 0, 5, 3])))
+            writer.write(RAW_CAPABILITIES)
             for request, reply in (
                 (management(2, 0, b"\x01"), management(2, 3, b"\x01")),
                 (management(9, 0, b"\0"), management(9, 3, b"\0")),
@@ -346,7 +349,7 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
                 return
             caps = management(1, 1)
             assert first + await reader.readexactly(len(caps) - 1) == caps
-            writer.write(management(1, 4, bytes([1, 0, 5, 3])))
+            writer.write(RAW_CAPABILITIES)
             for cmd, reply in (
                 (management(2, 0, b"\x01"), management(2, 3, b"\x01")),
                 (management(9, 0, b"\x04"), management(9, 3, b"\x04")),
@@ -409,7 +412,7 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
                 return
             caps = management(1, 1)
             assert first + await reader.readexactly(len(caps) - 1) == caps
-            writer.write(management(1, 4, bytes([1, 0, 5, 3])))
+            writer.write(RAW_CAPABILITIES)
             steps = [
                 (management(2, 0, b"\x01"), management(2, 3, b"\x01")),
                 (management(9, 0, b"\0"), management(9, 3, b"\0")),
@@ -476,7 +479,7 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
                 return
             caps = management(1, 1)
             assert first + await reader.readexactly(len(caps) - 1) == caps
-            writer.write(management(1, 4, bytes([1, 0, 5, 3])))
+            writer.write(RAW_CAPABILITIES)
             mode = management(2, 0, b"\x01"), management(2, 3, b"\x01")
             mask = management(9, 0, b"\0"), management(9, 3, b"\0")
             steps = [mode, mask]
@@ -540,7 +543,7 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
                 return
             caps = management(1, 1)
             assert first + await reader.readexactly(len(caps) - 1) == caps
-            writer.write(management(1, 4, bytes([1, 0, 5, 3])))
+            writer.write(RAW_CAPABILITIES)
             request = serialize(Packet(1, bytes.fromhex("0103 1f600002 43a5")))
             response = serialize(
                 Packet(
@@ -624,7 +627,7 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
                 return
             caps = management(1, 1)
             assert first + await reader.readexactly(len(caps) - 1) == caps
-            writer.write(management(1, 4, bytes([1, 0, 5, 3])))
+            writer.write(RAW_CAPABILITIES)
             for command, response in (
                 (management(2, 0, b"\x01"), management(2, 3, b"\x01")),
                 (management(9, 0, b"\x12"), management(9, 3, b"\x12")),
@@ -640,7 +643,7 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
             for port in range(5):
                 query = management(3, 1, bytes([port]))
                 assert await reader.readexactly(len(query)) == query
-                writer.write(management(3, 4, bytes([port]) + bytes(8)))
+                writer.write(management(3, 4, bytes([port]) + bytes(16)))
 
         async with listen(app) as endpoint, asyncio.timeout(5):
             stdout = StringIO()
@@ -703,7 +706,7 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         stop = management(2, 0, b"\0"), management(2, 3, b"\0")
         ack = management(9, 0, b"\x08"), management(9, 3, b"\x08")
         stats = [
-            (management(3, 1, bytes([p])), management(3, 4, bytes([p]) + bytes(8)))
+            (management(3, 1, bytes([p])), management(3, 4, bytes([p]) + bytes(16)))
             for p in range(5)
         ]
 
@@ -727,9 +730,9 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
                     return
                 caps = management(1, 1)
                 assert first + await reader.readexactly(len(caps) - 1) == caps
-                writer.write(management(1, 4, bytes([1, 0, 5, 3])))
+                writer.write(RAW_CAPABILITIES)
                 steps = [
-                    (management(7, 1), management(7, 4, bytes(28))),
+                    (management(7, 1), management(7, 4, bytes(36))),
                     (management(4, 1), management(4, 4, b"1" * 40)),
                     mode,
                     (ack[0], ack[1] + rx_identity + rx_other + rx_fault + rx_group),
@@ -911,6 +914,24 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
                 async with open_gateway(endpoint):
                     self.fail("wrong MCU accepted")
 
+    async def test_retired_custom_wire_version_is_not_programmed(self) -> None:
+        async def app(
+            reader: asyncio.StreamReader,
+            writer: asyncio.StreamWriter,
+        ) -> None:
+            assert await reader.readexactly(6) == b"?\r\nJ\r\n"
+            probe = b"\xca" * 301 + management(1, 1)
+            assert await reader.readexactly(len(probe)) == probe
+            writer.write(management(1, 4, bytes([1, 0, 5, 7])))
+            assert not await reader.read()
+
+        async with listen(app) as endpoint:
+            with self.assertRaisesRegex(
+                ProtocolError,
+                "unsupported custom bridge wire version 1",
+            ):
+                await install_firmware(endpoint)
+
     async def test_unsolicited_report_is_not_an_isp_banner(self) -> None:
         report = serialize(Packet(6, bytes.fromhex("023701000001000a06")))
 
@@ -925,7 +946,7 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
                 return
             caps = b"\xca" * 301 + management(1, 1)
             assert first + await reader.readexactly(len(caps) - 1) == caps
-            writer.write(report + management(1, 4, bytes([1, 0, 5, 3])))
+            writer.write(report + RAW_CAPABILITIES)
             mode = management(2, 0, b"\0")
             assert await reader.readexactly(len(mode)) == mode
             writer.write(management(2, 3, b"\0"))

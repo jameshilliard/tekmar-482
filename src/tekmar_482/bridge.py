@@ -4,17 +4,22 @@ from __future__ import annotations
 
 import asyncio
 import re
-import struct
 from collections import deque
 from contextlib import asynccontextmanager, suppress
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
-from ._bridge_diagnostics import LAYOUTS
+from ._bridge_diagnostics import CAPTURE_COUNTERS, PANEL, PORT_DROPS
 from .client import Tekmar482Client
 from .constants import TN4_PORTS
 from .exceptions import ConnectionClosedError, ProtocolError, TekmarError
-from .management import BridgeFeature, BridgeMethod, BridgeMode, unpack_diagnostic
+from .management import (
+    BridgeCapabilities,
+    BridgeFeature,
+    BridgeMethod,
+    BridgeMode,
+    unpack_diagnostic,
+)
 from .packet import TYPE_TN4, TYPE_TRPC, Packet
 from .raw import PortDiagnostic, RawDispatcher
 from .tpck import TpckParser, serialize
@@ -28,7 +33,6 @@ if TYPE_CHECKING:
 
 _DEFAULT_BAUD = 9600
 _TICK_MASK = 0xFFFFFFFF
-_CAPABILITIES = struct.Struct("4B")
 
 
 @dataclass(frozen=True, slots=True)
@@ -51,7 +55,6 @@ class BridgeClient:
         self._packets: deque[Packet] = deque()
         self._busy = asyncio.Lock()
         self._features = BridgeFeature(0)
-        self._counters = LAYOUTS[1]
 
     @asynccontextmanager
     async def _transaction(self) -> AsyncIterator[None]:
@@ -129,16 +132,7 @@ class BridgeClient:
                     await self._wire.write(preamble)
                     await asyncio.sleep(0.08)
             data = await self._call(BridgeMethod.CAPABILITIES)
-            if (
-                len(data) != _CAPABILITIES.size
-                or data[0] not in LAYOUTS
-                or data[1] > 1
-                or data[2] != len(TN4_PORTS)
-            ):
-                msg = "invalid binary bridge capabilities"
-                raise ProtocolError(msg)
-            self._features = BridgeFeature(data[3])
-            self._counters = LAYOUTS[data[0]]
+            self._features = BridgeCapabilities.from_payload(data).features
 
     async def enter_update_mode(self) -> None:
         async with self._transaction():
@@ -162,7 +156,7 @@ class BridgeClient:
     async def panel(self) -> PanelState:
         async with self._transaction():
             boot, inputs, presses, changes, leds, pins, testing = unpack_diagnostic(
-                self._counters.panel,
+                PANEL,
                 await self._call(BridgeMethod.PANEL),
             )
             return PanelState(boot, inputs, presses, changes, leds, pins, bool(testing))
@@ -177,12 +171,12 @@ class BridgeClient:
             raise ValueError(msg)
         async with self._transaction():
             before = unpack_diagnostic(
-                self._counters.capture,
+                CAPTURE_COUNTERS,
                 await self._call(BridgeMethod.COUNTERS),
             )
             await asyncio.sleep(duration)
             after = unpack_diagnostic(
-                self._counters.capture,
+                CAPTURE_COUNTERS,
                 await self._call(BridgeMethod.COUNTERS),
             )
             seen = sum(1 << i for i in TN4_PORTS if before[2 + i] != after[2 + i])
@@ -280,7 +274,7 @@ class BridgeClient:
                 if diagnostics:
                     for p in TN4_PORTS:
                         port, valid, invalid = unpack_diagnostic(
-                            self._counters.drops,
+                            PORT_DROPS,
                             await self._call(BridgeMethod.STATS, bytes([p])),
                         )
                         if p != port:

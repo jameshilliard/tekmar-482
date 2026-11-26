@@ -185,8 +185,9 @@ outcome. Trace is not an alternate encoding for sending Raw requests.
 
 Custom bridge wire version 2 uses saturating 64-bit counters for capture
 and trace drops, edge counts and panel events. They reset at gateway boot,
-not on a mode change. The client also reads older version 1 diagnostics.
-Per-frame uptime and hardware timer readings are still 32-bit timestamps.
+not on a mode change. Older custom wire versions are rejected; only stock
+commands have a backward-compatibility guarantee. Per-frame uptime and
+hardware timer readings are still 32-bit timestamps.
 
 Custom Normal mode obtains missing fields from the device on its own port.
 A changed demand, setback or active room target can trigger a targeted
@@ -826,6 +827,9 @@ To test a local revision, run the bundled CLI directly from the sdist
 (tested with uv 0.11.20):
 `uvx --from 'dist/tekmar_482-0.1.0.tar.gz[serial]' tekmar-482 update --serial "$PORT"`.
 An already-current custom build is not rewritten.
+An application advertising an unsupported custom wire version is not
+programmed through that interface. Enter ROM ISP with its matching tool
+or the hardware Test button, then use the same `--from-rom` installer.
 
 ```bash
 # A custom dev image is running. This may replace an unversioned build.

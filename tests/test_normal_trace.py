@@ -75,18 +75,23 @@ class NormalTraceTests(unittest.IsolatedAsyncioTestCase):
             await anext(trace)
 
     async def test_refuses_stock_old_and_raw_without_changing_modes(self) -> None:
-        for caps in ("0400000000", "0401f04b5401000503", "0401f04b5401010507"):
+        for caps, reason in (
+            ("0400000000", "Normal trace requires"),
+            ("0401f04b5402000503", "Normal trace requires"),
+            ("0401f04b5402010507", "Normal trace requires"),
+            ("0401f04b5401000507", "unsupported custom bridge wire version"),
+        ):
             script = Script(("0101f04b54", caps))
             async with Tekmar482Client(script) as client:
-                with self.assertRaisesRegex(ProtocolError, "Normal trace requires"):
+                with self.assertRaisesRegex(ProtocolError, reason):
                     async with BridgeManagement(client).trace():
                         self.fail("unexpected trace")
             assert not script.rows
 
     async def test_owned_scope_restores_previous_mask_on_cancellation(self) -> None:
-        state = "040bf04b5402" + "00000000" * 5
+        state = "040bf04b5402" + "00" * 40
         script = Script(
-            ("0101f04b54", "0401f04b5401000507"),
+            ("0101f04b54", "0401f04b5402000507"),
             ("010bf04b54", state),
             ("000bf04b5411", "030bf04b5411"),
             ("000bf04b5402", "030bf04b5402"),
@@ -173,8 +178,8 @@ class NormalTraceTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_reconnect_does_not_restore_a_mask_to_the_new_gateway(self) -> None:
         script = Script(
-            ("0101f04b54", "0401f04b5401000507"),
-            ("010bf04b54", "040bf04b54" + "00" * 21),
+            ("0101f04b54", "0401f04b5402000507"),
+            ("010bf04b54", "040bf04b54" + "00" * 41),
             ("000bf04b5401", "030bf04b5401"),
         )
         async with Tekmar482Client(script) as client:
@@ -202,10 +207,10 @@ class NormalTraceTests(unittest.IsolatedAsyncioTestCase):
                     return
                 caps = management(1, 1)
                 assert first + await reader.readexactly(len(caps) - 1) == caps
-                caps_reply = management(1, 4, bytes.fromhex("01000507"))
+                caps_reply = management(1, 4, bytes.fromhex("02000507"))
                 writer.write(caps_reply)
-                before = bytes(1) + struct.pack("<5I", 0, 0, 0xFFFFFFFF, 0, 0)
-                after = bytes(1) + struct.pack("<5I", 0, 0, 1, 0, 0)
+                before = bytes(1) + struct.pack("<5Q", 0, 0, 0xFFFFFFFF, 0, 0)
+                after = bytes(1) + struct.pack("<5Q", 0, 0, 0x100000001, 0, 0)
                 rx = serialize(
                     Packet(
                         0xD0,

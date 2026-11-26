@@ -6,9 +6,9 @@ import re
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from enum import IntEnum, IntFlag
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Self
 
-from ._bridge_diagnostics import LAYOUTS
+from ._bridge_diagnostics import TRACE_STATE, WIRE_VERSION
 from .constants import TN4_PORTS
 from .exceptions import ProtocolError, TekmarError
 from .normal_trace import NormalTrace, NormalTraceState
@@ -18,7 +18,6 @@ if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Iterable
     from struct import Struct
 
-    from ._bridge_diagnostics import CounterLayout
     from .client import Tekmar482Client
 
 _CAPABILITY_BYTES = 4
@@ -64,6 +63,21 @@ class BridgeCapabilities:
     mode: BridgeMode
     ports: int
     features: BridgeFeature
+
+    @classmethod
+    def from_payload(cls, data: bytes) -> Self:
+        if len(data) == _CAPABILITY_BYTES:
+            version, mode, ports, flags = data
+            if mode in BridgeMode and ports == len(TN4_PORTS):
+                if version != WIRE_VERSION:
+                    msg = (
+                        f"unsupported custom bridge wire version {version}; "
+                        f"expected {WIRE_VERSION}"
+                    )
+                    raise ProtocolError(msg)
+                return cls(version, BridgeMode(mode), ports, BridgeFeature(flags))
+        msg = f"invalid binary bridge capabilities: {data.hex()}"
+        raise ProtocolError(msg)
 
 
 @dataclass(frozen=True, slots=True)
@@ -124,17 +138,7 @@ class BridgeManagement:
         reply = await self._exchange(TrpcCommand.request(BridgeMethod.CAPABILITIES))
         if reply.method_id == TrpcMethod.NULL_METHOD:
             return None
-        if len(reply.extra) == _CAPABILITY_BYTES:
-            version, mode, ports, flags = reply.extra
-            if version in LAYOUTS and mode in BridgeMode and ports:
-                return BridgeCapabilities(
-                    version,
-                    BridgeMode(mode),
-                    ports,
-                    BridgeFeature(flags),
-                )
-        msg = f"unsupported bridge capabilities: {reply.extra.hex()}"
-        raise ProtocolError(msg)
+        return BridgeCapabilities.from_payload(reply.extra)
 
     async def build_revision(self) -> str:
         reply = await self._exchange(TrpcCommand.request(BridgeMethod.BUILD))
@@ -146,20 +150,21 @@ class BridgeManagement:
     async def trace_state(self) -> NormalTraceState:
         """Read the active port mask and lifetime drop counts without enabling trace."""
         with self._session.connection_scope():
-            return await self._trace_state(await self._require_trace())
+            await self._require_trace()
+            return await self._trace_state()
 
-    async def _trace_state(self, layout: CounterLayout) -> NormalTraceState:
+    async def _trace_state(self) -> NormalTraceState:
         reply = await self._exchange(TrpcCommand.request(BridgeMethod.NORMAL_TRACE))
         if reply.method_id != BridgeMethod.NORMAL_TRACE:
             msg = "invalid Normal trace state"
             raise ProtocolError(msg)
-        mask, *counts = unpack_diagnostic(layout.trace, reply.extra)
+        mask, *counts = unpack_diagnostic(TRACE_STATE, reply.extra)
         if mask >= 1 << len(TN4_PORTS):
             msg = "invalid Normal trace port mask"
             raise ProtocolError(msg)
         return NormalTraceState(mask, tuple(counts))
 
-    async def _require_trace(self) -> CounterLayout:
+    async def _require_trace(self) -> None:
         caps = await self.capabilities()
         if (
             caps is None
@@ -168,14 +173,13 @@ class BridgeManagement:
         ):
             msg = "Normal trace requires capable custom firmware in Normal mode"
             raise ProtocolError(msg)
-        return LAYOUTS[caps.wire_version]
 
     async def stop_trace(self) -> NormalTraceState:
         """Disable an orphaned trace after a debugger disconnected."""
         with self._session.connection_scope():
-            layout = await self._require_trace()
+            await self._require_trace()
             await self._set_trace_mask(0)
-            return await self._trace_state(layout)
+            return await self._trace_state()
 
     async def _set_trace_mask(self, mask: int) -> None:
         data = bytes([mask])
@@ -209,13 +213,13 @@ class BridgeManagement:
             raise ValueError(msg)
         trace = NormalTrace(backlog)
         with self._session.connection_scope(), self._session.trace_packets(trace):
-            layout = await self._require_trace()
-            before = await self._trace_state(layout)
+            await self._require_trace()
+            before = await self._trace_state()
 
             async def restore() -> None:
                 if self._session.is_open and self._session.reader_error is None:
                     await self._set_trace_mask(before.port_mask)
-                    after = await self._trace_state(layout)
+                    after = await self._trace_state()
                     deltas = tuple(
                         b - a
                         for a, b in zip(
@@ -224,9 +228,7 @@ class BridgeManagement:
                             strict=True,
                         )
                     )
-                    if layout is LAYOUTS[1]:
-                        deltas = tuple(d & layout.maximum for d in deltas)
-                    elif any(d < 0 for d in deltas):
+                    if any(d < 0 for d in deltas):
                         msg = "lifetime trace drop count decreased during capture"
                         raise ProtocolError(msg)
                     trace.gateway_drops = deltas

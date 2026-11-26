@@ -27,7 +27,7 @@ from tekmar_482.cli import CliError, build_parser, run
 from tekmar_482.raw import RawDispatcher
 from tekmar_482.tpck import serialize
 
-from .test_bridge import listen, management
+from .test_bridge import RAW_CAPABILITIES, listen, management
 
 _HOST = NativeAddress(0, 0)
 _PEER = NativeAddress(0x13, 7)
@@ -224,7 +224,7 @@ class NativeSceneTests(unittest.IsolatedAsyncioTestCase):
                 return
             caps = management(1, 1)
             assert first + await reader.readexactly(len(caps) - 1) == caps
-            writer.write(management(1, 4, bytes([1, 0, 5, 3])))
+            writer.write(RAW_CAPABILITIES)
             for method, data in ((2, b"\1"), (9, b"\0")):
                 command = management(method, 0, data)
                 assert await reader.readexactly(len(command)) == command
