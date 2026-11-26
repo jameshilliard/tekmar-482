@@ -16,7 +16,7 @@ from .management import BridgeFeature, BridgeMethod, BridgeMode
 from .native import NativeFrame, NativeMessage
 from .packet import TYPE_TN4, TYPE_TRPC, Packet
 from .tpck import TpckParser, serialize
-from .trpc import TrpcService
+from .trpc import TrpcMethod, TrpcService
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Callable
@@ -310,7 +310,16 @@ class BridgeClient:
         async with self._transaction():
             await self._mode(BridgeMode.NORMAL)
             transport = _NormalTransport(self, self._wire)
-            async with Tekmar482Client(transport) as client:
+            async with Tekmar482Client(
+                transport,
+                readback_methods=frozenset(
+                    {
+                        TrpcMethod.MODE_SETTING,
+                        TrpcMethod.HEAT_SETPOINT,
+                        TrpcMethod.COOL_SETPOINT,
+                    },
+                ),
+            ) as client:
                 yield client
 
     @asynccontextmanager

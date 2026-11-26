@@ -154,8 +154,10 @@ class Tekmar482Session:
         *,
         max_message_backlog: int = 512,
         max_packet_backlog: int = 512,
+        readback_methods: frozenset[int] = frozenset(),
     ) -> None:
         self.transport = transport
+        self.readback_methods = readback_methods
         self.max_message_backlog = max_message_backlog
         self.max_packet_backlog = max_packet_backlog
         self._condition = asyncio.Condition()
@@ -400,7 +402,7 @@ class Tekmar482Session:
     async def write_message(self, message: TrpcPacket) -> None:
         """Write one tRPC message."""
         generation = self._generation
-        selector = DeviceReplySelector.for_message(message)
+        selector = self._message_selector(message)
         with self._write_turn(selector) as turn:
             while True:
                 async with self._transaction_lock:
@@ -634,7 +636,10 @@ class Tekmar482Session:
         Matched Report messages are still published
         to report subscribers so live state consumers see the same update.
         """
-        match = response_match or ResponseMatch.for_command(command)
+        match = response_match or ResponseMatch.for_command(
+            command,
+            readback=command.method in self.readback_methods,
+        )
         return await self._queue_update(command, coalesce_key, match, timeout)
 
     async def _queue_update(
@@ -652,7 +657,7 @@ class Tekmar482Session:
         self._check_generation(generation)
         self._raise_if_unavailable()
         with self._write_turn(
-            DeviceReplySelector.for_command(command),
+            self._command_selector(command),
         ) as turn:
             if (
                 previous := self._coalesced_updates.pop(coalesce_key, None)
@@ -920,11 +925,14 @@ class Tekmar482Session:
         timeout: float | None = 5,
         on_sending: Callable[[], None] | None = None,
     ) -> TrpcPacket | None:
-        match = response_match or ResponseMatch.for_command(command)
+        match = response_match or ResponseMatch.for_command(
+            command,
+            readback=command.method in self.readback_methods,
+        )
         generation = self._generation
         try:
             with self._write_turn(
-                DeviceReplySelector.for_command(command),
+                self._command_selector(command),
             ) as turn:
                 return await self._ordered_exchange(
                     command,
@@ -999,7 +1007,7 @@ class Tekmar482Session:
         )
         async with self._condition:
             self._pending.append(pending)
-            if (selector := DeviceReplySelector.for_command(command)) is not None:
+            if (selector := self._command_selector(command)) is not None:
                 self._tracked_replies[future] = selector
 
         try:
@@ -1033,9 +1041,21 @@ class Tekmar482Session:
             on_sending()
         await self._write_message_unlocked(
             message,
-            DeviceReplySelector.for_message(message) if unconfirmed else None,
+            self._message_selector(message) if unconfirmed else None,
         )
         return message
+
+    def _command_selector(self, command: TrpcCommand) -> DeviceReplySelector | None:
+        return DeviceReplySelector.for_command(
+            command,
+            readback=command.method in self.readback_methods,
+        )
+
+    def _message_selector(self, message: TrpcPacket) -> DeviceReplySelector | None:
+        return DeviceReplySelector.for_message(
+            message,
+            readback=message.method_id in self.readback_methods,
+        )
 
     async def _remove_pending(self, pending: _PendingRequest) -> None:
         async with self._condition:

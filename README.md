@@ -79,6 +79,13 @@ tekmar-482 request CurrentTemperature address=1001 --tcp 192.0.2.10:3001 --json
 Use `client.reports()` inside `bridge.normal()` for unsolicited temperature
 and demand updates; enable them with `await client.set_reporting_state(enabled=True)`.
 
+In custom Normal mode the mode and heat/cool setpoint setters wait for
+device readback. Inspect the returned `mode` or `setpoint`: the device can
+keep its previous value or return `0xff` (unavailable). A timeout does not
+prove the write failed; read before retrying. For a quiet device use
+`timeout=12` to allow the gateway's ten-second transaction to finish.
+Stock firmware uses its original write-echo matching.
+
 For an addressed native read, use the physical port and wire address
 from a frame observed on that line. These are not tRPC decimal addresses:
 

@@ -113,9 +113,14 @@ def _require_reply(reply: TrpcPacket | None, operation: str) -> TrpcPacket:
 class Tekmar482Client:
     """Async client for tRPC messages carried by tekmar packets."""
 
-    def __init__(self, transport: PacketTransport) -> None:
+    def __init__(
+        self,
+        transport: PacketTransport,
+        *,
+        readback_methods: frozenset[int] = frozenset(),
+    ) -> None:
         self.transport = transport
-        self.session = Tekmar482Session(transport)
+        self.session = Tekmar482Session(transport, readback_methods=readback_methods)
 
     @classmethod
     def serial(
@@ -254,6 +259,7 @@ class Tekmar482Client:
             coalesce_key=coalesce_key,
             response_match=ResponseMatch.for_command(
                 command,
+                readback=method in self.session.readback_methods,
                 response_method=response_method,
                 response_services=response_services,
                 address=match_address,
@@ -399,6 +405,7 @@ class Tekmar482Client:
             command,
             response_match=ResponseMatch.for_command(
                 command,
+                readback=method in self.session.readback_methods,
                 response_method=response_method,
                 response_services=response_services,
                 address=match_address,
@@ -1047,12 +1054,11 @@ class Tekmar482Client:
             msg = f"unsupported device mode: {mode_value}"
             raise ValueError(msg)
         payload = ModeSettingFields(address, mode_value)
-        if confirm:
+        if confirm or TrpcMethod.MODE_SETTING in self.session.readback_methods:
             return await self.coalesced_update_response(
                 TrpcMethod.MODE_SETTING,
                 coalesce_key=payload.coalesce_key(TrpcMethod.MODE_SETTING),
                 match_address=payload.address,
-                match_fields=payload,
                 timeout=timeout,
                 fields=payload,
             )
@@ -1073,7 +1079,6 @@ class Tekmar482Client:
         return await self.update_response(
             method,
             match_address=payload.address,
-            match_fields=payload,
             timeout=timeout,
             fields=payload,
         )
@@ -1086,12 +1091,11 @@ class Tekmar482Client:
         confirm: bool,
         timeout: float | None,
     ) -> TrpcPacket | None:
-        if confirm:
+        if confirm or method in self.session.readback_methods:
             return await self.coalesced_update_response(
                 method,
                 coalesce_key=payload.coalesce_key(method),
                 match_address=payload.address,
-                match_fields=payload,
                 timeout=timeout,
                 fields=payload,
             )

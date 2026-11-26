@@ -207,6 +207,52 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         ):
             assert isinstance(client, Tekmar482Client)
 
+    async def test_normal_setting_updates_return_device_readback(self) -> None:
+        def packet(service: int, method: int, body: bytes) -> bytes:
+            return serialize(Packet(6, struct.pack("<BI", service, method) + body))
+
+        async def app(
+            reader: asyncio.StreamReader,
+            writer: asyncio.StreamWriter,
+        ) -> None:
+            mode = management(2, 0, bytes(1))
+            assert await reader.readexactly(len(mode)) == mode
+            writer.write(management(2, 3, bytes(1)))
+            for method, request, actual in [
+                (0x127, bytes.fromhex("010002"), bytes.fromhex("010001")),
+                (0x13F, bytes.fromhex("01000762"), bytes.fromhex("01000360")),
+                (0x147, bytes.fromhex("01000662"), bytes.fromhex("010006ff")),
+            ]:
+                update = packet(0, method, request)
+                assert await reader.readexactly(len(update)) == update
+                writer.write(packet(2, method, request))
+                writer.write(packet(3, method, b"\x02" + actual[1:]))
+                writer.write(packet(3, method, actual))
+                await writer.drain()
+            await reader.read()
+
+        async with (
+            listen(app) as endpoint,
+            endpoint.connect() as wire,
+            BridgeClient(wire).normal() as client,
+        ):
+            mode = await client.set_mode(1, 2, timeout=1)
+            assert mode is not None and mode.require("mode") == 1
+            heat = await client.set_heat_setpoint(1, 98, timeout=1)
+            assert (
+                heat is not None
+                and heat.require("setback") == 3
+                and heat.require("setpoint") == 96
+            )
+            cool = await client.set_latest_cool_setpoint(
+                1,
+                98,
+                setback=6,
+                confirm=True,
+                timeout=1,
+            )
+            assert cool is not None and cool.require("setpoint") == 255
+
     async def test_wrong_rom_id_fails_before_unlock(self) -> None:
         async def rom(
             reader: asyncio.StreamReader,

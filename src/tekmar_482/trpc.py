@@ -644,32 +644,37 @@ class DeviceReplySelector:
     echo: tuple[str, int] | None
 
     @classmethod
-    def for_command(cls, command: TrpcCommand) -> Self | None:
+    def for_command(
+        cls,
+        command: TrpcCommand,
+        *,
+        readback: bool = False,
+    ) -> Self | None:
         if (
             command.method not in _SETBACK_INDEXED_METHODS
             and command.method != TrpcMethod.MODE_SETTING
         ):
             return None
-        return cls.for_message(command.to_message())
+        return cls.for_message(command.to_message(), readback=readback)
 
     @classmethod
-    def for_message(cls, message: TrpcPacket) -> Self | None:
+    def for_message(cls, message: TrpcPacket, *, readback: bool = False) -> Self | None:
         service = response_service_for(message.service_id)
-        if (
-            message.method is TrpcMethod.MODE_SETTING
-            and service is TrpcService.RESPONSE_UPDATE
+        if message.method is TrpcMethod.MODE_SETTING and (
+            service is TrpcService.RESPONSE_UPDATE
+            or (readback and service is TrpcService.RESPONSE_REQUEST)
         ):
             return cls(
                 service,
                 message.method_id,
                 message.body.get("address", 0),
                 None,
-                ("mode", message.body.get("mode", 0)),
+                None if readback else ("mode", message.body.get("mode", 0)),
             )
         if service is None or message.method_id not in _SETBACK_INDEXED_METHODS:
             return None
         echo = None
-        if service is TrpcService.RESPONSE_UPDATE:
+        if service is TrpcService.RESPONSE_UPDATE and not readback:
             key = _echo_field(message.method_id)
             echo = (key, message.body.get(key, 0))
         return cls(
@@ -789,6 +794,7 @@ class ResponseMatch:
         *,
         response_method: TrpcMethodId | None = None,
         response_services: Iterable[TrpcServiceId] | None = None,
+        readback: bool = False,
         address: int | None = None,
         fields: TrpcFieldsInput | None = None,
     ) -> Self:
@@ -822,11 +828,12 @@ class ResponseMatch:
             if (
                 method == TrpcMethod.MODE_SETTING
                 and command.service == TrpcService.UPDATE
+                and not readback
             ):
                 predicates.setdefault("mode", sent.get("mode", 0))
             if method in _SETBACK_INDEXED_METHODS:
                 predicates.setdefault("setback", sent.get("setback", 0))
-                if command.service == TrpcService.UPDATE:
+                if command.service == TrpcService.UPDATE and not readback:
                     key = _echo_field(method)
                     predicates.setdefault(key, sent.get(key, 0))
             fields = predicates
