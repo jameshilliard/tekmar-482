@@ -10,7 +10,9 @@ from ._native_payloads.climate import (
     AIR_MASTER,
     AIR_MEMBER,
     MODE_BLOCKS,
+    AirGroupTargets,
     AirStatus,
+    AirTarget,
     ThermostatConfiguration,
 )
 from ._native_payloads.codec import Reader, ShortPayload
@@ -91,6 +93,7 @@ class NativeClimate:
     identity: NativeIdentity
     setup: ThermostatConfiguration
     air: AirStatus | None
+    active_air_target: AirTarget | None
     sensors: ThermostatSensors
     adjustments: ThermostatAdjustments
     air_timestamp_ms: int | None = field(compare=False)
@@ -101,6 +104,7 @@ class _Peer:
     identity: NativeIdentity | None = None
     blocks: dict[BlockKey, NativeFrame] = field(default_factory=dict)
     air: AirStatus | None = None
+    active_air_target: AirTarget | None = None
     air_frame: NativeFrame | None = None
     snow: SnowmeltChannels = field(default_factory=SnowmeltChannels)
     calendar: ScheduleBook = field(default_factory=ScheduleBook)
@@ -128,6 +132,7 @@ class _Peer:
             identity,
             ThermostatConfiguration.from_blocks(product, identity.z_number, fields),
             self.air,
+            self.active_air_target,
             sensors,
             self.outputs.snapshot(product, sensors, fields),
             self.air_frame.timestamp_ms if self.air_frame else None,
@@ -143,6 +148,7 @@ class NativeState:
         self._moves: dict[NativePath, NativePath] = {}
         self._reidentify: set[NativePath] = set()
         self._water = WaterMonitor()
+        self._air_groups = AirGroupTargets()
 
     @property
     def dropped(self) -> int:
@@ -456,6 +462,7 @@ class NativeState:
             self._reidentify.update(self._selected or changed)
             self._peers.clear()
             self._moves.clear()
+            self._air_groups = AirGroupTargets()
             self._water.observe(record)
             return changed
         if not isinstance(record, NativeFrame):
@@ -469,6 +476,8 @@ class NativeState:
             if moved:
                 self._water.observe(record)
             return moved
+        if record.message_id in (AIR_MASTER, AIR_MEMBER):
+            return self._observe_air(path, record)
         if self._selected is not None and path not in self._selected:
             return ()
         changed_water = self._water.observe(record)
@@ -511,14 +520,28 @@ class NativeState:
                 return ()
             snow = self._peers.setdefault(path, _Peer()).snow
             return (path,) if snow.update(record, address, report) else ()
-        if record.message_id not in (AIR_MASTER, AIR_MEMBER):
-            return (path,) if changed_water else ()
+        return (path,) if changed_water else ()
+
+    def _observe_air(
+        self,
+        path: NativePath,
+        record: NativeFrame,
+    ) -> tuple[NativePath, ...]:
         try:
-            air = AirStatus.read(Reader(data), master=record.message_id == AIR_MASTER)
+            air = AirStatus.read(
+                Reader(record.message.payload),
+                master=record.message_id == AIR_MASTER,
+            )
         except ShortPayload:
             return ()
+        target = self._air_groups.observe(air)
+        # Unselected masters still supply the group code, not a public peer.
+        if self._selected is not None and path not in self._selected:
+            return ()
         peer = self._peers.setdefault(path, _Peer())
-        peer.outputs.air(air, peer.blocks)
-        changed_air = peer.air != air
+        if target is not None:
+            peer.outputs.air(target, peer.blocks)
+        changed_air = peer.air != air or peer.active_air_target != target
         peer.air, peer.air_frame = air, record
+        peer.active_air_target = target
         return (path,) if changed_air else ()

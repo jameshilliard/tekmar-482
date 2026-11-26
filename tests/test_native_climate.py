@@ -5,6 +5,7 @@ import unittest
 from typing import TYPE_CHECKING
 
 from tekmar_482 import (
+    AirTarget,
     CaptureGap,
     ClimateChange,
     NativeAddress,
@@ -15,6 +16,7 @@ from tekmar_482 import (
     NativeWriteStatus,
     Packet,
     ThermostatMode,
+    ThermostatTarget,
     watch_climate,
 )
 from tekmar_482.cli import build_parser
@@ -46,6 +48,38 @@ def update(mode: int, path: NativePath = _PATH) -> NativeFrame:
 
 
 class StateTests(unittest.TestCase):
+    def test_active_target_uses_unselected_master_without_adopting_its_path(
+        self,
+    ) -> None:
+        state = NativeState([_PATH])
+        other = NativePath((_PATH.port + 1) % 5, _PATH.subnet, _PATH.node)
+        state.observe(identity())
+        state.observe(air(3))
+        (initial,) = state.thermostats
+        assert initial.active_air_target == AirTarget(
+            ThermostatTarget.HEAT,
+            0,
+            45,
+        )
+        stored = block(5, bytes.fromhex("1f 10 20 30 40 50"))
+        state.observe(stored)
+        assert not state.observe(frame(0x377, bytes([0x21]) + bytes(12), other))
+        assert state.paths == (_PATH,)
+        assert state.observe(air(3)) == (_PATH,)  # Same message, now inhibited.
+        assert state.thermostats[0].active_air_target is None
+        assert not state.observe(air(3))
+        state.observe(frame(0x36F, bytes.fromhex("01 03 30 0006 00 0000")))
+        assert state.block(_PATH, 5) == stored
+        state.observe(CaptureGap(1))
+        state.observe(identity())
+        state.observe(air(3))
+        assert climate_fields(state.thermostats[0])["active_air_target"] == {
+            "kind": "heat",
+            "setback": 0,
+            "raw": 45,
+            "celsius": 22.5,
+        }
+
     def test_evidence_not_echoes_or_demand(self) -> None:
         state = NativeState()
         assert state.observe(air(3)) == (_PATH,)

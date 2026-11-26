@@ -4,6 +4,7 @@ from ._native_payloads import SnowmeltBlock
 from ._native_payloads.climate import (
     AirReading,
     AirStatus,
+    AirTarget,
     ThermostatConfiguration,
     ThermostatMode,
 )
@@ -388,6 +389,7 @@ __all__ = [
     "AddressSetbackPayload",
     "AirReading",
     "AirStatus",
+    "AirTarget",
     "AvailableInfo",
     "AvailableRuntime",
     "BoilerChillerOutput",

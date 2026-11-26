@@ -157,6 +157,7 @@ def water_fields(source: WaterSource) -> dict[str, object]:
 
 def climate_fields(device: NativeClimate) -> dict[str, object]:
     setup = device.setup
+    target = device.active_air_target
     return {
         **asdict(device.path),
         "model": setup.product.model,
@@ -175,6 +176,14 @@ def climate_fields(device: NativeClimate) -> dict[str, object]:
         "enabled_heat_pumps": setup.enabled_heat_pumps,
         "air_timestamp_ms": device.air_timestamp_ms,
         "air": device.air.fields() if device.air is not None else None,
+        "active_air_target": {
+            "kind": target.kind.name.lower(),
+            "setback": target.setback,
+            "raw": target.raw,
+            "celsius": target.celsius,
+        }
+        if target is not None
+        else None,
         "adjustments": adjustment_fields(device.adjustments),
     }
 

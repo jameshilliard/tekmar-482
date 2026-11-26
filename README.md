@@ -573,6 +573,12 @@ reads and output.
 
 `state.climate(path).adjustments` separates stored heat, cool, floor, fan,
 humidify and dehumidify tables from live air, fan/duct, slab and RH reports.
+`NativeClimate.active_air_target` is the target supplied by the latest
+eligible master/member status: heat or cool, setback selector, raw byte and
+Celsius. It is `None` when that frame supplies no eligible target, and
+`celsius` is `None` for an explicit FF. It does not overwrite a stored
+schedule slot. `air` preserves the full report, including inactive channels.
+
 Read a stored slot with `adjustments.table(ThermostatTarget.HEAT)`, then
 `table.value(TargetSlot.WAKE)` (Celsius or percent) or `table.raw(...)`.
 A missing table is not a table of zeros. The floor table can report a maximum;

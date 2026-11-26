@@ -6,6 +6,7 @@ from enum import IntEnum
 
 from .codec import SETBACK, Fields, Reader, fahrenheit, temp
 from .products import NativeProduct
+from .thermostat import ThermostatTarget
 
 AIR_MEMBER = 0x36f
 AIR_MASTER = 0x377
@@ -200,3 +201,40 @@ class AirStatus:
         for i, name in enumerate(("heat1", "heat2", "cool1", "cool2")):
             fields[name + "_status"] = self.outputs >> (i * 2) & 3
         return fields
+
+
+@dataclass(frozen=True, slots=True)
+class AirTarget:
+    """Operating target in this report, not a stored five-slot adjustment."""
+    kind: ThermostatTarget
+    setback: int
+    raw: int
+
+    @property
+    def celsius(self) -> float | None:
+        return None if self.raw == 255 else self.raw / 2
+
+
+class AirGroupTargets:
+    """J1196J shares the last master code for groups 0..16 across physical ports."""
+
+    def __init__(self) -> None:
+        self._inhibit = bytearray(17)
+
+    def observe(self, status: AirStatus) -> AirTarget | None:
+        heat, cool = status.heat, status.cool
+        gate = 0
+        if status.group < len(self._inhibit):
+            if status.cycle is not None:
+                self._inhibit[status.group] = (status.group_flags >> 5) & 3
+            gate = self._inhibit[status.group]
+        if heat and heat.enabled and (not cool or not cool.enabled or heat.calling):
+            kind, chosen, denied = ThermostatTarget.HEAT, heat, 1
+        elif cool and cool.enabled and (not heat or not heat.enabled or cool.calling):
+            kind, chosen, denied = ThermostatTarget.COOL, cool, 2
+        else:
+            return None
+        if gate == denied or chosen.flags & 0xc0 or chosen.target_raw == 0:
+            return None
+        # The master always supplies the selector in the heat-side flags.
+        return AirTarget(kind, heat.setback if heat else chosen.setback, chosen.target_raw)

@@ -26,7 +26,7 @@ from .native import require_enum
 if TYPE_CHECKING:
     from collections.abc import Mapping
 
-    from ._native_payloads.climate import AirStatus
+    from ._native_payloads.climate import AirTarget
     from ._native_payloads.products import NativeProduct
     from .native import NativeFrame
 
@@ -184,13 +184,8 @@ class AdjustmentState:
         if old != raw and (old is not None or (target, None) not in blocks):
             self._expire(target, blocks)
 
-    def air(self, reading: AirStatus, blocks: _Blocks) -> None:
-        for kind, side in (
-            (ThermostatTarget.HEAT, reading.heat),
-            (ThermostatTarget.COOL, reading.cool),
-        ):
-            if side is not None:
-                self._target_hint(kind, side.setback, side.target_raw, blocks)
+    def air(self, target: AirTarget, blocks: _Blocks) -> None:
+        self._target_hint(target.kind, target.setback, target.raw, blocks)
 
     def observe(
         self,
