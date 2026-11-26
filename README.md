@@ -186,6 +186,13 @@ connection. This observer does not enable tracing or capture ROM ISP bytes.
 `tekmar_482.raw.decode_raw_packet(packet)` decodes a gateway-to-host Raw
 record without taking ownership of the stream.
 
+If the gateway advertises `BridgeFeature.NORMAL_IDENTITY`, use
+`await BridgeManagement(client).request_identity(native_path)` while
+tracing that port in Normal mode. It queues only an addressed read of
+native identification block 00. Match the actual port, subnet and node of
+the resulting report. A successful request or link ACK does not confirm
+a model, and a node without a response remains unidentified.
+
 Raw and Normal trace carry the same native tN4 body inside TPCK. Their
 envelopes differ: Raw type `0x01` carries bridge operations; trace type
 `0xD0` identifies Normal RX or a gateway TX attempt with its origin and

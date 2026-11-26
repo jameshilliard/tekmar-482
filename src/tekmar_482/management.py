@@ -21,6 +21,7 @@ if TYPE_CHECKING:
 
     from ._bridge_diagnostics import ErrorReason, ErrorSource
     from .client import Tekmar482Client
+    from .native_state import NativePath
 
 _CAPABILITY_BYTES = 4
 
@@ -44,6 +45,7 @@ class BridgeFeature(IntFlag):
     ROM_UPDATE = 2
     NORMAL_TRACE = 4
     ERROR_REPORTING = 8
+    NORMAL_IDENTITY = 16
 
 
 class BridgeMethod(IntEnum):
@@ -59,6 +61,7 @@ class BridgeMethod(IntEnum):
     COUNTERS = 0x544BF00A
     NORMAL_TRACE = 0x544BF00B
     ERROR_REPORTING = ERROR_REPORTING_METHOD
+    NORMAL_IDENTITY = 0x544BF00D
 
 
 @dataclass(frozen=True, slots=True)
@@ -266,6 +269,20 @@ class BridgeManagement(_Management):
         with self._session.connection_scope():
             await self._require_trace()
             return await self._trace_state()
+
+    async def request_identity(self, path: NativePath) -> None:
+        """Queue a block 00 read. Only the native peer's report identifies it."""
+        body = bytes((path.port, path.subnet, path.address.block_node))
+        reply = await self._exchange(
+            _ExtensionCommand(
+                TrpcService.REQUEST,
+                BridgeMethod.NORMAL_IDENTITY,
+                payload=body,
+            ),
+        )
+        if reply.method_id != BridgeMethod.NORMAL_IDENTITY or reply.extra != body:
+            msg = "gateway did not accept the targeted identity read"
+            raise ProtocolError(msg)
 
     async def _trace_state(self) -> NormalTraceState:
         reply = await self._exchange(TrpcCommand.request(BridgeMethod.NORMAL_TRACE))

@@ -7,6 +7,7 @@ from tekmar_482 import (
     BridgeFeature,
     BridgeManagement,
     BridgeMode,
+    NativePath,
     NullTransport,
     ProtocolError,
     Tekmar482Client,
@@ -27,6 +28,25 @@ class Script(NullTransport):
 
 
 class ManagementTest(unittest.IsolatedAsyncioTestCase):
+    async def test_normal_identity_never_sets_or_changes_mode(self) -> None:
+        target = NativePath(2, 0x42, 31)
+        request = "010df04b5402421f"
+        script = Script(
+            (request, "040df04b5402421f"),
+            (request, "0406f04b540df04b5401"),
+            (request, "040df04b5402421e"),
+        )
+        async with Tekmar482Client(script) as client:
+            manager = BridgeManagement(client)
+            with self.assertRaises(ValueError):
+                await manager.request_identity(NativePath(2, 0x42, 0))
+            await manager.request_identity(target)
+            with self.assertRaisesRegex(ProtocolError, "busy"):
+                await manager.request_identity(target)
+            with self.assertRaisesRegex(ProtocolError, "did not accept"):
+                await manager.request_identity(target)
+        assert not script.rows
+
     async def test_timeout_is_not_stock_identification(self) -> None:
         async with Tekmar482Client(Script()) as client:
             with patch.object(client.session, "request_response", return_value=None):
