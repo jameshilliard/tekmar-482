@@ -5,7 +5,6 @@ from .bridge import (
     BridgeClient,
     BridgeStream,
     InvalidCapture,
-    NativeFrame,
     PanelState,
     PortDiagnostic,
 )
@@ -85,6 +84,13 @@ from .models import (
     ThermostatData,
     ThermostatRuntime,
     setback_from_value,
+)
+from .native import (
+    NativeAddress,
+    NativeFrame,
+    NativeMessage,
+    ScheduleEvent,
+    WeeklyEvent,
 )
 from .packet import (
     TYPE_DISPLAY,
@@ -235,7 +241,9 @@ __all__ = [
     "MessageApplyResult",
     "MethodSpec",
     "ModeSettingFields",
+    "NativeAddress",
     "NativeFrame",
+    "NativeMessage",
     "NullTransport",
     "Packet",
     "PacketTransport",
@@ -246,6 +254,7 @@ __all__ = [
     "ReportSubscription",
     "ReportingStateFields",
     "ResponseMatch",
+    "ScheduleEvent",
     "SerialxTpckTransport",
     "SetbackPercentFields",
     "SetbackSetpointFields",
@@ -281,6 +290,7 @@ __all__ = [
     "UnknownFieldError",
     "UnknownMethodError",
     "UnknownServiceError",
+    "WeeklyEvent",
     "apply_message",
     "celsius_to_dege",
     "celsius_to_degh",

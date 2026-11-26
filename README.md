@@ -56,6 +56,49 @@ passive: a quiet device will not appear during a short scan. See the firmware's
 [frame catalog](https://github.com/jameshilliard/tekmar-482-firmware/blob/master/docs/tn4-frames.md)
 and [binary UART protocol](https://github.com/jameshilliard/tekmar-482-firmware/blob/master/docs/tpck-bridge.md).
 
+For an addressed native read, use the physical port and wire address
+from a frame observed on that line. These are not tRPC decimal addresses:
+
+```python
+from tekmar_482 import NativeAddress, NativeMessage
+
+source = NativeAddress(0, 0)  # Host-supplied gateway address.
+request = NativeMessage.request_block(
+    0x10, source=source, target=frame.message.source,
+)
+await stream.submit(frame.port, request)
+```
+
+`submit` transmits once; it does not wait for a reply from the device.
+Continue reading the stream for both the gateway transmit result and a
+BlockReport from the target on the requested port, with the requested block
+ID (and secondary ID for an indexed request). Do not submit another send
+on that port until its terminal result arrives. Other ports and messages
+remain independent.
+
+For a matched, complete weekly event report:
+
+```python
+from calendar import Day
+from datetime import time
+
+from tekmar_482 import WeeklyEvent
+
+week = WeeklyEvent.from_frame(report)
+print(week.event.name, week.time_on(Day.MONDAY))
+change = week.with_time(Day.MONDAY, time(6, 30))
+update = change.update(source)  # Construct only; nothing is sent here.
+readback = change.request(source)
+```
+
+Each block is one event across seven days, not seven complete schedules.
+Use `None` for a disabled event. Edits preserve the other day bytes and
+the indexed schedule selector. Sparse or extended reports are available
+through `frame.decoded` but cannot be used to construct a whole-week edit.
+After an intentional write, read the same block back and compare it with
+the intended change. Neither the local transmit echo nor a link ACK
+confirms the setting.
+
 ### Installation and updates
 
 Only the **source distribution (sdist)** is released. Its build compiles

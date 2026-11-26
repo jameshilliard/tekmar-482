@@ -10,9 +10,9 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
-from ._native_payloads import decode_payload
 from .exceptions import ConnectionClosedError, ProtocolError
 from .management import BridgeFeature, BridgeMethod, BridgeMode
+from .native import NativeFrame, NativeMessage
 from .packet import TYPE_TN4, TYPE_TRPC, Packet
 from .tpck import TpckParser, serialize
 from .trpc import TrpcService
@@ -36,29 +36,6 @@ _CAPABILITIES = struct.Struct("4B")
 _PANEL = struct.Struct("<7I")
 _COUNTERS = struct.Struct("<12I")
 _DROPS = struct.Struct("<BII")
-
-
-@dataclass(frozen=True, slots=True)
-class NativeFrame:
-    port: int
-    timestamp_ms: int
-    body: bytes
-
-    @property
-    def message_id(self) -> int:
-        return (int.from_bytes(self.body[:_HEADER]) >> 20) & 1023
-
-    @property
-    def subnet(self) -> int:
-        return (int.from_bytes(self.body[:_HEADER]) >> 12) & 255
-
-    @property
-    def node(self) -> int:
-        return (int.from_bytes(self.body[:_HEADER]) >> 6) & 63
-
-    @property
-    def decoded(self) -> dict[str, str | int | float]:
-        return decode_payload(self.message_id, self.body[_HEADER:])
 
 
 @dataclass(frozen=True, slots=True)
@@ -106,7 +83,9 @@ class BridgeStream:
     tx_result: tuple[int, str] | None = None
     _closed: bool = False
 
-    async def submit(self, port: int, body: bytes) -> None:
+    async def submit(self, port: int, body: bytes | NativeMessage) -> None:
+        if isinstance(body, NativeMessage):
+            body = body.to_bytes()
         if self._closed or port in self._pending:
             msg = f"raw session closed or send already in progress on port {port}"
             raise ProtocolError(msg)
