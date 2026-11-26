@@ -1,6 +1,12 @@
 """Async Python client for the tekmar 482 gateway."""
 
 from ._native_payloads import SnowmeltBlock
+from ._native_payloads.climate import (
+    AirReading,
+    AirStatus,
+    ThermostatConfiguration,
+    ThermostatMode,
+)
 from ._native_payloads.line import (
     ClockReport,
     GroupReport,
@@ -133,11 +139,11 @@ from .native import (
 from .native_discovery import (
     NativeDevice,
     NativeDiscovery,
-    NativeIdentity,
     NativeInventory,
     NativeProbe,
     discover_native,
 )
+from .native_identity import NativeIdentity
 from .native_line import (
     BroadcastIssue,
     BroadcastResult,
@@ -169,7 +175,9 @@ from .native_sensors import (
     read_thermostat_sensors,
 )
 from .native_snapshot import NativeSnapshot, read_native_devices, read_native_snapshot
+from .native_state import NativeClimate, NativePath, NativeState
 from .native_status import NativeStatusBatch, read_snowmelt_status
+from .native_watch import ClimateChange, ClimateWatchResult, watch_climate
 from .native_water import WaterMonitor, WaterRead, WaterSample, WaterSource, read_water
 from .native_write import NativeWriteResult, NativeWriteStatus
 from .packet import (
@@ -301,6 +309,8 @@ __all__ = [
     "AddressFields",
     "AddressSetbackFields",
     "AddressSetbackPayload",
+    "AirReading",
+    "AirStatus",
     "AvailableInfo",
     "AvailableRuntime",
     "BridgeCapabilities",
@@ -313,6 +323,8 @@ __all__ = [
     "BroadcastResult",
     "CaptureGap",
     "CaptureRecord",
+    "ClimateChange",
+    "ClimateWatchResult",
     "ClockReport",
     "ConnectionClosedError",
     "DailyEvents",
@@ -359,6 +371,7 @@ __all__ = [
     "NativeAddress",
     "NativeBlockBatch",
     "NativeBlockQuery",
+    "NativeClimate",
     "NativeDevice",
     "NativeDiscovery",
     "NativeField",
@@ -366,11 +379,13 @@ __all__ = [
     "NativeIdentity",
     "NativeInventory",
     "NativeMessage",
+    "NativePath",
     "NativePortBusyError",
     "NativeProbe",
     "NativeProduct",
     "NativeScene",
     "NativeSnapshot",
+    "NativeState",
     "NativeStatusBatch",
     "NativeStatusQuery",
     "NativeTargets",
@@ -440,7 +455,9 @@ __all__ = [
     "TekmarError",
     "ThaSetback",
     "ThaValue",
+    "ThermostatConfiguration",
     "ThermostatData",
+    "ThermostatMode",
     "ThermostatRuntime",
     "ThermostatSensorMonitor",
     "ThermostatSensors",
@@ -516,5 +533,6 @@ __all__ = [
     "service_id",
     "service_name",
     "setback_from_value",
+    "watch_climate",
     "write_scene_response",
 ]

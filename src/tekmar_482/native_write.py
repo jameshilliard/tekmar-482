@@ -7,13 +7,19 @@ from dataclasses import dataclass
 from enum import StrEnum
 from typing import TYPE_CHECKING
 
+from ._native_payloads.climate import (
+    HEATING_SETUP,
+    ThermostatConfiguration,
+    ThermostatMode,
+)
 from ._native_payloads.schedules import SETUP_BLOCK, SINGLE_WEEK, ScheduleProfile
-from .native import NativeBlockQuery, NativeMessage
+from ._native_payloads.writes import BlockPatch, NativeField
+from .native import NativeBlockQuery, NativeMessage, require_enum
+from .native_identity import NativeIdentity
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
 
-    from ._native_payloads.writes import BlockPatch
     from .native import NativeAddress, NativeFrame
     from .raw import NativeBlockBatch, TxResult
 
@@ -44,6 +50,41 @@ class NativeBlockEditor:
     read: Callable[[NativeBlockQuery], Awaitable[NativeBlockBatch]]
     send: Callable[[NativeMessage], Awaitable[TxResult]]
     timeout: float
+
+    async def write_mode(
+        self,
+        target: NativeAddress,
+        mode: ThermostatMode,
+        *,
+        preview: bool,
+    ) -> NativeWriteResult:
+        require_enum(mode, ThermostatMode)
+        report = (await self.read(NativeBlockQuery(target, 0))).require_report()
+        identity = NativeIdentity.from_report(report.decoded)
+        product = identity.product if identity else None
+        if identity is None or product is None or product.family != "thermostat":
+            msg = "mode adjustment requires an identified thermostat"
+            raise ValueError(msg)
+        blocks = {}
+        for b in mode.setup_dependencies(product):
+            batch = await self.read(NativeBlockQuery(target, b))
+            if batch.tx_result is None:
+                msg = "no terminal result for thermostat setup read"
+                raise TimeoutError(msg)
+            if batch.reports and batch.tx_result.may_have_reached_peer:
+                blocks[b] = batch.reports[0].decoded
+        query = NativeBlockQuery(target, HEATING_SETUP)
+        before = (await self.read(query)).require_report()
+        blocks[HEATING_SETUP] = before.decoded
+        config = ThermostatConfiguration.from_blocks(product, identity.z_number, blocks)
+        if config.offers(mode) is not True:
+            msg = f"{product.model}: {mode.name.lower()} mode not confirmed available"
+            raise ValueError(msg)
+        patch = BlockPatch.from_fields(
+            HEATING_SETUP,
+            {NativeField.MODE_SETTING: mode.value},
+        )
+        return await self.write(query, patch, preview=preview, before=before)
 
     async def write(
         self,

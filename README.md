@@ -260,6 +260,50 @@ number of oldest records dropped by the host; set `capture_backlog` on
 `bridge.stream()` to change the default of 512 records. Gateway drop counts
 are separate and available in `stream.diagnostics` after a normal exit.
 
+### Thermostat mode and demand
+
+For a live view of **configured mode and actual demand**, select the paths
+returned by native discovery. The first command only reads; the second previews
+a mode change. One capture reader can watch multiple thermostats.
+
+```bash
+tekmar-482 watch-climate --device 2 0x12 3 --device 2 0x12 4 --duration 60 --tcp 192.0.2.10:3001
+tekmar-482 set-climate-mode 2 0x12 3 heat --tcp 192.0.2.10:3001
+```
+
+`watch_climate(stream, paths, on_change=callback)` runs until cancellation or
+an optional deadline. It reads identity and cataloged mode setup once.
+There is no periodic poll. An addressed setup update or a change in operating
+channel, enable, demand, setback or active target queues a targeted read,
+with at most one pending follow-up
+per source and block. If initial identification or a mode read went
+unanswered, later air traffic can trigger a retry once per distinct
+operating state, not once per repeated sample. A source's confirmed mode
+comes from block `0003`,
+never from the update request or an air-group demand flag. A setting change
+with no distinguishable bus traffic cannot be detected by this mechanism.
+A quiet device can have a confirmed mode but no observed demand. A finite
+active watch lists unanswered blocks and exits with status 1 if a selected
+path never reported its configured mode.
+
+The callback receives a `ClimateChange` with a `NativePath` and immutable
+current state, or `None` on invalidation. It runs on the event loop and must
+not block. Use `source=None` (CLI: `--passive`) to send no requests; omitting
+paths in that case watches all observed thermostat identities. Link ACKs
+are off unless explicitly enabled with `--ack-port`. Code which
+already owns the stream's capture reader can feed its records to
+`NativeState.observe()` directly and inspect `thermostats`, `water_sources`
+and `block(path, block_id, selector)`. Supply a new state on reconnect.
+
+`stream.write_thermostat_mode(port, address, ThermostatMode.HEAT, source=...)`
+shares the port with the watcher's queued reads. It identifies the device,
+checks the requested mode against its model, revision and relevant setup,
+reads the current heating setup, and preserves the cycle rate and group ID.
+The CLI needs `--confirm` to transmit. A change is confirmed only by a
+matching post-write device read, not a link ACK. The native decoder names
+Humidity and Backup when devices report them; neither is offered by the
+483's remote selector.
+
 ### Thermostat sensors
 
 ```bash

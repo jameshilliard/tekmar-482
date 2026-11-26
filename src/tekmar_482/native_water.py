@@ -25,7 +25,7 @@ from ._native_payloads.water import (
 )
 from .constants import TN4_PORTS
 from .native import NativeAddress, NativeBlockQuery, NativeFrame
-from .native_discovery import NativeIdentity
+from .native_identity import NativeIdentity
 from .raw import CaptureGap
 
 if TYPE_CHECKING:

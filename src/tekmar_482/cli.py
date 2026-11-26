@@ -10,6 +10,7 @@ from collections.abc import Callable, Sequence
 from dataclasses import asdict
 from typing import TYPE_CHECKING, Any, TextIO
 
+from ._native_payloads.climate import REMOTE_MODES, ThermostatMode
 from ._native_payloads.line import GROUP_IDS
 from ._native_payloads.scenes import NativeScene, SceneResponse
 from ._native_payloads.writes import NativeField, WritableBlock
@@ -30,8 +31,10 @@ from .cli_schedule import (
 )
 from .cli_status import (
     add_status_commands,
+    climate_fields,
     read_status_from_args,
     sensor_fields,
+    watch_from_args,
     water_fields,
 )
 from .client import Tekmar482Client
@@ -50,7 +53,8 @@ from .native_scene import write_scene_response
 from .native_schedule import read_weekly_schedule
 from .native_sensors import read_thermostat_sensors
 from .native_snapshot import read_native_snapshot
-from .native_water import WaterMonitor, read_water
+from .native_state import NativeState
+from .native_water import read_water
 from .native_write import NativeWriteStatus
 from .raw import CaptureGap, InvalidCapture, PortError, TxStatus
 from .trpc import (
@@ -347,6 +351,18 @@ def _add_block_commands(
         parents=[parent],
         help="preview or verify an addressed field edit",
     )
+    mode = subparsers.add_parser(
+        "set-climate-mode",
+        parents=[parent],
+        help="preview or verify an installation-supported thermostat mode",
+    )
+    _add_native_target(mode)
+    mode.add_argument("mode", choices=[m.name.lower() for m in REMOTE_MODES])
+    mode.add_argument(
+        "--confirm",
+        action="store_true",
+        help="update and verify; default is preview",
+    )
     for sampler in (device, dump):
         sampler.add_argument(
             "--block-attempts",
@@ -557,9 +573,14 @@ def _endpoint(args: argparse.Namespace) -> GatewayEndpoint:
 async def _native(args: argparse.Namespace, stdout: TextIO) -> int:
     def emit(value: object) -> None:
         stdout.write((json.dumps(value) if args.json else str(value)) + "\n")
+        if args.command == "watch-climate":
+            stdout.flush()
 
     if args.command in LINE_COMMANDS:
         return await _broadcast(args, emit)
+    if args.command == "watch-climate" and not args.device and not args.passive:
+        msg = "active watch-climate requires --device PORT SUBNET NODE"
+        raise CliError(msg)
     if (
         args.command == "set-device-group"
         and args.confirm
@@ -594,6 +615,7 @@ async def _native(args: argparse.Namespace, stdout: TextIO) -> int:
             "read-block",
             "read-device",
             "read-sensors",
+            "set-climate-mode",
             "set-device-group",
             "write-block",
             "scene-response",
@@ -601,38 +623,8 @@ async def _native(args: argparse.Namespace, stdout: TextIO) -> int:
             "write-schedule",
         }:
             return await _native_addressed(bridge, args, emit)
-        elif args.command == "read-status":
-            async with bridge.stream(
-                ack_ports=(args.port,) if args.ack else (),
-                diagnostics=False,
-            ) as stream:
-                answer = await read_status_from_args(stream, args)
-                emit(_status_fields(answer))
-                return int(not answer.answered)
-        elif args.command == "read-water":
-            async with bridge.stream(diagnostics=False) as stream:
-                water = await read_water(
-                    stream,
-                    args.ports,
-                    duration=args.duration,
-                    timeout=args.timeout,
-                    source=None
-                    if args.passive
-                    else NativeAddress(args.source_subnet, args.source_node),
-                )
-            emit(
-                {
-                    "water_sources": [water_fields(s) for s in water.sources],
-                    "master_queries": [
-                        _status_fields(q)["status_read"] for q in water.master_queries
-                    ],
-                    "block_reads": [
-                        _batch_fields(b)["block_read"] for b in water.block_reads
-                    ],
-                    "host_records_dropped": water.dropped,
-                },
-            )
-            return int(not any(s.has_measurements for s in water.sources))
+        elif args.command in {"read-status", "watch-climate", "read-water"}:
+            return await _native_status(bridge, args, emit)
         elif args.command == "send":
             async with bridge.stream(diagnostics=False) as stream:
                 try:
@@ -656,6 +648,43 @@ async def _native(args: argparse.Namespace, stdout: TextIO) -> int:
         else:
             await _native_capture(bridge, args, emit)
     return 0
+
+
+async def _native_status(
+    bridge: BridgeClient,
+    args: argparse.Namespace,
+    emit: Callable[[object], None],
+) -> int:
+    ack_ports = (
+        (args.port,) if getattr(args, "ack", False) else getattr(args, "ack_port", ())
+    )
+    async with bridge.stream(ack_ports=ack_ports, diagnostics=False) as stream:
+        if args.command == "watch-climate":
+            return await watch_from_args(stream, args, emit)
+        if args.command == "read-status":
+            answer = await read_status_from_args(stream, args)
+            emit(_status_fields(answer))
+            return int(not answer.answered)
+        water = await read_water(
+            stream,
+            args.ports,
+            duration=args.duration,
+            timeout=args.timeout,
+            source=None
+            if args.passive
+            else NativeAddress(args.source_subnet, args.source_node),
+        )
+    emit(
+        {
+            "water_sources": [water_fields(s) for s in water.sources],
+            "master_queries": [
+                _status_fields(q)["status_read"] for q in water.master_queries
+            ],
+            "block_reads": [_batch_fields(b)["block_read"] for b in water.block_reads],
+            "host_records_dropped": water.dropped,
+        },
+    )
+    return int(not any(s.has_measurements for s in water.sources))
 
 
 async def _broadcast(
@@ -750,7 +779,16 @@ async def _native_addressed(
             return int(
                 binding is None or (binding.owns_table and not week.table_complete),
             )
-        if args.command == "write-schedule":
+        if args.command == "set-climate-mode":
+            result = await stream.write_thermostat_mode(
+                args.port,
+                address,
+                ThermostatMode[args.mode.upper()],
+                source=source,
+                timeout=args.timeout,
+                preview=not args.confirm,
+            )
+        elif args.command == "write-schedule":
             result = await stream.write_schedule_time(
                 args.port,
                 schedule_target(address, args),
@@ -823,7 +861,7 @@ async def _native_capture(
     limit = getattr(args, "limit", None)
     nodes: set[tuple[int, int, int]] = set()
     frames = 0
-    water = WaterMonitor()
+    observed = NativeState()
     if (duration is not None and duration <= 0) or (limit is not None and limit < 1):
         msg = "duration and frame limit must be positive"
         raise CliError(msg)
@@ -838,7 +876,7 @@ async def _native_capture(
     def capture(frame: CaptureRecord) -> None:
         nonlocal frames
         if args.command == "dump":
-            water.observe(frame)
+            observed.observe(frame)
         if isinstance(frame, CaptureGap):
             emit({"host_records_dropped": frame.dropped})
         elif isinstance(frame, PortError):
@@ -902,13 +940,13 @@ async def _native_capture(
             },
         )
     if args.command in {"diagnostics", "dump"}:
-        _emit_capture_summary(stream, water, emit)
+        _emit_capture_summary(stream, observed, emit)
     if args.command == "dump" and not args.passive and summary and summary.devices:
         # A discovery deadline can cancel a probe before its TxResult. The
         # previous stream has drained that send before we reuse its port.
         async with bridge.stream(ack_ports=args.ack_port) as scan:
             # A new session must not inherit the previous loop mapping.
-            water = WaterMonitor()
+            observed = NativeState()
             await _dump_blocks(
                 scan,
                 summary.devices,
@@ -918,18 +956,20 @@ async def _native_capture(
                 emit,
                 include_line_status=getattr(args, "line_status", True),
             )
-        _emit_capture_summary(scan, water, emit)
+        _emit_capture_summary(scan, observed, emit)
 
 
 def _emit_capture_summary(
     stream: BridgeStream,
-    water: WaterMonitor,
+    observed: NativeState,
     emit: Callable[[object], None],
 ) -> None:
     for diagnostic in stream.diagnostics.values():
         emit(asdict(diagnostic))
-    if sources := water.sources:
+    if sources := observed.water_sources:
         emit({"water_sources": [water_fields(s) for s in sources]})
+    for thermostat in observed.thermostats:
+        emit({"thermostat_climate": climate_fields(thermostat)})
 
 
 async def _dump_blocks(

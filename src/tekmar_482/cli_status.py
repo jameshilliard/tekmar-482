@@ -5,10 +5,13 @@ from __future__ import annotations
 from dataclasses import asdict
 from typing import TYPE_CHECKING
 
+from ._native_payloads.climate import ThermostatMode
 from ._native_payloads.queries import NativeStatusQuery, StatusRequest
 from .constants import TN4_PORTS
 from .native import NativeAddress
+from .native_state import NativePath
 from .native_status import read_snowmelt_status
+from .native_watch import watch_climate
 
 if TYPE_CHECKING:
     import argparse
@@ -16,7 +19,9 @@ if TYPE_CHECKING:
 
     from ._native_payloads.water import DhwStatus, LoopStatus, TankStatus
     from .native_sensors import SensorObservation
+    from .native_state import NativeClimate
     from .native_status import NativeStatusBatch
+    from .native_watch import ClimateChange
     from .native_water import WaterSample, WaterSource
     from .raw import BridgeStream
 
@@ -105,11 +110,108 @@ def water_fields(source: WaterSource) -> dict[str, object]:
     }
 
 
+def climate_fields(device: NativeClimate) -> dict[str, object]:
+    setup = device.setup
+    return {
+        **asdict(device.path),
+        "model": setup.product.model,
+        "z_number": device.identity.z_number,
+        "mode_raw": setup.mode_raw,
+        "mode": setup.mode.name.lower() if setup.mode is not None else None,
+        "offered_modes": [
+            m.name.lower() for m in ThermostatMode if setup.offers(m) is True
+        ],
+        "undetermined_modes": [
+            m.name.lower() for m in ThermostatMode if setup.offers(m) is None
+        ],
+        "heating_cph": setup.heating_cph,
+        "configured_air_group": setup.air_group_id,
+        "cooling_stages": setup.cooling_stages,
+        "enabled_heat_pumps": setup.enabled_heat_pumps,
+        "air_timestamp_ms": device.air_timestamp_ms,
+        "air": device.air.fields() if device.air is not None else None,
+    }
+
+
+async def watch_from_args(
+    stream: BridgeStream,
+    args: argparse.Namespace,
+    emit: Callable[[object], None],
+) -> int:
+    def changed(change: ClimateChange) -> None:
+        if change.current is None:
+            emit({"climate_removed": asdict(change.path)})
+        else:
+            emit({"thermostat_climate": climate_fields(change.current)})
+
+    result = await watch_climate(
+        stream,
+        (NativePath(*p) for p in args.device) if args.device else None,
+        source=None
+        if args.passive
+        else NativeAddress(args.source_subnet, args.source_node),
+        duration=args.duration,
+        timeout=args.timeout,
+        on_change=changed,
+    )
+    emit(
+        {
+            "completed_reads": result.reads,
+            "missing_mode_reports": [asdict(p) for p in result.missing_mode_reports],
+            "latest_reads": [
+                {
+                    "port": b.port,
+                    "subnet": b.query.target.subnet,
+                    "block": b.query.block_id,
+                    "target_mask": b.query.target.request_mask(),
+                    "missing_nodes": b.missing_nodes,
+                    "tx_status": b.tx_result.status.name if b.tx_result else None,
+                }
+                for b in result.latest_reads
+            ],
+            "host_records_dropped": result.dropped,
+            "thermostats": len(result.thermostats),
+        },
+    )
+    return int(
+        not result.thermostats
+        or (not args.passive and bool(result.missing_mode_reports)),
+    )
+
+
 def add_status_commands(
     subparsers: argparse._SubParsersAction[argparse.ArgumentParser],
     common: argparse.ArgumentParser,
     number: Callable[[str], int],
 ) -> None:
+    watch = subparsers.add_parser(
+        "watch-climate",
+        parents=[common],
+        help="stream native thermostat mode and demand changes",
+    )
+    watch.add_argument(
+        "--device",
+        action="append",
+        nargs=3,
+        type=number,
+        metavar=("PORT", "SUBNET", "NODE"),
+    )
+    watch.add_argument(
+        "--passive",
+        action="store_true",
+        help="do not request identity or settings",
+    )
+    watch.add_argument("--duration", type=float, help="stop after this many seconds")
+    watch.add_argument(
+        "--ack-port",
+        action="append",
+        type=int,
+        choices=TN4_PORTS,
+        default=[],
+        help="link-ACK incoming frames on this physical port",
+    )
+    watch.add_argument("--source-subnet", type=number, default=0)
+    watch.add_argument("--source-node", type=number, default=0)
     water = subparsers.add_parser(
         "read-water",
         parents=[common],

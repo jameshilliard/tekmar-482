@@ -2,6 +2,7 @@
 
 from collections.abc import Callable
 
+from .climate import AIR_MASTER, AIR_MEMBER, AirStatus, ThermostatMode
 from .codec import Fields, Reader, SETBACK, ShortPayload, status_flags, temp
 from .layouts import (
     BLOCK_SELECTORS as BLOCK_SELECTORS,
@@ -303,6 +304,8 @@ def block_fields(block: int, index: int, value: int) -> Fields:
     if block == 9 and index < len(SETPOINT_FIELDS):
         return {SETPOINT_FIELDS[index] + "_fan_percent": value}
     if block == 3 and index < 3:
+        if index == 0 and (mode := ThermostatMode.decode(value)) is not None:
+            return {"mode_setting": value, "mode_setting_name": mode.name.lower()}
         return {("mode_setting", "heating_cph", "air_group_id")[index]: value}
     if block == 15 and index < len(SCHEDULE_SETUP):
         name = SCHEDULE_SETUP[index]
@@ -412,20 +415,6 @@ def stage(r: Reader) -> Fields:
     return fields
 
 
-def air_member(r: Reader) -> Fields:
-    a, b, target = r.take(3)
-    actual, outputs, remote = r.word(), r.byte(), r.word()
-    return ({"air_group_id": a & 31, "mode": "cool" if a & 32 else "heat",
-             "request_for_master_report": (a >> 6) & 1, "reserved0": a >> 7,
-             "heat_cool_enabled": b & 1, "heat_cool_demand": (b >> 1) & 1,
-             "schedule_status": (b >> 2) & 7, "schedule_name": SETBACK[(b >> 2) & 7],
-             "optimum_start": (b >> 5) & 3,
-             "weather_shutdown": b >> 7, "output_1_status": outputs & 3,
-             "output_2_status": (outputs >> 2) & 3, "reserved5": outputs >> 4}
-            | temp("target", target, deg_e=True) | temp("temperature", actual)
-            | temp("remote_temperature", remote))
-
-
 def network_error(r: Reader) -> Fields:
     code, value = r.take(2)
     return {"code": code, "instance": value & 63, "priority": value >> 6}
@@ -476,23 +465,6 @@ def mix_update(r: Reader) -> Fields:
     b, target, pump = r.take(3)
     return {"output_mode": b & 3, "cooling_logic": b >> 2 & 1, "clear_error": b >> 3 & 1,
             "target_raw": (b >> 6) << 8 | target, "target_pump_output": pump}
-
-
-def air_master(r: Reader) -> Fields:
-    group, cycle = r.take(2)
-    fields: Fields = {"air_group_id": group & 31, "inhibit_heat": group >> 5 & 1,
-                      "inhibit_cool": group >> 6 & 1, "cycle_length": cycle & 127, "new_cycle": cycle >> 7}
-    for mode in ("heat", "cool"):
-        flags, target = r.take(2)
-        fields.update({mode + "_enabled": flags & 1, mode + "_demand": flags >> 1 & 1,
-                       mode + "_schedule": flags >> 2 & 7, mode + "_optimum_start": flags >> 5 & 3,
-                       mode + "_weather_shutdown": flags >> 7})
-        fields.update(temp(mode + "_target", target, deg_e=True))
-        fields.update(temp(mode + "_temperature", r.word()))
-    outputs = r.byte()
-    for index, name in enumerate(("heat1", "heat2", "cool1", "cool2")):
-        fields[name + "_status"] = outputs >> (2 * index) & 3
-    return fields | temp("remote_temperature", r.word())
 
 
 def rh_report(r: Reader) -> Fields:
@@ -553,7 +525,7 @@ DECODERS: dict[int, tuple[str, Callable[[Reader], Fields]]] = {
     0x363: ("GeneralDemand", lambda r: subnet(r.byte()) | bits(r.byte(), ("cooling", 6, 1), ("demand", 7, 1))),
     0x36a: ("AirGroupMasterConfig", lambda r: bits(r.byte(), ("group", 0, 31), ("no_response_required", 6, 1),
         ("master", 7, 1)) | bits(r.byte(), ("previous_group", 0, 31), ("previous_master", 7, 1))),
-    0x377: ("AirGroupMasterStatus", air_master),
+    AIR_MASTER: ("AirGroupMasterStatus", lambda r: AirStatus.read(r, master=True).fields()),
     0x37f: ("WaterCycleStart", lambda r: bits(r.byte(), ("cycle_length", 0, 127), ("hold_override", 7, 1))),
     0x387: ("NetworkTestTime", lambda r: {"additional_time": r.word()}),
     0x38f: ("NetworkTestMode", lambda r: {"test_mode": r.byte(), "expected_duration": r.word()}),
@@ -581,7 +553,7 @@ DECODERS: dict[int, tuple[str, Callable[[Reader], Fields]]] = {
     0x337: ("MaximumBoilerPercent", lambda r: {"max_value": r.byte()}),
     0x33f: ("CycleLengthRequest", lambda r: {"air_group_id": r.byte(), "requested_length": r.byte()}),
     0x367: ("StageHeatDemand", stage),
-    0x36f: ("AirGroupMemberStatus", air_member),
+    AIR_MEMBER: ("AirGroupMemberStatus", lambda r: AirStatus.read(r, master=False).fields()),
     0x3c7: ("RelayStatusHeartbeat", lambda r: subnet(r.byte())),
     MASTER_STATUS: ("MasterStatus", lambda r: LoopStatus.read(r, master=True).fields()),
     0x3d7: ("NetworkError", network_error),

@@ -12,7 +12,7 @@ from ._native_payloads.sensors import (
     ThermostatSensors,
 )
 from .native import NativeAddress, NativeBlockQuery, NativeFrame
-from .native_discovery import NativeIdentity
+from .native_identity import NativeIdentity
 from .raw import CaptureGap
 
 if TYPE_CHECKING:

@@ -25,6 +25,7 @@ def main() -> None:
     args = parser.parse_args()
     for name in (
         "__init__.py",
+        "climate.py",
         "codec.py",
         "layouts.py",
         "line.py",

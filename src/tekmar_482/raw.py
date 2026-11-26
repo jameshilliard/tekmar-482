@@ -22,6 +22,7 @@ from .packet import TYPE_TN4
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 
+    from ._native_payloads.climate import ThermostatMode
     from ._native_payloads.queries import NativeStatusQuery
     from ._native_payloads.writes import NativeField
     from .native import NativeAddress, NativeBlockQuery, NativeTargets
@@ -241,6 +242,7 @@ class BridgeStream(Protocol):
 
     @property
     def diagnostics(self) -> Mapping[int, PortDiagnostic]: ...
+    async def wait_transmit_idle(self, port: int) -> None: ...
     async def send(self, port: int, body: bytes | NativeMessage) -> TxResult: ...
     async def read_status(
         self,
@@ -265,6 +267,7 @@ class BridgeStream(Protocol):
         *,
         source: NativeAddress,
         timeout: float = 20,
+        wait_for_edits: bool = False,
     ) -> NativeBlockBatch: ...
     async def write_block(
         self,
@@ -277,6 +280,16 @@ class BridgeStream(Protocol):
         preview: bool = False,
     ) -> NativeWriteResult: ...
     async def read(self) -> CaptureRecord: ...
+    async def write_thermostat_mode(
+        self,
+        port: int,
+        target: NativeAddress,
+        mode: ThermostatMode,
+        *,
+        source: NativeAddress,
+        timeout: float = 20,
+        preview: bool = False,
+    ) -> NativeWriteResult: ...
     async def write_schedule_time(
         self,
         port: int,
@@ -299,6 +312,7 @@ class RawDispatcher:
         self._write = write
         self.diagnostics: dict[int, PortDiagnostic] = {}
         self._pending: dict[int, asyncio.Future[TxResult]] = {}
+        self._tx_changed = {p: asyncio.Event() for p in TN4_PORTS}
         self._waiters: dict[int, _ReportWaiter] = {}
         self._edits = {port: asyncio.Lock() for port in TN4_PORTS}
         self._records: deque[_Record] = deque(maxlen=backlog)
@@ -319,6 +333,18 @@ class RawDispatcher:
         self._check_no_edit(port)
         self._check_no_read(port)
         return await self._send(port, body)
+
+    async def wait_transmit_idle(self, port: int) -> None:
+        """Wait for the real terminal result after cancellation, without sending."""
+        if port not in TN4_PORTS:
+            msg = f"invalid tN4 port {port}"
+            raise ValueError(msg)
+        self._check_active()
+        event = self._tx_changed[port]
+        while port in self._pending:
+            event.clear()
+            await event.wait()
+            self._check_active()
 
     def _check_no_read(self, port: int) -> None:
         if port in self._waiters:
@@ -378,11 +404,16 @@ class RawDispatcher:
         *,
         source: NativeAddress,
         timeout: float = 20,
+        wait_for_edits: bool = False,
     ) -> NativeBlockBatch:
-        """Collect reports in one deadline including TX. A missing node is unknown."""
-        if not timeout > 0:
-            msg = "block response timeout must be positive"
+        """Collect reports in one exchange; optionally queue with verified writes."""
+        if port not in TN4_PORTS or not timeout > 0:
+            msg = "expected a physical port and positive block response timeout"
             raise ValueError(msg)
+        if wait_for_edits:
+            async with self._edits[port]:
+                await self.wait_transmit_idle(port)
+                return await self._collect_blocks(port, query, source, timeout)
         self._check_no_edit(port)
         return await self._collect_blocks(port, query, source, timeout)
 
@@ -400,6 +431,19 @@ class RawDispatcher:
         patch = BlockPatch.from_fields(query.block_id, changes)
         async with self._editor(port, query.target, source, timeout) as editor:
             return await editor.write(query, patch, preview=preview)
+
+    async def write_thermostat_mode(
+        self,
+        port: int,
+        target: NativeAddress,
+        mode: ThermostatMode,
+        *,
+        source: NativeAddress,
+        timeout: float = 20,
+        preview: bool = False,
+    ) -> NativeWriteResult:
+        async with self._editor(port, target, source, timeout) as editor:
+            return await editor.write_mode(target, mode, preview=preview)
 
     async def write_schedule_time(
         self,
@@ -528,6 +572,7 @@ class RawDispatcher:
                 raise ProtocolError(msg)
             if not future.done():
                 future.set_result(record)
+            self._tx_changed[record.port].set()
         else:
             if isinstance(record, NativeFrame) and (
                 waiter := self._waiters.get(record.port)
@@ -562,6 +607,8 @@ class RawDispatcher:
         if self._error is not None:
             return
         self._error = error
+        for event in self._tx_changed.values():
+            event.set()
         for future in self._pending.values():
             if not future.done():
                 future.set_exception(self._error)
@@ -588,6 +635,8 @@ class RawDispatcher:
                 raise self._error
         finally:
             self._active = False
+            for event in self._tx_changed.values():
+                event.set()
             self._ready.set()
             self._fail_reads(ConnectionClosedError("raw session closed"))
             reader.cancel()
