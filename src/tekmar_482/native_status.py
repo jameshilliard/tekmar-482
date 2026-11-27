@@ -15,7 +15,7 @@ if TYPE_CHECKING:
 
     from ._native_payloads.snowmelt import SnowmeltPair
     from .native import NativeAddress, NativeFrame
-    from .raw import BridgeStream, TxResult
+    from .raw import NativeReader, TxResult
 
 
 @dataclass(frozen=True, slots=True)
@@ -27,6 +27,11 @@ class NativeStatusBatch:
     reports: tuple[NativeFrame, ...]
     covered: frozenset[int]
     expected_count: int | None
+    expired_unsent: bool = False
+
+    @property
+    def transmit_pending(self) -> bool:
+        return self.tx_result is None and not self.expired_unsent
 
     @property
     def complete(self) -> bool:
@@ -103,7 +108,13 @@ class StatusCollector:
             self.covered.update(part.items)
         return True
 
-    def batch(self, port: int, result: TxResult | None) -> NativeStatusBatch:
+    def batch(
+        self,
+        port: int,
+        result: TxResult | None,
+        *,
+        expired_unsent: bool = False,
+    ) -> NativeStatusBatch:
         return NativeStatusBatch(
             port,
             self.query,
@@ -112,6 +123,7 @@ class StatusCollector:
             tuple(self.reports),
             frozenset(self.covered),
             self.expected_count,
+            expired_unsent,
         )
 
 
@@ -141,7 +153,7 @@ async def snowmelt_status_query(
 
 
 async def read_snowmelt_status(
-    stream: BridgeStream,
+    stream: NativeReader,
     port: int,
     peer: NativeAddress,
     *,

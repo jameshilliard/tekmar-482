@@ -434,7 +434,7 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
                     "--json",
                 ],
             )
-            assert args.timeout == 20
+            assert args.timeout == 25
             assert await run(args, stdout=stdout) == 0
             result = json.loads(stdout.getvalue())
             assert result["port"] == 2 and result["timestamp_ms"] == 7
@@ -631,7 +631,16 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
                     "0x81",
                     "0",
                 ],
-                ["read-device", "3", "0x81", "0", "--io-endpoint", "0x43", "0xa5"],
+                [
+                    "read-device",
+                    "--raw",
+                    "3",
+                    "0x81",
+                    "0",
+                    "--io-endpoint",
+                    "0x43",
+                    "0xa5",
+                ],
             ):
                 out = StringIO()
                 args = build_parser().parse_args(

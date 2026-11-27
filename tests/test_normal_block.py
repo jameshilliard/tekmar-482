@@ -16,16 +16,18 @@ from tekmar_482 import (
     Tekmar482Client,
 )
 from tekmar_482.cli import CliError, build_parser, run
+from tekmar_482.native_discovery import NativeDevice
+from tekmar_482.native_snapshot import read_native_snapshot
 from tekmar_482.packet import TYPE_TRPC, Packet
 
 from .test_management import Script
 
 _CAP = "0101f04b54"
-_SUPPORT = "0401f04b540200053f01"
+_SUPPORT = "0401f04b540200053f04"
 _READ = "010ff04b54"
 _ADMIT = "040ff04b54"
 _EVENT = "020ff04b54"
-_KEY = "02120138000703"
+_KEY = "02120100000038000703"
 _PEER = "6e712845380003f322"
 _TIME = "34120000"
 _QUERY = NativeBlockQuery(NativeAddress(0x12, 33), 0x38, 3)
@@ -106,6 +108,52 @@ class NormalBlockTests(unittest.IsolatedAsyncioTestCase):
             assert client.session.report_subscription_count == 0
         assert not script.rows
 
+    async def test_cli_group_returns_partial_evidence_without_selecting_raw(
+        self,
+    ) -> None:
+        key = "02120100004038000703"
+        script = Script(
+            (_CAP, _SUPPORT),
+            (
+                _READ + key,
+                " ".join(
+                    (
+                        _ADMIT + key,
+                        _EVENT + "020401" + _TIME + _PEER,
+                        _EVENT + "020101",
+                    ),
+                ),
+            ),
+        )
+        args = build_parser().parse_args(
+            [
+                "read-block",
+                "2",
+                "0x12",
+                "1",
+                "0x38",
+                "--selector",
+                "3",
+                "--also-node",
+                "31",
+                "--json",
+                "--tcp",
+                "localhost:1234",
+            ],
+        )
+        out = io.StringIO()
+        async with Tekmar482Client(script) as client:
+            bridge = MagicMock(spec=BridgeClient)
+            bridge.normal.return_value.__aenter__.return_value = client
+            with patch("tekmar_482.cli.open_gateway") as opened:
+                opened.return_value.__aenter__.return_value = bridge
+                assert await run(args, stdout=out) == 1
+            bridge.normal.assert_called_once_with(select_mode=False)
+            bridge.stream.assert_not_called()
+        result = json.loads(out.getvalue())["block_read"]
+        assert result["missing_nodes"] == [31]
+        assert result["reports"][0]["fields"]["schedule_id"] == 3
+
     async def test_errors_never_become_an_empty_or_cached_block(self) -> None:
         for tail, exc in (
             ("01ff", TimeoutError),
@@ -127,7 +175,7 @@ class NormalBlockTests(unittest.IsolatedAsyncioTestCase):
                     with self.assertRaises(exc):
                         await BridgeManagement(client).read_block(2, _QUERY)
                     assert not client.session.report_subscription_count
-        for caps in ("0400000000", "0401f04b540200053f", "0401f04b540201057f"):
+        for caps in ("0400000000", "0401f04b540200053f01", "0401f04b540201053f04"):
             script = Script((_CAP, caps))
             async with Tekmar482Client(script) as client:
                 with self.assertRaisesRegex(ProtocolError, "does not support"):
@@ -157,7 +205,7 @@ class NormalBlockTests(unittest.IsolatedAsyncioTestCase):
             await wire.until_read()
             wire.feed(_ADMIT + _KEY)
             other = NativeBlockQuery(NativeAddress(0, 31), 0xABCD)
-            key = "03001fcdab0000"
+            key = "030000000040cdab0000"
             b = asyncio.create_task(BridgeManagement(client).read_block(3, other))
             await wire.until_read(key)
             wire.feed(_ADMIT + key)
@@ -192,6 +240,55 @@ class NormalBlockTests(unittest.IsolatedAsyncioTestCase):
             assert (await b).timestamp_ms == 0x1234
             assert not client.session.report_subscription_count
 
+    async def test_one_bitmap_includes_distinct_peers_and_retains_partial_evidence(
+        self,
+    ) -> None:
+        query = NativeBlockQuery(NativeTargets(0x12, 0x40000001), 0x38, 3)
+        key = "02120100004038000703"
+        last_node = "6e7127c5380003f322"
+        part = _EVENT + "020401" + _TIME + last_node
+        for terminal, missing, nodes in (
+            ("0001" + _TIME + _PEER, (), [33, 31]),
+            ("0101", (1,), [31]),
+        ):
+            with self.subTest(terminal=terminal):
+                script = Script(
+                    (_CAP, _SUPPORT),
+                    (
+                        _READ + key,
+                        " ".join((_ADMIT + key, part, _EVENT + "02" + terminal)),
+                    ),
+                )
+                async with Tekmar482Client(script) as client:
+                    batch = await BridgeManagement(client).read_block_group(2, query)
+                    assert batch.missing_nodes == missing
+                    assert [f.node for f in batch.reports] == nodes
+                    assert (
+                        batch.tx_result is not None and batch.tx_result.completed_frame
+                    )
+                    assert (
+                        not client.session.report_subscription_count and not script.rows
+                    )
+
+        for events in (
+            [_EVENT + "020001" + _TIME + last_node],  # premature terminal
+            [part, _EVENT + "020401" + _TIME + _PEER],  # too many parts
+            [part, _EVENT + "020001" + _TIME + last_node.replace("27c5", "2fc5")],
+            [part, _EVENT + "020100"],  # two outcomes for one wire request
+            [part, _EVENT + "020501"],  # lost control evidence, not a silent node
+        ):
+            with self.subTest(events=events):
+                script = Script(
+                    (_CAP, _SUPPORT),
+                    (_READ + key, " ".join((_ADMIT + key, *events))),
+                )
+                async with Tekmar482Client(script) as client:
+                    with self.assertRaises(ProtocolError):
+                        await BridgeManagement(client).read_block_group(2, query)
+                    assert (
+                        not client.session.report_subscription_count and not script.rows
+                    )
+
     async def test_busy_then_local_timeout_release_subscriptions(self) -> None:
         script = Script(
             (_CAP, _SUPPORT),
@@ -206,3 +303,40 @@ class NormalBlockTests(unittest.IsolatedAsyncioTestCase):
             with self.assertRaises(TimeoutError):
                 await manager.read_block(2, _QUERY, timeout=0.01)
             assert not client.session.report_subscription_count and not script.rows
+
+    async def test_normal_snapshot_retries_only_silent_nodes_and_reuses_unsent_slot(
+        self,
+    ) -> None:
+        def exchange(key: str, *records: str) -> tuple[str, str]:
+            return _READ + key, " ".join((_ADMIT + key, *(_EVENT + r for r in records)))
+
+        script = Script(
+            (_CAP, _SUPPORT),
+            exchange(
+                "02120300000000000000",
+                "020401010000006e712086000007332211",
+                "020101",
+            ),
+            (_CAP, _SUPPORT),
+            exchange("02120100000000000000", "0201ff"),
+            (_CAP, _SUPPORT),
+            exchange("02120200000034120000", "020000020000006e712083341200"),
+        )
+        devices = (
+            NativeDevice(2, NativeAddress(0x12, 1)),
+            NativeDevice(
+                2,
+                NativeAddress(0x12, 2),
+                reported_blocks=frozenset({0x1234}),
+            ),
+        )
+        async with Tekmar482Client(script) as client:
+            manager = BridgeManagement(client)
+            with self.assertRaisesRegex(ValueError, "gateway source"):
+                await manager.read_block_group(2, _QUERY, source=NativeAddress(0, 1))
+            snapshot = await read_native_snapshot(manager, devices)
+            first, retry, observed = snapshot.blocks
+            assert first.missing_nodes == retry.missing_nodes == (1,)
+            assert retry.expired_unsent and not retry.transmit_pending
+            assert observed.reports[0].node == 2 and observed.query.block_id == 0x1234
+            assert not script.rows and not client.session.report_subscription_count

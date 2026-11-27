@@ -24,7 +24,7 @@ from .test_management import Script
 from .test_normal_block import Wire
 
 _CAP = "0101f04b54"
-_CAPS = "0401f04b54020005bf03"
+_CAPS = "0401f04b54020005bf06"
 _ADMIT = "0312f04b54"
 _UPDATE = "0012f04b54"
 _END = "0212f04b54"
@@ -34,7 +34,7 @@ _PEER = NativeAddress(0x12, 1)
 
 def block_read(block: int, fields: bytes) -> tuple[str, str]:
     bid = block.to_bytes(2, "little")
-    key = "031201" + bid.hex() + "0000"
+    key = "031201000000" + bid.hex() + "0000"
     peer = NativeMessage(0x2E7, _PEER, bid + fields).to_bytes().hex()
     return "010ff04b54" + key, "040ff04b54" + key + " 020ff04b5403000001000000" + peer
 
@@ -53,7 +53,7 @@ class NormalAnnounceTests(unittest.IsolatedAsyncioTestCase):
                 assert not await reader.read()
                 return
             caps = management(1, 1)
-            support = management(1, 4, bytes.fromhex("020005bf03"))
+            support = management(1, 4, bytes.fromhex("020005bf06"))
             assert first + await reader.readexactly(len(caps) - 1) == caps
             writer.write(support)
             for port in (2, 3):

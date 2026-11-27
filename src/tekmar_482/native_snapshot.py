@@ -10,7 +10,7 @@ from ._native_payloads import SnowmeltBlock
 from ._native_payloads.io import IoEndpoint
 from ._native_payloads.products import AVAILABILITY_FIELDS, block_selectors
 from ._native_payloads.queries import NativeStatusQuery, StatusRequest
-from .constants import TN4_PORTS
+from .constants import DEFAULT_BLOCK_TIMEOUT, TN4_PORTS
 from .native import NativeAddress, NativeBlockQuery, NativeTargets
 from .native_discovery import NativeInventory
 from .native_schedule import ScheduleDirectory
@@ -30,7 +30,7 @@ if TYPE_CHECKING:
     from .native_snowmelt import NativeSnowmelt
     from .native_state import NativeClimate
     from .native_status import NativeStatusBatch
-    from .raw import BridgeStream, NativeBlockBatch
+    from .raw import NativeBlockBatch, NativeReader
 
 _HOST = NativeAddress(0, 0)
 
@@ -137,7 +137,7 @@ def _queries(
 
 @dataclass(frozen=True, slots=True)
 class _Reader:
-    stream: BridgeStream
+    stream: NativeReader
     source: NativeAddress
     timeout: float
     attempts: int
@@ -210,20 +210,20 @@ async def _read_subnet(
 
 
 async def read_native_devices(
-    stream: BridgeStream,
+    stream: NativeReader,
     devices: Iterable[NativeDevice],
     *,
     source: NativeAddress = _HOST,
-    timeout: float = 20,
+    timeout: float = DEFAULT_BLOCK_TIMEOUT,
     attempts: int = 2,
     on_batch: Callable[[NativeBlockBatch], None] | None = None,
 ) -> tuple[NativeBlockBatch, ...]:
     """Read known and observed blocks; report missing nodes, never infer support.
 
-    Use an idle Raw stream. Requests are serialized per port, grouped by subnet
-    and selector, with independent physical ports served concurrently. A deadline
-    without a TX result ends that port's scan: its send slot is still owned by
-    the outstanding request. A missing device reply alone does not stop a scan.
+    Use Normal management or an idle Raw stream. Requests are serialized per
+    port, grouped by subnet and selector, with independent ports served
+    concurrently. A Raw deadline without a TX result ends that port's scan:
+    its send slot is still owned. An explicit Normal expiry releases the port.
     Only missing nodes are retried, at most once by default. Each attempt
     yields a separate batch. Captures remain available to the normal reader.
     """
@@ -258,7 +258,7 @@ async def read_native_devices(
                 batches.append(batch)
                 if on_batch is not None:
                     on_batch(batch)
-                if batch.tx_result is None:
+                if batch.transmit_pending:
                     return batches
         return batches
 
@@ -284,11 +284,15 @@ def _status_queries(
     busy: set[int] = set()
     active: set[int] = set()
     for batch in batches:
-        if batch.tx_result is None:
+        if batch.transmit_pending:
             # No terminal link result: the gateway still owns its send slot.
             busy.add(batch.port)
             continue
-        if not batch.tx_result.completed_frame or not batch.reports:
+        if (
+            not batch.tx_result
+            or not batch.tx_result.completed_frame
+            or not batch.reports
+        ):
             continue
         active.add(batch.port)
         if batch.query.block_id in {
@@ -331,11 +335,11 @@ def _status_queries(
 
 
 async def read_native_snapshot(
-    stream: BridgeStream,
+    stream: NativeReader,
     devices: Iterable[NativeDevice],
     *,
     source: NativeAddress = _HOST,
-    timeout: float = 20,
+    timeout: float = DEFAULT_BLOCK_TIMEOUT,
     attempts: int = 2,
     include_line_status: bool = False,
     on_block: Callable[[NativeBlockBatch], None] | None = None,
@@ -368,7 +372,7 @@ async def read_native_snapshot(
             batches.append(batch)
             if on_status is not None:
                 on_status(batch)
-            if batch.tx_result is None:
+            if batch.transmit_pending:
                 break
         return batches
 

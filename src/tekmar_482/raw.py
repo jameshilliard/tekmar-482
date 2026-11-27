@@ -120,6 +120,12 @@ class NativeBlockBatch:
     query: NativeBlockQuery
     tx_result: TxResult | None
     reports: tuple[NativeFrame, ...]
+    expired_unsent: bool = False
+
+    @property
+    def transmit_pending(self) -> bool:
+        """Only a Raw host deadline can leave an uncompleted send in the gateway."""
+        return self.tx_result is None and not self.expired_unsent
 
     @property
     def missing_mask(self) -> int:
@@ -259,7 +265,29 @@ def decode_raw_packet(packet: Packet, capture_index: int = 0) -> _Record | TxRes
     raise ProtocolError(msg)
 
 
-class BridgeStream(Protocol):
+class NativeReader(Protocol):
+    """Read-only operations shared by Normal management and a borrowed Raw stream."""
+
+    async def read_block_group(
+        self,
+        port: int,
+        query: NativeBlockQuery,
+        *,
+        source: NativeAddress,
+        timeout: float,
+    ) -> NativeBlockBatch: ...
+    async def read_status(
+        self,
+        port: int,
+        query: NativeStatusQuery,
+        *,
+        source: NativeAddress,
+        peer: NativeAddress | None = None,
+        timeout: float,
+    ) -> NativeStatusBatch: ...
+
+
+class BridgeStream(NativeReader, Protocol):
     """Capture and send interface borrowed from an active Raw session."""
 
     @property

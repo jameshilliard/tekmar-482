@@ -11,6 +11,7 @@ from ._native_payloads.sensors import (
     SETUP,
     ThermostatSensors,
 )
+from .constants import DEFAULT_BLOCK_TIMEOUT
 from .native import NativeAddress, NativeBlockQuery, NativeFrame
 from .native_identity import NativeIdentity
 from .raw import CaptureGap
@@ -19,7 +20,7 @@ if TYPE_CHECKING:
     from collections.abc import Iterable
 
     from ._native_payloads.products import NativeProduct
-    from .raw import BridgeStream, CaptureRecord, NativeBlockBatch
+    from .raw import CaptureRecord, NativeBlockBatch, NativeReader
 
 _REPORT = 0x2E7
 _MOVE = 0x3E7
@@ -157,12 +158,12 @@ class SensorRead:
 
 
 async def read_thermostat_sensors(
-    stream: BridgeStream,
+    stream: NativeReader,
     port: int,
     address: NativeAddress,
     *,
     source: NativeAddress = _HOST,
-    timeout: float = 20,
+    timeout: float = DEFAULT_BLOCK_TIMEOUT,
 ) -> SensorRead:
     """Identify one thermostat, then read only its cataloged input blocks."""
 
@@ -187,9 +188,9 @@ async def read_thermostat_sensors(
     for block in candidates:
         batch = await read(block)
         batches.append(batch)
-        if batch.tx_result is None:
+        if batch.transmit_pending:
             break
-        if batch.tx_result.completed_frame:
+        if batch.tx_result and batch.tx_result.completed_frame:
             for frame in batch.reports:
                 monitor.observe(frame)
     return SensorRead(monitor.devices[0], candidates, tuple(batches))

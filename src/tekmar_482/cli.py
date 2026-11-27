@@ -7,6 +7,7 @@ import asyncio
 import json
 import sys
 from collections.abc import Callable, Sequence
+from contextlib import asynccontextmanager
 from dataclasses import asdict
 from functools import partial
 from math import isfinite
@@ -56,7 +57,7 @@ from .cli_status import (
 )
 from .cli_trace import add_trace_command, trace_record
 from .client import Tekmar482Client
-from .constants import DEFAULT_BAUDRATE, TN4_PORTS
+from .constants import DEFAULT_BAUDRATE, DEFAULT_BLOCK_TIMEOUT, TN4_PORTS
 from .decoding import (
     decode_degh,
     decode_network_error,
@@ -66,7 +67,7 @@ from .exceptions import TekmarError
 from .firmware import install_firmware
 from .gateway import open_gateway
 from .management import BridgeManagement
-from .native import NativeAddress, NativeBlockQuery
+from .native import NativeAddress, NativeBlockQuery, NativeTargets
 from .native_discovery import NativeDevice, discover_native
 from .native_io import IoDirectory
 from .native_scene import scene_response_fields
@@ -91,6 +92,8 @@ from .trpc import (
 )
 
 if TYPE_CHECKING:
+    from collections.abc import AsyncIterator
+
     from .models import (
         AvailableInfo,
         DeviceAttributes,
@@ -113,6 +116,9 @@ class CliError(Exception):
 
 ClientFactory = Callable[[argparse.Namespace], Tekmar482Client]
 _MAX_TCP_PORT = 65535
+_ADDRESSED_READS = frozenset(
+    {"read-block", "read-device", "read-schedule", "read-sensors"},
+)
 _BLOCK_EDITS = frozenset(
     {
         "write-block",
@@ -293,10 +299,16 @@ def build_parser() -> argparse.ArgumentParser:
     )
     add_schedule_commands(
         subparsers,
-        _common_parent(default_timeout=20),
+        _common_parent(default_timeout=DEFAULT_BLOCK_TIMEOUT),
         _add_native_target,
     )
     add_status_commands(subparsers, _common_parent(default_timeout=20), _int_value)
+    for name in _ADDRESSED_READS:
+        subparsers.choices[name].add_argument(
+            "--raw",
+            action="store_true",
+            help="switch to Raw mode for this read",
+        )
     for name in _BLOCK_EDITS:
         subparsers.choices[name].add_argument(
             "--raw",
@@ -365,16 +377,19 @@ def _add_block_commands(
         help="numeric native block ID",
     )
     fields.add_argument("--json", action="store_true")
-    parent = _common_parent(default_timeout=20.0)
+    parent = _common_parent(default_timeout=DEFAULT_BLOCK_TIMEOUT)
     block = subparsers.add_parser(
         "read-block",
         parents=[parent],
-        help="read one native tN4 block without leaving Normal mode",
+        help="read a native block from one or more nodes without leaving Normal mode",
     )
     block.add_argument(
-        "--raw",
-        action="store_true",
-        help="switch to Raw mode for this read",
+        "--also-node",
+        nargs="+",
+        type=int,
+        choices=range(1, 32),
+        metavar="NODE",
+        help="include these additional logical nodes in the same native request",
     )
     device = subparsers.add_parser(
         "read-device",
@@ -685,8 +700,8 @@ def _validate_native_args(args: argparse.Namespace) -> None:
     if (
         (
             args.command in _BLOCK_EDITS
-            or args.command
-            in {"read-block", "read-status", "set-device-group", "set-snowmelt-group"}
+            or args.command in _ADDRESSED_READS
+            or args.command in {"read-status", "set-device-group", "set-snowmelt-group"}
         )
         and not args.raw
         and (args.ack or args.source_subnet or args.source_node)
@@ -914,45 +929,37 @@ def _emit_io(
         emit({key: {**asdict(path), **io_fields(directory, model)}})
 
 
+@asynccontextmanager
+async def _addressed_session(
+    bridge: BridgeClient,
+    args: argparse.Namespace,
+) -> AsyncIterator[BridgeManagement | BridgeStream]:
+    if args.raw:
+        async with bridge.stream(
+            ack_ports=(args.port,) if args.ack else (),
+            diagnostics=False,
+        ) as stream:
+            yield stream
+    else:
+        async with bridge.normal(select_mode=False) as client:
+            yield BridgeManagement(client)
+
+
 async def _native_addressed(
     bridge: BridgeClient,
     args: argparse.Namespace,
     emit: Callable[[object], None],
 ) -> int:
     address = NativeAddress(args.subnet, args.node)
-    if args.command == "read-block" and not args.raw:
-        query = NativeBlockQuery(address, args.block, args.selector)
-        async with bridge.normal(select_mode=False) as client:
-            report = await BridgeManagement(client).read_block(
-                args.port,
-                query,
-                timeout=args.timeout,
-            )
-        emit(_frame_fields(report))
-        return 0
     source = NativeAddress(args.source_subnet, args.source_node)
-    if args.command in {"set-device-group", "set-snowmelt-group"}:
-        run_group = (
-            device_group if args.command == "set-device-group" else snow_group_from_args
-        )
-        if not args.raw:
-            async with bridge.normal(select_mode=False) as client:
-                return await run_group(
-                    BridgeManagement(client),
-                    args,
-                    address,
-                    source,
-                    emit,
-                )
-        async with bridge.stream(
-            ack_ports=(args.port,) if args.ack else (),
-            diagnostics=False,
-        ) as stream:
+    async with _addressed_session(bridge, args) as stream:
+        if args.command in {"set-device-group", "set-snowmelt-group"}:
+            run_group = (
+                device_group
+                if args.command == "set-device-group"
+                else snow_group_from_args
+            )
             return await run_group(stream, args, address, source, emit)
-    async with bridge.stream(
-        ack_ports=(args.port,) if args.ack else (),
-        diagnostics=False,
-    ) as stream:
         if args.command == "read-device":
             snapshot = await read_native_snapshot(
                 stream,
@@ -999,10 +1006,25 @@ async def _native_addressed(
             return int(
                 binding is None or (binding.owns_table and not week.table_complete),
             )
-        query = NativeBlockQuery(address, args.block, args.selector)
+        mask = address.request_mask()
+        for node in args.also_node or ():
+            mask |= 1 << (node - 1)
+        query = NativeBlockQuery(
+            NativeTargets(address.subnet, mask),
+            args.block,
+            args.selector,
+        )
         try:
-            async with asyncio.timeout(args.timeout):
-                report = await stream.read_block(args.port, query, source=source)
+            batch = await stream.read_block_group(
+                args.port,
+                query,
+                source=source,
+                timeout=args.timeout,
+            )
+            if args.also_node:
+                emit(_batch_fields(batch))
+                return int(bool(batch.missing_mask))
+            report = batch.require_report()
         except TimeoutError as err:
             msg = f"no matching block {args.block:#x} report before the deadline"
             raise CliError(msg) from err

@@ -19,7 +19,7 @@ from ._native_payloads.schedules import (
     ScheduleProfile,
 )
 from ._native_payloads.writes import BlockPatch, NativeField
-from .constants import TN4_PORTS
+from .constants import DEFAULT_BLOCK_TIMEOUT, TN4_PORTS
 from .native import NativeBlockQuery, require_enum, schedule_slot
 from .native_write import NativeWriteStatus
 
@@ -30,7 +30,7 @@ if TYPE_CHECKING:
 
     from .native import NativeAddress, NativeFrame
     from .native_write import NativeBlockEditor, NativeWriteResult
-    from .raw import BridgeStream, NativeBlockBatch
+    from .raw import NativeBlockBatch, NativeReader
 
     type _Read = Callable[[NativeBlockQuery], Awaitable[NativeBlockBatch]]
 
@@ -424,12 +424,12 @@ class ScheduleDirectory:
 
 
 async def read_weekly_schedule(
-    stream: BridgeStream,
+    stream: NativeReader,
     port: int,
     target: ScheduleTarget,
     *,
     source: NativeAddress,
-    timeout: float = 20,
+    timeout: float = DEFAULT_BLOCK_TIMEOUT,
 ) -> NativeWeeklySchedule:
     """Read the local assignment, then only the active event rows owned here."""
 
@@ -452,7 +452,7 @@ async def read_weekly_schedule(
             else None
         )
         rows.append(_row(config, event, query, report, batch))
-        if batch.tx_result is None:
+        if batch.transmit_pending:
             break  # A pending TX still owns the port.
     return NativeWeeklySchedule(config, tuple(rows))
 

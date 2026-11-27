@@ -115,7 +115,10 @@ and node from discovery, for example:
 tekmar-482 read-device 2 0x12 3 --tcp 192.0.2.10:3001 --json
 ```
 
-`read_native_snapshot(stream, devices)` implements this command and the
+`read-device`, `read-sensors` and `read-schedule` default to Normal mode;
+use `--raw` explicitly to select Raw. Pass either an open
+`BridgeManagement(client)` or a Raw stream to the read helpers.
+`read_native_snapshot(stream, devices)` implements the device scan and the
 device-read phase of `dump`. Its block reader, `read_native_devices()`,
 confirms identity before expanding a model's block list.
 Unknown models can still be queried for blocks and
@@ -125,10 +128,11 @@ nodes sharing a subnet, block and selector into one request. Results contain
 the link outcome, matching frames (including raw bytes and field support
 masks), and any nodes that didn't reply. A missing reply means unknown.
 Use `--block-timeout` on `dump` or `--timeout` on `read-device` to
-adjust the per-request deadline (default 20 seconds). Missing peers get
+adjust the deadline (default 20 seconds for Raw dump, 25 for device reads). Missing peers get
 one read-only retry by default; `--block-attempts 1` disables it. Peers
-that already replied are not queried again in the retry. A missing TX
-result stops that port, since its send slot may still be occupied. `--duration` on
+that already replied are not queried again in the retry. A missing Raw TX
+result stops that port; its send slot may still be occupied. An explicit
+Normal gateway expiry frees the slot even if it never transmitted. `--duration` on
 `dump` bounds discovery only. No settings or counters are written.
 
 Use `bridge.normal()` to run tRPC on the **same** custom-firmware connection:
@@ -395,15 +399,22 @@ below are examples):
 ```bash
 tekmar-482 read-block 2 0x12 3 0x71 --tcp 192.0.2.10:3001 --json
 tekmar-482 read-block 2 0x12 3 0x38 --selector 3 --tcp 192.0.2.10:3001 --json
+tekmar-482 read-block 2 0x12 3 0x00 --also-node 5 7 --tcp 192.0.2.10:3001 --json
 ```
 
 `await BridgeManagement(client).read_block(port, query)` returns the peer's
 full timestamped `NativeFrame` on an open Normal session. It needs neither
 tracing nor tHA reporting. Distinct ports can read concurrently; a second
 read on an occupied port is rejected. Silence is a timeout, not an empty
-block. The gateway deadline is ten seconds from admission; `--timeout`
-controls the host's wait. `read_block_result()` also exposes the actual
-transmit outcome, including no ACK or a request never sent. Reads and edits
+block. Use `read_block_group(port, NativeBlockQuery(NativeTargets(subnet, mask), block))`
+to read multiple peers with **one** on-wire request. Node 1 is bit 0;
+node 31 is bit 30. The gateway waits ten seconds to send, then ten seconds
+between distinct peer replies; duplicates never extend the wait. For a slow
+line, allow over twenty seconds for the host's initial wait to cover both
+windows. After each part `--timeout` starts again. A gateway expiry returns
+the actual transmit outcome, any replies, and the remaining `missing_nodes`.
+A host timeout or gateway control-queue drop is an error, not evidence of
+device absence. Reads and edits
 require the advertised `BLOCK_TRANSFERS` feature. They do not silently fall
 back to Raw or to cached values.
 

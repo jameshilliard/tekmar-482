@@ -23,7 +23,7 @@ from .test_management import Script
 from .test_normal_block import Wire
 
 _CAP = "0101f04b54"
-_SUPPORT = "0401f04b54020005bf01"
+_SUPPORT = "0401f04b54020005bf04"
 _READ = "0110f04b54"
 _ADMIT = "0410f04b54"
 _REPORT = "0210f04b54"
@@ -41,8 +41,8 @@ class NormalStatusTests(unittest.IsolatedAsyncioTestCase):
     ) -> None:
         steps: list[tuple[str, str]] = []
         for key, frame in (
-            ("011403d0000000", "6e7148c5d000030400"),
-            ("011403c1000000", "6e7148c4c1000108"),
+            ("011404000000d0000000", "6e7148c5d000030400"),
+            ("011404000000c1000000", "6e7148c4c1000108"),
         ):
             steps.extend(
                 (
@@ -183,7 +183,7 @@ class NormalStatusTests(unittest.IsolatedAsyncioTestCase):
                         NativeBlockQuery(_PEER, 0),
                     ),
                 )
-                key = f"{port:02x}001800000000"
+                key = f"{port:02x}000000800000000000"
                 await wire.until_read(key)
                 if port == 3:
                     wire.feed("040ff04b54" + key)

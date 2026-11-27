@@ -77,7 +77,11 @@ def status_result(
     if event is _Event.CONTROL_FULL:
         msg = "gateway control queue could not return every native status frame"
         raise ProtocolError(msg)
-    batch = collector.batch(port, tx)
+    batch = collector.batch(
+        port,
+        tx,
+        expired_unsent=event is _Event.EXPIRED and tx is None,
+    )
     if (
         (tx is not None and tx.reason is FailureReason.ARBITRATION_LOST)
         or (event is _Event.COMPLETE) != batch.answered

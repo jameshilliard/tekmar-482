@@ -28,9 +28,9 @@ from tekmar_482.cli import build_parser, run
 from .test_management import Script
 from .test_normal_block import Wire
 
-_CAP = ("0101f04b54", "0401f04b54020005bf01")
-_KEY = "02120103000000"
-_EDIT = _KEY + "0703010409000409"
+_CAP = ("0101f04b54", "0401f04b54020005bf04")
+_KEY = "02120100000003000000"
+_EDIT = "021201030000000703010409000409"
 _OLD = "6e712846030007010409"
 _NEW = "6e712846030007000409"
 _QUERY = NativeBlockQuery(NativeAddress(0x12, 33), 3)
@@ -58,7 +58,7 @@ class NormalEditTests(unittest.IsolatedAsyncioTestCase):
 
         def read(block_id: int, values: bytes) -> tuple[str, str]:
             block_bytes = block_id.to_bytes(2, "little")
-            key = "012305" + block_bytes.hex() + "0000"
+            key = "012310000000" + block_bytes.hex() + "0000"
             msg = NativeMessage(0x2E7, target, block_bytes + values)
             return (
                 "010ff04b54" + key,

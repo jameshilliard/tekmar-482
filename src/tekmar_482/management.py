@@ -19,9 +19,9 @@ from ._native_payloads.line import (
 )
 from ._native_payloads.scenes import SCENE_REPORT
 from ._native_payloads.writes import BlockPatch
-from ._normal_block import edit_key, edit_result, read_key, read_result, tx_outcome
+from ._normal_block import BlockCollector, edit_key, edit_result, tx_outcome
 from ._normal_status import status_key, status_result
-from .constants import TN4_PORTS
+from .constants import DEFAULT_BLOCK_TIMEOUT, TN4_PORTS
 from .error_reports import ALL_SOURCES, ErrorReports, GatewayErrorCounter, source_mask
 from .exceptions import ConnectionClosedError, ProtocolError, TekmarError
 from .native import NativeAddress
@@ -55,6 +55,13 @@ if TYPE_CHECKING:
 
 _CAPABILITY_BYTES = 4
 _ANNOUNCEMENT_RESULT_BYTES = 2  # physical port and link outcome
+_GATEWAY_SOURCE = NativeAddress(0, 0)
+
+
+def _check_source(source: NativeAddress) -> None:
+    if source != _GATEWAY_SOURCE:
+        msg = "Normal reads use the gateway source address (0, 0)"
+        raise ValueError(msg)
 
 
 def unpack_diagnostic(layout: Struct, data: bytes) -> tuple[int, ...]:
@@ -79,8 +86,8 @@ class BridgeFeature(IntFlag):
     NORMAL_IDENTITY = 16
     TRAFFIC_COUNTS = 32
     NORMAL_STATUS_READ = 128
-    BLOCK_TRANSFERS = 256
     NORMAL_ANNOUNCE = 512
+    BLOCK_TRANSFERS = 1024
 
 
 class BridgeMethod(IntEnum):
@@ -351,11 +358,14 @@ class BridgeManagement(_Management):
         port: int,
         query: NativeBlockQuery,
         *,
-        timeout: float = 15,
+        timeout: float = DEFAULT_BLOCK_TIMEOUT,
     ) -> NativeFrame:
         """Read one peer in Normal mode without relying on trace or cached replies."""
+        if query.target.request_mask().bit_count() != 1:
+            msg = "use read_block_group for multiple nodes"
+            raise ValueError(msg)
         return (
-            await self.read_block_result(port, query, timeout=timeout)
+            await self.read_block_group(port, query, timeout=timeout)
         ).require_report()
 
     def _check_edit_idle(self, port: int) -> None:
@@ -363,14 +373,16 @@ class BridgeManagement(_Management):
             msg = f"block edit in progress on port {port}"
             raise NativePortBusyError(msg)
 
-    async def read_block_result(
+    async def read_block_group(
         self,
         port: int,
         query: NativeBlockQuery,
         *,
-        timeout: float = 15,
+        source: NativeAddress = _GATEWAY_SOURCE,
+        timeout: float = DEFAULT_BLOCK_TIMEOUT,
     ) -> NativeBlockBatch:
-        """Return observed link and peer evidence, including an unanswered request."""
+        """Read one native bitmap and retain distinct peer reports on gateway expiry."""
+        _check_source(source)
         self._check_edit_idle(port)
         return await self._read_block(port, query, timeout)
 
@@ -380,13 +392,17 @@ class BridgeManagement(_Management):
         query: NativeBlockQuery,
         timeout: float,
     ) -> NativeBlockBatch:
+        collector = BlockCollector(port, query)
         async with self._normal_events(
             BridgeMethod.NORMAL_BLOCK_READ,
             BridgeFeature.BLOCK_TRANSFERS,
-            read_key(port, query),
+            collector.key(),
             timeout,
+            progress_timeout=True,
         ) as receive:
-            return read_result(port, query, await receive())
+            while (result := collector.collect(await receive())) is None:
+                pass
+            return result
 
     @asynccontextmanager
     async def _block_editor(
@@ -427,7 +443,7 @@ class BridgeManagement(_Management):
         query: NativeBlockQuery,
         changes: Mapping[NativeField, int],
         *,
-        timeout: float = 15,
+        timeout: float = DEFAULT_BLOCK_TIMEOUT,
         preview: bool = True,
     ) -> NativeWriteResult:
         """Preview or conditionally edit known fields, then read back from the peer."""
@@ -441,7 +457,7 @@ class BridgeManagement(_Management):
         target: NativeAddress,
         mode: ThermostatMode,
         *,
-        timeout: float = 15,
+        timeout: float = DEFAULT_BLOCK_TIMEOUT,
         preview: bool = True,
     ) -> NativeWriteResult:
         async with self._block_editor(port, timeout) as editor:
@@ -453,7 +469,7 @@ class BridgeManagement(_Management):
         target: NativeAddress,
         change: ThermostatTargetChange,
         *,
-        timeout: float = 15,
+        timeout: float = DEFAULT_BLOCK_TIMEOUT,
         preview: bool = True,
     ) -> NativeWriteResult:
         async with self._block_editor(port, timeout) as editor:
@@ -465,7 +481,7 @@ class BridgeManagement(_Management):
         target: ScheduleTarget,
         change: ScheduleChange,
         *,
-        timeout: float = 15,
+        timeout: float = DEFAULT_BLOCK_TIMEOUT,
         preview: bool = True,
     ) -> NativeWriteResult:
         async with self._block_editor(port, timeout) as editor:
@@ -476,10 +492,12 @@ class BridgeManagement(_Management):
         port: int,
         query: NativeStatusQuery,
         *,
+        source: NativeAddress = _GATEWAY_SOURCE,
         peer: NativeAddress | None = None,
         timeout: float = 15,
     ) -> NativeStatusBatch:
         """Read peer status without changing mode, trace or link-ACK settings."""
+        _check_source(source)
         self._check_edit_idle(port)
         return await self._read_status(port, query, peer, timeout)
 
@@ -508,7 +526,7 @@ class BridgeManagement(_Management):
         peer: NativeAddress,
         *,
         keys: bytes | None = None,
-        timeout: float = 15,
+        timeout: float = DEFAULT_BLOCK_TIMEOUT,
     ) -> NativeStatusBatch:
         query = await snowmelt_status_query(
             peer,
@@ -571,7 +589,7 @@ class BridgeManagement(_Management):
         *,
         enabled: bool,
         expected_group: int | None = None,
-        timeout: float = 15,
+        timeout: float = DEFAULT_BLOCK_TIMEOUT,
         preview: bool = True,
     ) -> SnowmeltGroupResult:
         """Read the live binding and query that zone's state after an explicit send."""
@@ -596,6 +614,7 @@ class BridgeManagement(_Management):
         timeout: float,
         *,
         service: TrpcService = TrpcService.REQUEST,
+        progress_timeout: bool = False,
     ) -> AsyncIterator[Callable[[], Awaitable[bytes]]]:
         if not isfinite(timeout) or timeout <= 0:
             msg = "Normal operation timeout must be finite and positive"
@@ -623,6 +642,8 @@ class BridgeManagement(_Management):
                         raise ProtocolError(msg)
 
                 async def receive() -> bytes:
+                    if progress_timeout:
+                        deadline.reschedule(asyncio.get_running_loop().time() + timeout)
                     async for packet in events:
                         if (
                             packet.service is TrpcService.REPORT
@@ -632,7 +653,7 @@ class BridgeManagement(_Management):
                     msg = "connection closed before the Normal operation result"
                     raise ConnectionClosedError(msg)
 
-                async with asyncio.timeout(timeout):
+                async with asyncio.timeout(timeout) as deadline:
                     async for packet in events:
                         if packet is ack:
                             yield receive

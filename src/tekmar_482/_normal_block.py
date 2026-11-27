@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass, field
 from enum import IntEnum
 from struct import Struct
 from typing import TYPE_CHECKING
@@ -16,7 +17,8 @@ from .raw import FailureReason, NativeBlockBatch, RejectReason, TxResult, TxStat
 if TYPE_CHECKING:
     from .native import NativeBlockQuery, NativeMessage
 
-_KEY = Struct("<BBBHBB")
+_READ_KEY = Struct("<BBIHBB")
+_EDIT_KEY = Struct("<BBBHBB")
 _STAMP = Struct("<I")
 _BLOCK_HEADER = 3
 _EDIT_RESULT = Struct("<BBBB")
@@ -29,6 +31,8 @@ class _Status(IntEnum):
     EXPIRED = 1
     PIN_UNAVAILABLE = 2
     LINK_FAULT = 3
+    MORE = 4
+    CONTROL_FULL = 5
 
 
 class _EditEnd(IntEnum):
@@ -52,48 +56,97 @@ def tx_outcome(port: int, code: int) -> TxResult | None:
     raise ProtocolError(msg)
 
 
-def read_key(port: int, query: NativeBlockQuery) -> bytes:
+def _key(port: int, query: NativeBlockQuery, *, edit: bool) -> bytes:
+    if port not in TN4_PORTS:
+        msg = "expected a physical port for a Normal block transfer"
+        raise ValueError(msg)
     nodes = query.target.request_mask()
-    if port not in TN4_PORTS or nodes.bit_count() != 1:
-        msg = "a Normal block read requires one physical port and one target node"
+    if edit and nodes.bit_count() != 1:
+        msg = "block edits require one target node"
         raise ValueError(msg)
     selector = BLOCK_SELECTORS.get(query.block_id)
-    return _KEY.pack(
+    return (_EDIT_KEY if edit else _READ_KEY).pack(
         port,
         query.target.subnet,
-        nodes.bit_length(),
+        nodes.bit_length() if edit else nodes,
         query.block_id,
         selector[1] if selector else 0,
         query.selector or 0,
     )
 
 
-def read_result(port: int, query: NativeBlockQuery, body: bytes) -> NativeBlockBatch:
-    if len(body) < _BLOCK_HEADER or body[0] != port or body[1] not in _Status:
-        msg = "invalid Normal block result header"
-        raise ProtocolError(msg)
-    status = _Status(body[1])
-    tx = tx_outcome(port, body[2])
-    if status is not _Status.REPORT:
-        if len(body) != _BLOCK_HEADER or not (
-            (status is _Status.EXPIRED and (tx is None or tx.completed_frame))
-            or (status is _Status.PIN_UNAVAILABLE and body[2] == _PIN_UNAVAILABLE)
-            or (
-                status is _Status.LINK_FAULT
-                and tx
-                and tx.status is TxStatus.FAILED
-                and not tx.completed_frame
-                and tx.reason != FailureReason.ARBITRATION_LOST
+@dataclass(slots=True)
+class BlockCollector:
+    port: int
+    query: NativeBlockQuery
+    _reports: dict[int, NativeFrame] = field(default_factory=dict, init=False)
+    _tx: TxResult | None = field(default=None, init=False)
+
+    def key(self) -> bytes:
+        return _key(self.port, self.query, edit=False)
+
+    def collect(self, body: bytes) -> NativeBlockBatch | None:
+        if len(body) < _BLOCK_HEADER or body[0] != self.port or body[1] not in _Status:
+            msg = "invalid Normal block result header"
+            raise ProtocolError(msg)
+        status = _Status(body[1])
+        tx = tx_outcome(self.port, body[2])
+        if self._reports and tx != self._tx:
+            msg = "inconsistent transmit outcome in one block read"
+            raise ProtocolError(msg)
+        if status in {_Status.REPORT, _Status.MORE}:
+            self._add_frame(body, tx)
+            complete = (
+                len(self._reports) == self.query.target.request_mask().bit_count()
             )
-        ):
+            if complete != (status is _Status.REPORT):
+                msg = "block terminal flag disagrees with remaining target nodes"
+                raise ProtocolError(msg)
+            if not complete:
+                return None
+        elif status is _Status.CONTROL_FULL:
+            msg = "gateway control queue dropped a Normal block report"
+            raise ProtocolError(msg)
+        elif len(body) != _BLOCK_HEADER or not _valid_failure(status, tx):
             msg = "invalid terminal evidence on failed Normal block read"
             raise ProtocolError(msg)
-        return NativeBlockBatch(port, query, tx, ())
-    frame = peer_frame(port, body, timestamp_offset=_BLOCK_HEADER)
-    if tx is None or not tx.completed_frame or not query.matches(frame.message):
-        msg = "Normal block result does not match the requested peer, block or selector"
-        raise ProtocolError(msg)
-    return NativeBlockBatch(port, query, tx, (frame,))
+        return NativeBlockBatch(
+            self.port,
+            self.query,
+            tx,
+            tuple(self._reports[n] for n in sorted(self._reports)),
+            expired_unsent=status is _Status.EXPIRED and tx is None,
+        )
+
+    def _add_frame(self, body: bytes, tx: TxResult | None) -> None:
+        frame = peer_frame(self.port, body, timestamp_offset=_BLOCK_HEADER)
+        if (
+            tx is None
+            or not tx.completed_frame
+            or not self.query.matches(frame.message)
+        ):
+            msg = "Normal block report does not match the peer, block or selector"
+            raise ProtocolError(msg)
+        node = frame.message.source.block_node
+        if node in self._reports:
+            msg = "duplicate peer in a Normal block read"
+            raise ProtocolError(msg)
+        self._reports[node] = frame
+        self._tx = tx
+
+
+def _valid_failure(status: _Status, tx: TxResult | None) -> bool:
+    if status is _Status.EXPIRED:
+        return tx is None or tx.completed_frame
+    if status is _Status.PIN_UNAVAILABLE:
+        return tx is not None and tx.status is TxStatus.REJECTED
+    return (
+        status is _Status.LINK_FAULT
+        and tx is not None
+        and tx.status is TxStatus.FAILED
+        and not tx.completed_frame
+        and tx.reason != FailureReason.ARBITRATION_LOST
+    )
 
 
 def peer_frame(port: int, body: bytes, *, timestamp_offset: int = 2) -> NativeFrame:
@@ -117,7 +170,7 @@ def edit_key(
 ) -> bytes:
     payload = before.message.payload
     return (
-        read_key(port, query)
+        _key(port, query, edit=True)
         + bytes((payload[2], len(payload) - 3))
         + payload[3:]
         + proposed.payload[4:]

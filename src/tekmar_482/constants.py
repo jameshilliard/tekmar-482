@@ -8,6 +8,8 @@ from enum import IntEnum, IntFlag, StrEnum
 from ._native_payloads.faults import ERROR_DESCRIPTIONS
 
 DEFAULT_BAUDRATE = 9600
+# Allow both ten-second Normal block windows plus link and host scheduling.
+DEFAULT_BLOCK_TIMEOUT = 25.0
 TN4_PORTS = range(5)
 MAX_PERCENT = 100
 NO_SETBACK_EVENTS = 0
