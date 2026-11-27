@@ -247,7 +247,12 @@ from .native_sensors import (
     ThermostatSensorMonitor,
     read_thermostat_sensors,
 )
-from .native_setpoint import NativeSetpointControl
+from .native_setpoint import (
+    NativeSetpointControl,
+    SetpointSlot,
+    SetpointTargetChange,
+    StoredSetpointTarget,
+)
 from .native_snapshot import NativeSnapshot, read_native_devices, read_native_snapshot
 from .native_snow_control import (
     SnowmeltGroupBinding,
@@ -622,7 +627,9 @@ __all__ = [
     "SetpointDeviceRuntime",
     "SetpointGroupFields",
     "SetpointReadings",
+    "SetpointSlot",
     "SetpointStatus",
+    "SetpointTargetChange",
     "SetpointTargets",
     "SetpointValues",
     "SlabStatus",
@@ -651,6 +658,7 @@ __all__ = [
     "StageSelection",
     "StatusRequest",
     "StockFirmwareError",
+    "StoredSetpointTarget",
     "SystemSchedule",
     "TankStatus",
     "TargetSlot",

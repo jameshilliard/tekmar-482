@@ -21,7 +21,6 @@ from tekmar_482 import (
     IoDirectory,
     NativeAddress,
     NativeBlockQuery,
-    NativeField,
     NativePath,
     NativeSnapshot,
     NativeState,
@@ -30,6 +29,9 @@ from tekmar_482 import (
     ScheduleChange,
     ScheduleEvent,
     ScheduleTarget,
+    SetpointApplication,
+    SetpointSlot,
+    SetpointTargetChange,
     SnowmeltApplication,
     SnowmeltBlock,
     SnowmeltGroupStatus,
@@ -449,7 +451,7 @@ class FirmwareInteropTests(unittest.IsolatedAsyncioTestCase):
             assert result.readback.require_report().decoded["idle_setpoint_raw"] == 0
 
     async def test_indexed_plant_io_and_setpoint_use_independent_ports(self) -> None:
-        old = _block(1, "31 40000000", "2c00", "6e7311cb 2c00ff 2006 1006 0000 0007")
+        old = _block(1, "31 40000000", "2c00", "6e7311cb 2c00ff 0008 8c07 0000 6009")
         script = (
             _block(4, "2a 80000000", "0000", "6e72a209 00003f a79601 b60402"),
             _block(4, "2a 80000000", "4400", "6e72a206 440007 81 4523", "81"),
@@ -462,23 +464,30 @@ class FirmwareInteropTests(unittest.IsolatedAsyncioTestCase):
                 ),
             ),
             _block(1, "31 40000000", "0000", "6e7311c9 00003f ee8a01 760402"),
+            _block(1, "31 40000000", "2600", "6e7311c4 260001 02"),
             old,
             old,
-            (1, "6df0000c 3107 2c00 3406 1006 0000 0007", ()),
-            _block(1, "31 40000000", "2c00", "6e7311cb 2c00ff 3406 1006 0000 0007"),
+            (1, "6df0000c 3107 2c00 7008 8c07 0000 6009", ()),
+            _block(1, "31 40000000", "2c00", "6e7311c5 2c0003 7008"),
         )
         async with _gateway(script) as manager:
 
             async def change_setpoint() -> None:
-                await manager.read_block(1, NativeBlockQuery(_SETPOINT, 0))
-                edit = await manager.write_block(
+                edit = await manager.write_setpoint_target(
                     1,
-                    NativeBlockQuery(_SETPOINT, 0x2C),
-                    {NativeField.WAKE_OCCUPIED: 0x634},
+                    _SETPOINT,
+                    SetpointTargetChange(
+                        SetpointApplication.DHW,
+                        SetpointSlot.WAKE_OCCUPIED,
+                        55,
+                    ),
                     preview=False,
                 )
                 assert edit.status is NativeWriteStatus.CONFIRMED
                 assert edit.readback is not None and edit.readback.port == 1
+                assert (
+                    edit.readback.require_report().decoded["wake_occupied_raw"] == 2160
+                )
 
             product, _ = await asyncio.gather(
                 manager.read_block_group(4, NativeBlockQuery(_PLANT, 0)),
@@ -504,3 +513,43 @@ class FirmwareInteropTests(unittest.IsolatedAsyncioTestCase):
                 (0xE7, 0x1234),
             ]
             assert book.channels[0].frame.decoded["extension_hex"] == "e4"
+
+    async def test_setpoint_refuses_changed_application_and_checks_off_readback(
+        self,
+    ) -> None:
+        def read(block: str, reply: str) -> Exchange:
+            return _block(1, "31 40000000", block, reply)
+
+        identify = read("0000", "6e7311c9 00003f ee8a01 760402")
+        secondary = read("2b00", "6e7311c7 2b000f 4e07 f406")
+        script = (
+            identify,
+            read("2600", "6e7311c4 260001 02"),  # Now a DHW controller, not a hot tub.
+            identify,
+            read("2600", "6e7311c4 260001 01"),
+            read("2a00", "6e7311cb 2a00ff 4e07 f406 4605 6207"),
+            secondary,
+            secondary,
+            (1, "6df00008 3107 2b00 4e07 d804", ()),
+            read("2b00", "6e7311c5 2b000c f406"),  # ACK without applying Off.
+        )
+        async with _gateway(script) as manager:
+            change = SetpointTargetChange(
+                SetpointApplication.HOT_TUB,
+                SetpointSlot.SLEEP,
+                None,
+            )
+            with self.assertRaisesRegex(ValueError, "confirm the selected application"):
+                await manager.write_setpoint_target(1, _SETPOINT, change, preview=False)
+            result = await manager.write_setpoint_target(
+                1,
+                _SETPOINT,
+                change,
+                preview=False,
+            )
+            assert result.tx_result and result.tx_result.status is TxStatus.ACK
+            assert result.status is NativeWriteStatus.DIFFERENT
+            assert (
+                result.readback
+                and result.readback.require_report().decoded["sleep_raw"] == 1780
+            )

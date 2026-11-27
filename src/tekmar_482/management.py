@@ -33,6 +33,7 @@ from .error_reports import ALL_SOURCES, ErrorReports, GatewayErrorCounter, sourc
 from .exceptions import ConnectionClosedError, ProtocolError, TekmarError
 from .native import NativeAddress, NativeTargets
 from .native_schedule import edit_schedule_time
+from .native_setpoint import edit_setpoint_target
 from .native_snow_control import apply_snowmelt_group, edit_snowmelt_setpoint
 from .native_status import StatusCollector, snowmelt_status_query
 from .native_target_edit import edit_thermostat_target
@@ -60,6 +61,7 @@ if TYPE_CHECKING:
     from .client import Tekmar482Client
     from .native import NativeBlockQuery, NativeFrame, NativeMessage
     from .native_schedule import ScheduleChange, ScheduleTarget
+    from .native_setpoint import SetpointTargetChange
     from .native_snow_control import SnowmeltGroupResult, SnowmeltOperation
     from .native_state import NativePath
     from .native_status import NativeStatusBatch
@@ -576,6 +578,19 @@ class BridgeManagement(_Management):
                 expected_application=expected_application,
                 preview=preview,
             )
+
+    async def write_setpoint_target(
+        self,
+        port: int,
+        target: NativeAddress,
+        change: SetpointTargetChange,
+        *,
+        timeout: float = DEFAULT_BLOCK_TIMEOUT,
+        preview: bool = True,
+    ) -> NativeWriteResult:
+        """Preview or verify one stored target on the specified 161/162 application."""
+        async with self._block_editor(port, timeout) as editor:
+            return await edit_setpoint_target(editor, target, change, preview=preview)
 
     async def write_schedule_time(
         self,

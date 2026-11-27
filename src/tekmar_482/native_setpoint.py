@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from enum import Enum
+from math import isfinite
 from typing import TYPE_CHECKING
 
-from ._native_payloads.line import SetpointAssignment
+from ._native_payloads.codec import fahrenheit
+from ._native_payloads.line import SetpointApplication, SetpointAssignment
 from ._native_payloads.setpoint import (
     APPLICATION_SETUP,
     OPERATION_SETUP,
@@ -13,18 +16,164 @@ from ._native_payloads.setpoint import (
     TARGET_BLOCKS,
     SetpointTargets,
 )
+from ._native_payloads.writes import BlockPatch, NativeField
+from .native import NativeBlockQuery, require_enum
+from .native_identity import NativeIdentity
+from .units import celsius_to_degh, fahrenheit_to_celsius, fahrenheit_to_degh
 
 if TYPE_CHECKING:
-    from ._native_payloads.line import SetpointApplication
     from ._native_payloads.products import NativeProduct
     from ._native_payloads.setpoint import SetpointReadings, SetpointStatus
-    from .native import BlockKey, NativeFrame, NativeMessage
-    from .native_identity import NativeIdentity
+    from .native import BlockKey, NativeAddress, NativeFrame, NativeMessage
     from .native_state import NativePath
+    from .native_write import NativeBlockEditor, NativeWriteResult
 
 SETPOINT_BLOCKS = frozenset(
     (APPLICATION_SETUP, OPERATION_SETUP, OVERRIDE_TIME, *TARGET_BLOCKS),
 )
+
+# The 161/162 manuals give the target minima and application maximum ranges
+# in Fahrenheit. The reported maximum can restrict the range further.
+_TARGET_BOUNDS = {
+    app: (fahrenheit_to_degh(low), fahrenheit_to_degh(high))
+    for app, low, high in (
+        (SetpointApplication.SETPOINT_ON_OFF, -4, 239),
+        (SetpointApplication.SETPOINT_PWM, -4, 239),
+        (SetpointApplication.HOT_TUB, 40, 104),
+        (SetpointApplication.DHW, 40, 200),
+        (SetpointApplication.FLOOR, 40, 110),
+        (SetpointApplication.POOL, 40, 120),
+    )
+}
+# SW 11 SetpointControl.adjustment_for explicitly names this Off encoding.
+_HOT_TUB_OFF = 1240
+
+
+class SetpointSlot(Enum):
+    """Physical target fields; Wake and Sleep require a separate table."""
+
+    WAKE_OCCUPIED = NativeField.WAKE_OCCUPIED
+    UNOCCUPIED_SLEEP = NativeField.UNOCCUPIED_SLEEP
+    AWAY = NativeField.AWAY
+    WAKE = NativeField.WAKE
+    SLEEP = NativeField.SLEEP
+
+    @property
+    def secondary(self) -> bool:
+        return self in (SetpointSlot.WAKE, SetpointSlot.SLEEP)
+
+    def raw_value(self, targets: SetpointTargets) -> int | None:
+        match self:
+            case SetpointSlot.WAKE_OCCUPIED:
+                return targets.wake_occupied_raw
+            case SetpointSlot.UNOCCUPIED_SLEEP:
+                return targets.unoccupied_sleep_raw
+            case SetpointSlot.AWAY:
+                return targets.away_raw
+            case SetpointSlot.WAKE:
+                return targets.wake_raw
+            case SetpointSlot.SLEEP:
+                return targets.sleep_raw
+
+
+@dataclass(frozen=True, slots=True)
+class StoredSetpointTarget:
+    """One supported word, including Off and other non-temperature values."""
+
+    application: SetpointApplication
+    raw: int
+
+    @property
+    def is_off(self) -> bool:
+        return (
+            self.application is SetpointApplication.HOT_TUB and self.raw == _HOT_TUB_OFF
+        )
+
+    @property
+    def celsius(self) -> float | None:
+        low, high = _TARGET_BOUNDS[self.application]
+        if low <= self.raw <= high and (value := fahrenheit(self.raw)) is not None:
+            return fahrenheit_to_celsius(value)
+        return None
+
+
+@dataclass(frozen=True, slots=True)
+class SetpointTargetChange:
+    """Edit one stored target in Celsius for an explicitly selected application."""
+
+    application: SetpointApplication
+    slot: SetpointSlot
+    celsius: float | None
+
+    def __post_init__(self) -> None:
+        require_enum(self.application, SetpointApplication)
+        require_enum(self.slot, SetpointSlot)
+        if self.celsius is None:
+            if self.application is not SetpointApplication.HOT_TUB:
+                msg = "the native Off word is only documented for hot tub targets"
+                raise ValueError(msg)
+        elif isinstance(self.celsius, bool) or not isfinite(self.celsius):
+            msg = "expected a finite setpoint temperature"
+            raise ValueError(msg)
+
+    def wire_value(self) -> int:
+        if self.celsius is None:
+            return _HOT_TUB_OFF
+        raw = celsius_to_degh(self.celsius)
+        low, high = _TARGET_BOUNDS[self.application]
+        if not low <= raw <= high:
+            msg = "temperature outside the application's target range"
+            raise ValueError(msg)
+        return raw
+
+
+async def edit_setpoint_target(
+    editor: NativeBlockEditor,
+    target: NativeAddress,
+    change: SetpointTargetChange,
+    *,
+    preview: bool,
+) -> NativeWriteResult:
+    raw = change.wire_value()
+    identity = (await editor.read(NativeBlockQuery(target, 0))).require_report()
+    device = NativeIdentity.from_report(identity.decoded)
+    if (
+        device is None
+        or not (product := device.product)
+        or product.family != "setpoint_control"
+    ):
+        msg = "target adjustment requires an identified setpoint controller"
+        raise ValueError(msg)
+    if product.model == "161" and change.slot is not SetpointSlot.WAKE_OCCUPIED:
+        msg = "the 161 only has an adjustable occupied target"
+        raise ValueError(msg)
+    setup = (
+        await editor.read(NativeBlockQuery(target, APPLICATION_SETUP))
+    ).require_report()
+    app = SetpointAssignment.from_fields(setup.decoded).application
+    if app is not change.application:
+        msg = "the setpoint controller did not confirm the selected application"
+        raise ValueError(msg)
+    if app.target_block not in product.candidate_blocks:
+        msg = f"{product.model}: application not available"
+        raise ValueError(msg)
+
+    query = NativeBlockQuery(target, app.target_block)
+    before = (await editor.read(query)).require_report()
+    maximum = SetpointTargets.from_reports(before.decoded, {}).maximum_raw
+    if (
+        change.celsius is not None
+        and maximum is not None
+        and raw > maximum
+        and fahrenheit(maximum) is not None
+    ):
+        msg = "target exceeds the reported maximum"
+        raise ValueError(msg)
+    if change.slot.secondary:
+        query = NativeBlockQuery(target, app.target_block + 1)
+        before = (await editor.read(query)).require_report()
+    patch = BlockPatch.from_fields(query.block_id, {change.slot.value: raw})
+    return await editor.write(query, patch, before=before, preview=preview)
 
 
 @dataclass(frozen=True, slots=True)
@@ -45,6 +194,13 @@ class NativeSetpointControl:
         if self.status is None or self.sample_application is None:
             return None
         return self.status.readings(self.sample_application)
+
+    def target(self, slot: SetpointSlot) -> StoredSetpointTarget | None:
+        """Return the stored field, never an alias or the live target."""
+        app, targets = self.assignment.application, self.targets
+        if app is None or targets is None or (raw := slot.raw_value(targets)) is None:
+            return None
+        return StoredSetpointTarget(app, raw)
 
 
 @dataclass(slots=True)

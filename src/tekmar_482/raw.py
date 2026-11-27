@@ -15,6 +15,7 @@ from .constants import TN4_PORTS
 from .exceptions import ConnectionClosedError, ProtocolError, TekmarError
 from .native import NativeFrame, NativeMessage
 from .native_schedule import edit_schedule_time
+from .native_setpoint import edit_setpoint_target
 from .native_snow_control import apply_snowmelt_group, edit_snowmelt_setpoint
 from .native_status import StatusCollector
 from .native_target_edit import edit_thermostat_target
@@ -32,6 +33,7 @@ if TYPE_CHECKING:
     from .management import ErrorReporting
     from .native import NativeAddress, NativeBlockQuery, NativeTargets
     from .native_schedule import ScheduleChange, ScheduleTarget
+    from .native_setpoint import SetpointTargetChange
     from .native_snow_control import SnowmeltGroupResult, SnowmeltOperation
     from .native_status import NativeStatusBatch
     from .native_target_edit import ThermostatTargetChange
@@ -383,6 +385,16 @@ class BridgeStream(NativeReader, Protocol):
         timeout: float = 20,
         preview: bool = True,
     ) -> NativeWriteResult: ...
+    async def write_setpoint_target(
+        self,
+        port: int,
+        target: NativeAddress,
+        change: SetpointTargetChange,
+        *,
+        source: NativeAddress,
+        timeout: float = 20,
+        preview: bool = True,
+    ) -> NativeWriteResult: ...
     async def set_snowmelt_group(
         self,
         port: int,
@@ -612,6 +624,20 @@ class RawDispatcher:
                 expected_application=expected_application,
                 preview=preview,
             )
+
+    async def write_setpoint_target(
+        self,
+        port: int,
+        target: NativeAddress,
+        change: SetpointTargetChange,
+        *,
+        source: NativeAddress,
+        timeout: float = 20,
+        preview: bool = True,
+    ) -> NativeWriteResult:
+        """Preview or verify one stored target on the specified 161/162 application."""
+        async with self._editor(port, target, source, timeout) as editor:
+            return await edit_setpoint_target(editor, target, change, preview=preview)
 
     async def set_snowmelt_group(
         self,

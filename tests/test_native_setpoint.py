@@ -3,6 +3,7 @@ import unittest
 
 from tekmar_482 import (
     CaptureGap,
+    NativeAddress,
     NativeBlockBatch,
     NativeBlockQuery,
     NativeFrame,
@@ -11,12 +12,17 @@ from tekmar_482 import (
     NativeSetpointControl,
     NativeSnapshot,
     NativeState,
+    NativeWriteResult,
     Packet,
     SetpointApplication,
+    SetpointSlot,
+    SetpointTargetChange,
+    StoredSetpointTarget,
     watch_native,
 )
 from tekmar_482.cli import build_parser
 from tekmar_482.cli_native_watch import setpoint_fields, watch_all_from_args
+from tekmar_482.native_write import NativeWriteStatus
 from tekmar_482.raw import RawDispatcher
 
 from .native_fixtures import TEST_PATH, block, frame, identity
@@ -26,6 +32,8 @@ _OTHER = NativePath(2, TEST_PATH.subnet, TEST_PATH.node)
 _HOST = NativePath(TEST_PATH.port, 0, 0)
 _161 = 101101
 _162 = 101102
+_APP = SetpointApplication
+_SLOT = SetpointSlot
 
 
 def _view(state: NativeState, path: NativePath = TEST_PATH) -> NativeSetpointControl:
@@ -141,6 +149,189 @@ class SetpointStateTests(unittest.TestCase):
         (control,) = NativeSnapshot(batches, ()).setpoint_controls
         assert control.targets and control.targets.wake_occupied_raw == 0x620
         assert control.status is None and control.readings is None
+
+    def test_stored_values_separate_off_temperature_and_unsupported_slots(self) -> None:
+        state = NativeState()
+        for report in (
+            identity(_162),
+            block(0x26, bytes.fromhex("01 01")),
+            block(0x2A, bytes.fromhex("cf d804 b207 0000 6207")),
+        ):
+            state.observe(report)
+        control = _view(state)
+        off = control.target(_SLOT.WAKE_OCCUPIED)
+        assert off and off.raw == 1240 and off.is_off and off.celsius is None
+        assert control.target(_SLOT.AWAY) is None
+        assert control.target(_SLOT.SLEEP) is None
+
+        state.observe(block(0x26, bytes.fromhex("01 03")))
+        assert _view(state).target(_SLOT.WAKE_OCCUPIED) is None
+        state.observe(block(0x28, bytes.fromhex("0f 9204 ffff")))
+        control = _view(state)
+        zero = control.target(_SLOT.WAKE_OCCUPIED)
+        invalid = control.target(_SLOT.UNOCCUPIED_SLEEP)
+        assert zero and not zero.is_off and zero.celsius == 0
+        assert invalid and invalid.raw == 0xFFFF and invalid.celsius is None
+
+    def test_edit_range_and_off_follow_the_selected_application(self) -> None:
+        assert SetpointTargetChange(_APP.DHW, _SLOT.AWAY, 55).wire_value() == 2160
+        assert (
+            SetpointTargetChange(_APP.HOT_TUB, _SLOT.WAKE_OCCUPIED, None).wire_value()
+            == 1240
+        )
+        assert StoredSetpointTarget(_APP.HOT_TUB, 1890).celsius == 40
+        for app, value in (
+            (_APP.DHW, None),
+            (_APP.HOT_TUB, 41),
+            (_APP.HOT_TUB, 3.9),
+            (_APP.FLOOR, True),
+            (_APP.POOL, float("nan")),
+            (_APP.SETPOINT_ON_OFF, -21),
+        ):
+            with self.subTest(app=app, value=value), self.assertRaises(ValueError):
+                SetpointTargetChange(app, _SLOT.WAKE_OCCUPIED, value).wire_value()
+
+    def test_cli_defaults_to_preview_with_off_separate_from_zero(self) -> None:
+        parser = build_parser()
+        for text, expected in (("off", None), ("0", 0.0)):
+            args = parser.parse_args(
+                [
+                    "set-setpoint-target",
+                    "1",
+                    "0x31",
+                    "7",
+                    "hot_tub",
+                    "sleep",
+                    text,
+                    "--tcp",
+                    "localhost:3001",
+                ],
+            )
+            assert (args.application, args.slot) == ("hot_tub", "sleep")
+            assert args.value == expected and not args.confirm
+
+
+class SetpointEditTests(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self) -> None:
+        self.tx: asyncio.Queue[bytes] = asyncio.Queue()
+        self.stream = RawDispatcher(self.tx.put, 64)
+        uart: asyncio.Queue[Packet] = asyncio.Queue()
+        await self.enterAsyncContext(self.stream.receiving(uart.get))
+        self.source = NativeAddress(0x12, 2)
+
+    async def sent(self) -> NativeMessage:
+        async with asyncio.timeout(1):
+            raw = await self.tx.get()
+        assert raw[:2] == bytes([1, TEST_PATH.port])
+        return NativeMessage.from_bytes(raw[2:])
+
+    def ack(self) -> None:
+        self.stream.feed(Packet(1, bytes([2, TEST_PATH.port, 0])))
+
+    async def answer(self, report: NativeFrame) -> None:
+        b = int.from_bytes(report.message.payload[:2], "little")
+        query = NativeBlockQuery(TEST_PATH.address, b)
+        self.assertEqual(await self.sent(), query.request(self.source))
+        self.ack()
+        self.stream.feed(Packet(1, bytes([0, report.port]) + bytes(4) + report.body))
+
+    def edit(
+        self,
+        change: SetpointTargetChange,
+        *,
+        preview: bool,
+    ) -> asyncio.Task[NativeWriteResult]:
+        return asyncio.create_task(
+            self.stream.write_setpoint_target(
+                TEST_PATH.port,
+                TEST_PATH.address,
+                change,
+                source=self.source,
+                timeout=1,
+                preview=preview,
+            ),
+        )
+
+    async def test_short_floor_layout_with_ack_and_compact_readback(self) -> None:
+        task = self.edit(
+            SetpointTargetChange(_APP.FLOOR, _SLOT.WAKE_OCCUPIED, 20),
+            preview=False,
+        )
+        await self.answer(identity(_161))
+        await self.answer(block(0x26, bytes.fromhex("01 04")))
+        await self.answer(block(0x2E, bytes.fromhex("3f 0006 0000 3006")))
+        sent = await self.sent()
+        assert sent.message_id == 0x2DF and sent.source == self.source
+        assert sent.payload == bytes.fromhex("3507 2e00 fa05 0000 3006")
+        self.ack()
+        await self.answer(block(0x2E, bytes.fromhex("03 fa05")))
+        result = await task
+        assert result.status is NativeWriteStatus.CONFIRMED and self.tx.empty()
+        assert (
+            result.readback
+            and result.readback.require_report().decoded["wake_occupied_raw"] == 1530
+        )
+
+    async def test_secondary_edit_does_not_fall_back_to_primary(self) -> None:
+        for reported, preview in (("0f f005 0006", True), ("03 f005 ffff", False)):
+            with self.subTest(reported=reported):
+                task = self.edit(
+                    SetpointTargetChange(_APP.DHW, _SLOT.SLEEP, 55),
+                    preview=preview,
+                )
+                await self.answer(identity(_162))
+                await self.answer(block(0x26, bytes.fromhex("01 02")))
+                await self.answer(block(0x2C, bytes.fromhex("ff 2006 1006 0000 0009")))
+                await self.answer(block(0x2D, bytes.fromhex(reported)))
+                if preview:
+                    result = await task
+                    assert result.status is NativeWriteStatus.PREVIEW
+                    assert result.proposed.payload == bytes.fromhex(
+                        "3507 2d00 f005 7008",
+                    )
+                else:
+                    with self.assertRaisesRegex(ValueError, "does not report"):
+                        await task
+                assert self.tx.empty()
+
+    async def test_app_slot_and_maximum_must_allow_edit(self) -> None:
+        for number, change, reports, error in (
+            (
+                _162,
+                SetpointTargetChange(_APP.DHW, _SLOT.WAKE_OCCUPIED, 55),
+                (block(0x26, bytes.fromhex("01 05")),),
+                "confirm the selected application",
+            ),
+            (
+                _161,
+                SetpointTargetChange(_APP.HOT_TUB, _SLOT.AWAY, None),
+                (),
+                "occupied target",
+            ),
+            (
+                _162,
+                SetpointTargetChange(_APP.HOT_TUB, _SLOT.SLEEP, 40),
+                (
+                    block(0x26, bytes.fromhex("01 01")),
+                    block(0x2A, bytes.fromhex("ff 0006 0000 0000 3007")),
+                ),
+                "reported maximum",
+            ),
+            (
+                100103,
+                SetpointTargetChange(_APP.DHW, _SLOT.WAKE_OCCUPIED, 55),
+                (),
+                "identified setpoint",
+            ),
+        ):
+            with self.subTest(error=error):
+                task = self.edit(change, preview=False)
+                await self.answer(identity(number))
+                for report in reports:
+                    await self.answer(report)
+                with self.assertRaisesRegex(ValueError, error):
+                    await task
+                assert self.tx.empty()
 
 
 class SetpointWatchTests(unittest.IsolatedAsyncioTestCase):

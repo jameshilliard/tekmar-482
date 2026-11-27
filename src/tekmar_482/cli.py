@@ -15,7 +15,7 @@ from typing import TYPE_CHECKING, Any, TextIO
 
 from ._native_payloads.climate import REMOTE_MODES, ThermostatMode
 from ._native_payloads.io import IoEndpoint
-from ._native_payloads.line import GROUP_IDS
+from ._native_payloads.line import GROUP_IDS, SetpointApplication
 from ._native_payloads.queries import StatusRequest
 from ._native_payloads.scenes import NativeScene, SceneResponse
 from ._native_payloads.thermostat import TargetSlot, ThermostatTarget
@@ -73,6 +73,7 @@ from .native_io import IoDirectory
 from .native_scene import scene_response_fields
 from .native_schedule import read_weekly_schedule
 from .native_sensors import read_thermostat_sensors
+from .native_setpoint import SetpointSlot, SetpointTargetChange
 from .native_snapshot import read_native_snapshot
 from .native_snow_control import SnowmeltOperation
 from .native_state import NativeState
@@ -127,6 +128,7 @@ _BLOCK_EDITS = frozenset(
     {
         "write-block",
         "set-climate-mode",
+        "set-setpoint-target",
         "set-thermostat-target",
         "scene-response",
         "write-schedule",
@@ -448,7 +450,23 @@ def _add_block_commands(
         type=float,
         help="degrees Celsius or physical percent",
     )
-    for command in (mode, adjustment):
+    setpoint = subparsers.add_parser(
+        "set-setpoint-target",
+        parents=[parent],
+        help="preview or verify one stored 161/162 target in Celsius",
+    )
+    _add_native_target(setpoint)
+    setpoint.add_argument(
+        "application",
+        choices=[a.name.lower() for a in SetpointApplication],
+    )
+    setpoint.add_argument("slot", choices=[s.name.lower() for s in SetpointSlot])
+    setpoint.add_argument(
+        "value",
+        type=_celsius_or_off,
+        help="degrees Celsius, or 'off' for hot tub",
+    )
+    for command in (mode, adjustment, setpoint):
         command.add_argument(
             "--confirm",
             action="store_true",
@@ -506,6 +524,10 @@ def _add_scene_commands(
         action="store_true",
         help="update and verify; default is preview",
     )
+
+
+def _celsius_or_off(text: str) -> float | None:
+    return None if text.lower() == "off" else float(text)
 
 
 def _add_device_groups(
@@ -1091,12 +1113,14 @@ async def _run_block_edit(
     if isinstance(link, BridgeManagement):
         mode, target = link.write_thermostat_mode, link.write_thermostat_target
         schedule, block = link.write_schedule_time, link.write_block
+        setpoint = link.write_setpoint_target
     else:
         source = NativeAddress(args.source_subnet, args.source_node)
         mode = partial(link.write_thermostat_mode, source=source)
         target = partial(link.write_thermostat_target, source=source)
         schedule = partial(link.write_schedule_time, source=source)
         block = partial(link.write_block, source=source)
+        setpoint = partial(link.write_setpoint_target, source=source)
     timeout, preview = args.timeout, not args.confirm
     if args.command == "set-climate-mode":
         return await mode(
@@ -1116,6 +1140,18 @@ async def _run_block_edit(
             args.port,
             address,
             change,
+            timeout=timeout,
+            preview=preview,
+        )
+    if args.command == "set-setpoint-target":
+        return await setpoint(
+            args.port,
+            address,
+            SetpointTargetChange(
+                SetpointApplication[args.application.upper()],
+                SetpointSlot[args.slot.upper()],
+                args.value,
+            ),
             timeout=timeout,
             preview=preview,
         )

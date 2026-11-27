@@ -654,6 +654,42 @@ Use setup block `0x0f` to assign a capable device its own zone schedule
 editing event times; the client refuses setup rewrites that could silently
 demote a master. See the [native schedule reference](https://github.com/jameshilliard/tekmar-482-firmware/blob/master/docs/tn4-frames.md#weekly-schedules).
 
+### Setpoint controllers
+
+Select the application and the exact stored field to edit a 161 or 162:
+
+```bash
+tekmar-482 set-setpoint-target 1 0x31 7 dhw wake_occupied 55 --tcp 192.0.2.10:3001
+```
+
+The five fields are `wake_occupied`, `unoccupied_sleep`, `away`, `wake`, and
+`sleep`. The last two require a separate table with the selected word
+supported; they never fall back to the combined fields. The 161 only lets
+you adjust the occupied target. See the
+[161](https://www.watts.com/dfsmedia/0533dbba17714b1ab581ab07a4cbb521/42727-source/161-dl-06.pdf)
+and [162](https://www.watts.com/dfsmedia/0533dbba17714b1ab581ab07a4cbb521/42733-source/638820695640000000/162-d-06.pdf)
+manuals for the applications and target ranges.
+
+The command previews by default. With `--confirm`, the client checks the
+peer's identity, current application, and supported target fields. It
+checks the reported maximum if present, changes one word, and reads it
+back. Stored targets use degH even for DHW. For a hot tub target, `off`
+uses the word defined by the 483 SW 11 setpoint model; Off encodings for
+other applications are not established. This edit does not send a group
+enable, change the application, or activate a schedule.
+
+```python
+from tekmar_482 import SetpointApplication, SetpointSlot, SetpointTargetChange
+
+change = SetpointTargetChange(SetpointApplication.DHW, SetpointSlot.WAKE_OCCUPIED, 55)
+preview = await manager.write_setpoint_target(port, address, change)
+```
+
+Pass `preview=False` to send and verify. The Raw stream takes the same
+change plus an explicit `source=`. Read `control.target(slot)` on a
+`NativeSetpointControl` for the stored word and its Celsius value, if
+known. `control.readings` remains separate live status.
+
 ### Snowmelt
 
 On an identified snowmelt controller, use `SnowmeltBlock` for addressed
