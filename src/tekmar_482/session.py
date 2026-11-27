@@ -192,6 +192,7 @@ class Tekmar482Session:
             tuple[frozenset[int], int | None],
         ] = {}
         self._observers: set[Callable[[TrpcPacket, TrpcCommand | None], None]] = set()
+        self._packet_observers: set[Callable[[Packet], None]] = set()
         self._trace: NormalTrace | None = None
         self._error_reports: ErrorReports | None = None
         self._coalesced_updates: OrderedDict[Hashable, _QueuedUpdate] = OrderedDict()
@@ -730,6 +731,18 @@ class Tekmar482Session:
         return ReportSubscription(queue, lambda: self._unsubscribe_reports(queue))
 
     @contextmanager
+    def observe_received_packets(
+        self,
+        callback: Callable[[Packet], None],
+    ) -> Iterator[None]:
+        """Tap inbound packets before matching. Callbacks must not block."""
+        self._packet_observers.add(callback)
+        try:
+            yield
+        finally:
+            self._packet_observers.discard(callback)
+
+    @contextmanager
     def observe_messages(
         self,
         callback: Callable[[TrpcPacket, TrpcCommand | None], None],
@@ -864,6 +877,11 @@ class Tekmar482Session:
                 update.future.set_result(result)
 
     async def _dispatch_packet(self, packet: Packet) -> None:
+        for callback in tuple(self._packet_observers):
+            try:
+                callback(packet)
+            except Exception:
+                LOGGER.exception("tekmar 482 packet observer failed")
         if self._trace is not None:
             self._trace.record(packet, outbound=False)
         async with self._condition:

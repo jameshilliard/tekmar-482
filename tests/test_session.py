@@ -40,6 +40,29 @@ def report(method: TrpcMethodId, **fields: int) -> TrpcPacket:
 
 
 class SessionTest(unittest.IsolatedAsyncioTestCase):
+    async def test_packet_observer_sees_original_bytes_without_consuming_replies(
+        self,
+    ) -> None:
+        wire = BlockingWriteTransport()
+        seen: list[Packet] = []
+        async with Tekmar482Client(wire) as client, asyncio.timeout(2):
+            with client.session.observe_received_packets(seen.append):
+                pending = asyncio.create_task(
+                    client.request_response(TrpcMethod.PROTOCOL_VERSION),
+                )
+                await wire.next_write()
+                wire.release_write()
+                noise = Packet(1, b"\x35\xca")
+                reply = response(TrpcMethod.PROTOCOL_VERSION, version=3).to_packet()
+                wire.queue_packet(noise)
+                wire.queue_packet(reply)
+                assert await pending == TrpcPacket.from_packet(reply)
+                assert seen == [noise, reply]
+            wire.queue_packet(noise)
+            for _ in range(3):
+                assert await client.read_packet() is not None
+            assert seen == [noise, reply]
+
     async def test_outdoor_source_is_not_an_echo_of_the_host_temperature(self) -> None:
         transport = BlockingWriteTransport()
         method = TrpcMethod.OUTDOOR_TEMP
