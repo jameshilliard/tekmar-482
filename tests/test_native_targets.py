@@ -4,6 +4,8 @@ import unittest
 from tekmar_482 import (
     CaptureGap,
     FanDuctStatus,
+    HeatingStageSetup,
+    HeatPumpSetup,
     NativeAddress,
     NativeBlockBatch,
     NativeBlockQuery,
@@ -26,7 +28,7 @@ from tekmar_482 import (
     watch_native,
 )
 from tekmar_482.cli import build_parser
-from tekmar_482.cli_status import adjustment_fields
+from tekmar_482.cli_status import adjustment_fields, climate_fields
 from tekmar_482.raw import RawDispatcher
 
 from .native_fixtures import TEST_PATH, block, frame, identity
@@ -59,6 +61,66 @@ def _air(target: int, current: int = 0x600) -> NativeFrame:
 
 
 class AdjustmentTests(unittest.TestCase):
+    def test_equipment_setup_is_reported_configuration_not_relay_state(self) -> None:
+        state = NativeState()
+        state.observe(identity(_MODERN))
+        for b, data in (
+            (1, "13 02 8b 06"),
+            (4, "31 02 aabbcc 01 03"),
+            (8, "17 04 00 23 07"),
+            (0x97, "03 09 08"),
+        ):
+            state.observe(_report(b, data))
+        (climate,) = state.thermostats
+        setup = climate.setup
+        assert setup.stage_setup is not None
+        assert setup.stage_setup.heating_stage1 == HeatingStageSetup(
+            2,
+            11,
+            pump_required=True,
+        )
+        assert setup.stage_setup.heating_stage2 == HeatingStageSetup(None, None, None)
+        assert setup.stage_setup.stage2_heat_source_raw == 6
+        assert setup.cooling_stages == 2 and setup.cooling_setup is not None
+        assert setup.cooling_setup.minimum_run_time_raw is None
+        assert setup.cooling_setup.heat_cool_priority_raw == 3
+        assert setup.heat_pump_setup == HeatPumpSetup(9, 8)
+        assert setup.floor_cooling_enabled is None
+        assert (
+            climate.adjustments.fan_setup
+            and climate.adjustments.fan_setup.delay_raw == 7
+        )
+        assert climate.adjustments.fan is None and climate.air is None
+        assert climate_fields(climate)["cooling_setup"] == {
+            "stages": 2,
+            "minimum_run_time_raw": None,
+            "minimum_off_time_raw": None,
+            "cycles_per_hour": None,
+            "heat_cool_interlock_raw": 1,
+            "heat_cool_priority_raw": 3,
+        }
+        state.observe(
+            frame(
+                0x2DF,
+                bytes([TEST_PATH.subnet, TEST_PATH.node, 1, 0, 2, 0, 1, 0, 4]),
+                NativePath(TEST_PATH.port, 0, 0),
+            ),
+        )
+        assert state.thermostats[0].setup.stage_setup is None
+        assert 1 in state.thermostats[0].adjustments.missing_blocks
+        state.observe(CaptureGap(1))
+        assert not state.thermostats
+
+    def test_fan_delay_change_does_not_retire_stored_target(self) -> None:
+        state = NativeState()
+        state.observe(identity(_MODERN))
+        state.observe(_report(8, "13 04 00 03"))
+        state.observe(_report(9, "01 25"))
+        state.observe(_report(8, "13 04 00 07"))
+        assert state.block(TEST_PATH, 9) is not None
+        state.observe(_report(8, "13 00 00 07"))
+        assert state.block(TEST_PATH, 9) is None
+
     def test_native_temperature_status_withholds_reserved_values(self) -> None:
         for word in (0, 0x4000, 0x8000, 0xC000, 0xFFFF):
             fan = FanDuctStatus(0, word, 1530)
@@ -267,6 +329,36 @@ class TargetSessionTests(unittest.IsolatedAsyncioTestCase):
             _HOST,
         )
         self.ack()
+
+    async def test_watch_reads_cataloged_equipment_setup_once(self) -> None:
+        watch = asyncio.create_task(
+            watch_native(
+                self.stream,
+                [TEST_PATH],
+                duration=0.2,
+                schedules=False,
+                thermostat_sensors=False,
+            ),
+        )
+        await self.query(0)
+        self.rx(identity(105103))  # 552 with floor cooling in the reference catalog.
+        for b, data in (
+            (3, "01 01"),
+            (1, "03 02 87"),
+            (5, "01 25"),
+            (0x0D, "00"),
+            (0x53, "00"),
+            (0x58, "01 01"),
+        ):
+            await self.query(b)
+            self.rx(_report(b, data))
+        result = await watch
+        assert self.tx.empty() and result.reads == 7
+        (climate,) = result.state.thermostats
+        assert not climate.adjustments.missing_blocks
+        assert climate.setup.stage_setup is not None
+        assert climate.setup.floor_cooling_enabled is True
+        assert climate.setup.cooling_stages is None
 
     async def test_target_change_retires_stale_read_and_ignores_temperature_drift(
         self,

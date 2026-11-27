@@ -4,17 +4,20 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from enum import IntEnum
 
-from .codec import SETBACK, Fields, Reader, fahrenheit, temp
+from .codec import SETBACK, Fields, Reader, fahrenheit, integer_field, temp
 from .products import NativeProduct
 from .thermostat import ThermostatTarget
 
 AIR_GROUP_CONFIG = 0x36a
 AIR_MEMBER = 0x36f
 AIR_MASTER = 0x377
+STAGE_SETUP = 0x01
 HEATING_SETUP = 0x03
 COOLING_SETUP = 0x04
+FLOOR_COOLING_ENABLE = 0x58
 HEAT_PUMP_CONFIG = 0x97
 MODE_BLOCKS = (HEATING_SETUP, COOLING_SETUP, HEAT_PUMP_CONFIG)
+EXTRA_CLIMATE_SETUP = (STAGE_SETUP, FLOOR_COOLING_ENABLE)
 
 
 class ThermostatMode(IntEnum):
@@ -45,14 +48,71 @@ REMOTE_MODES = (ThermostatMode.AUTO, ThermostatMode.HEAT, ThermostatMode.COOL,
 
 
 @dataclass(frozen=True, slots=True)
+class HeatingStageSetup:
+    terminal_raw: int | None
+    pump_delay_raw: int | None
+    pump_required: bool | None
+
+
+@dataclass(frozen=True, slots=True)
+class StageSetup:
+    heating_stage1: HeatingStageSetup
+    heating_stage2: HeatingStageSetup
+    stage2_heat_source_raw: int | None
+
+    @classmethod
+    def from_report(cls, fields: Mapping[str, object]) -> "StageSetup":
+        def stage(n: int) -> HeatingStageSetup:
+            prefix = f"stage{n}_"
+            pump = integer_field(fields, prefix + "pump_required")
+            return HeatingStageSetup(integer_field(fields, prefix + "terminal_raw"),
+                                     integer_field(fields, prefix + "pump_delay"),
+                                     None if pump is None else bool(pump))
+
+        return cls(stage(1), stage(2), integer_field(fields, "stage2_heat_source_raw"))
+
+
+@dataclass(frozen=True, slots=True)
+class CoolingSetup:
+    stages: int | None
+    minimum_run_time_raw: int | None
+    minimum_off_time_raw: int | None
+    cycles_per_hour: int | None
+    heat_cool_interlock_raw: int | None
+    heat_cool_priority_raw: int | None
+
+    @classmethod
+    def from_report(cls, fields: Mapping[str, object]) -> "CoolingSetup":
+        return cls(integer_field(fields, "supported_cooling_stages"),
+                   integer_field(fields, "minimum_cooling_run_time"),
+                   integer_field(fields, "minimum_cooling_off_time"),
+                   integer_field(fields, "cooling_cph"),
+                   integer_field(fields, "heat_cool_interlock"),
+                   integer_field(fields, "heat_cool_priority"))
+
+
+@dataclass(frozen=True, slots=True)
+class HeatPumpSetup:
+    available_mask: int | None
+    enabled_mask: int | None
+
+    @classmethod
+    def from_report(cls, fields: Mapping[str, object]) -> "HeatPumpSetup":
+        return cls(integer_field(fields, "available_heat_pumps"),
+                   integer_field(fields, "enabled_heat_pumps"))
+
+
+@dataclass(frozen=True, slots=True)
 class ThermostatConfiguration:
     product: NativeProduct
     z_number: int | None
     mode_raw: int | None
     heating_cph: int | None
     air_group_id: int | None
-    cooling_stages: int | None
-    enabled_heat_pumps: int | None
+    stage_setup: StageSetup | None
+    cooling_setup: CoolingSetup | None
+    heat_pump_setup: HeatPumpSetup | None
+    floor_cooling_raw: int | None
 
     @classmethod
     def from_blocks(cls, product: NativeProduct, z: int | None,
@@ -60,16 +120,27 @@ class ThermostatConfiguration:
         if product.family != "thermostat":
             raise ValueError("thermostat mode requires a thermostat identity")
 
-        def value(block: int, key: str) -> int | None:
-            raw = blocks.get(block, {}).get(key)
-            if isinstance(raw, int):
-                return raw
-            return None
+        heat = blocks.get(HEATING_SETUP, {})
+        stage, cool, pumps = (blocks.get(b) for b in (STAGE_SETUP, COOLING_SETUP, HEAT_PUMP_CONFIG))
+        return cls(product, z, integer_field(heat, "mode_setting"),
+                   integer_field(heat, "heating_cph"), integer_field(heat, "air_group_id"),
+                   StageSetup.from_report(stage) if stage is not None else None,
+                   CoolingSetup.from_report(cool) if cool is not None else None,
+                   HeatPumpSetup.from_report(pumps) if pumps is not None else None,
+                   integer_field(blocks.get(FLOOR_COOLING_ENABLE, {}), "floor_cooling_enable"))
 
-        return cls(product, z, value(HEATING_SETUP, "mode_setting"),
-                   value(HEATING_SETUP, "heating_cph"), value(HEATING_SETUP, "air_group_id"),
-                   value(COOLING_SETUP, "supported_cooling_stages"),
-                   value(HEAT_PUMP_CONFIG, "enabled_heat_pumps"))
+    @property
+    def cooling_stages(self) -> int | None:
+        return self.cooling_setup.stages if self.cooling_setup is not None else None
+
+    @property
+    def enabled_heat_pumps(self) -> int | None:
+        return self.heat_pump_setup.enabled_mask if self.heat_pump_setup is not None else None
+
+    @property
+    def floor_cooling_enabled(self) -> bool | None:
+        """Observed option; neither a cooling stage nor a current demand."""
+        return bool(self.floor_cooling_raw) if self.floor_cooling_raw in (0, 1) else None
 
     @property
     def mode(self) -> ThermostatMode | None:

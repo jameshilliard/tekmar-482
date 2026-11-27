@@ -6,6 +6,7 @@ from dataclasses import dataclass, field
 from enum import IntEnum
 from typing import TYPE_CHECKING
 
+from ._native_payloads.climate import EXTRA_CLIMATE_SETUP
 from ._native_payloads.layouts import SETPOINT_FIELDS
 from ._native_payloads.sensors import (
     ROOM_STATS,
@@ -48,7 +49,9 @@ class RoomLimit(IntEnum):
     MAXIMUM_ROOM_COOL = 0x55
 
 
-ADJUSTMENT_BLOCKS = frozenset((*ThermostatTarget, *RoomLimit, *_SOURCE_GATES))
+ADJUSTMENT_BLOCKS = frozenset(
+    (*ThermostatTarget, *RoomLimit, *_SOURCE_GATES, *EXTRA_CLIMATE_SETUP),
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -162,7 +165,11 @@ class AdjustmentState:
                 if before.enabled(target) != after.enabled(target):
                     self._expire(target, blocks)
         elif block == FAN_SETUP:
-            if FanSetup.from_report(old.decoded) != FanSetup.from_report(new.decoded):
+            old_fan, new_fan = (FanSetup.from_report(f.decoded) for f in (old, new))
+            if (old_fan.stages_raw, old_fan.ventilation_raw) != (
+                new_fan.stages_raw,
+                new_fan.ventilation_raw,
+            ):
                 self._expire(ThermostatTarget.FAN, blocks)
         elif block == SENSOR_SETUP:
             a, b = old.decoded, new.decoded
@@ -268,7 +275,13 @@ class AdjustmentState:
         floor = floor_configured(sensors)
         needed = {
             b
-            for b in (FAN_SETUP, HUMIDITY_SETUP, SENSOR_SETUP, *RoomLimit)
+            for b in (
+                FAN_SETUP,
+                HUMIDITY_SETUP,
+                SENSOR_SETUP,
+                *RoomLimit,
+                *EXTRA_CLIMATE_SETUP,
+            )
             if b in candidates
         }
         if product.model in _LEGACY_FLOOR and _INPUT_ONE in candidates:

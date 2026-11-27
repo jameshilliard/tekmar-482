@@ -4,7 +4,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from enum import IntEnum
 
-from .codec import Fields, Reader, fahrenheit, temp
+from .codec import Fields, Reader, fahrenheit, integer_field, temp
 from .layouts import SETPOINT_FIELDS
 
 FAN_STATUS = 0x25f
@@ -17,11 +17,6 @@ _DEGE_UNAVAILABLE = 0xff
 _TARGET_TEMP_STEP = 0.5
 _HUMIDITY_LIMITED_MODELS = frozenset({"553", "557"})
 _HUMIDITY_RANGE = range(20, 81)
-
-
-def _integer(fields: Mapping[str, object], name: str) -> int | None:
-    value = fields.get(name)
-    return value if isinstance(value, int) else None
 
 
 def _percent(raw: int | None) -> int | None:
@@ -191,8 +186,8 @@ class TargetTable:
     @classmethod
     def from_report(cls, model: str, target: ThermostatTarget, fields: Mapping[str, object]) -> "TargetTable":
         suffix = "_raw" if target.temperature else "_fan_percent" if target is ThermostatTarget.FAN else "_target_rh_percent"
-        return cls(model, target, tuple(_integer(fields, name + suffix) for name in SETPOINT_FIELDS),
-                   _integer(fields, "maximum_raw") if target is ThermostatTarget.FLOOR else None)
+        return cls(model, target, tuple(integer_field(fields, name + suffix) for name in SETPOINT_FIELDS),
+                   integer_field(fields, "maximum_raw") if target is ThermostatTarget.FLOOR else None)
 
     def raw(self, slot: TargetSlot) -> int | None:
         if not isinstance(slot, TargetSlot):
@@ -208,10 +203,20 @@ class TargetTable:
 class FanSetup:
     stages_raw: int | None
     ventilation_raw: int | None
+    minimum_heating_coil_temp_raw: int | None
+    maximum_cooling_coil_temp_raw: int | None
+    delay_raw: int | None
+    purge_raw: int | None
+    heating_purge_raw: int | None
+    cooling_purge_raw: int | None
 
     @classmethod
     def from_report(cls, fields: Mapping[str, object]) -> "FanSetup":
-        return cls(_integer(fields, "fan_stage_flags"), _integer(fields, "fan_ventilation_flags"))
+        return cls(integer_field(fields, "fan_stage_flags"), integer_field(fields, "fan_ventilation_flags"),
+                   integer_field(fields, "minimum_heating_coil_temp_raw"),
+                   integer_field(fields, "maximum_cooling_coil_temp_raw"), integer_field(fields, "fan_delay"),
+                   integer_field(fields, "fan_purge"), integer_field(fields, "heating_purge"),
+                   integer_field(fields, "cooling_purge"))
 
     @property
     def enabled(self) -> bool | None:
@@ -234,7 +239,7 @@ class HumiditySetup:
 
     @classmethod
     def from_report(cls, fields: Mapping[str, object]) -> "HumiditySetup":
-        return cls(_integer(fields, "humidity_mode_setup"), _integer(fields, "dehumidity_mode_setup"))
+        return cls(integer_field(fields, "humidity_mode_setup"), integer_field(fields, "dehumidity_mode_setup"))
 
     def enabled(self, target: ThermostatTarget) -> bool | None:
         if target not in (ThermostatTarget.HUMIDIFY, ThermostatTarget.DEHUMIDIFY):

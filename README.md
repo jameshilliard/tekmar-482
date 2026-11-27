@@ -536,6 +536,14 @@ matching post-write device read, not a link ACK. The native decoder names
 Humidity and Backup when devices report them; neither is offered by the
 483's remote selector.
 
+For equipment configuration, `NativeClimate.setup` retains `stage_setup`,
+`cooling_setup`, `heat_pump_setup`, and `floor_cooling_enabled` from the
+reported blocks. `adjustments.fan_setup` includes the coil limits, delay
+and purge settings in wire units. An unreported field is unknown, and the
+configured stage or floor-cooling flag does not report a live output.
+`watch-native` can read the cataloged stage and floor-cooling blocks once
+after identification; `--no-thermostat-targets` skips those extra reads.
+
 ### Thermostat sensors
 
 ```bash

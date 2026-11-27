@@ -486,6 +486,34 @@ class FirmwareInteropTests(unittest.IsolatedAsyncioTestCase):
             await complete.wait()
             watch.cancel()
 
+    async def test_thermostat_equipment_blocks_through_normal_firmware(self) -> None:
+        script = tuple(
+            _block(3, "23 10000000", block, report)
+            for block, report in (
+                ("0000", "6e723149 00003f 8e9a01 c60403"),
+                ("0100", "6e723148 01001f 02 8b 00 0d cb"),
+                ("0400", "6e723149 040031 02 aabbcc 01 03"),
+                ("0800", "6e723147 080017 04 00 23 07"),
+                ("5800", "6e723144 580001 01"),
+            )
+        )
+        async with _gateway(script) as manager:
+            batches = [
+                await manager.read_block_group(3, NativeBlockQuery(_THERMOSTAT, b))
+                for b in (0, 1, 4, 8, 0x58)
+            ]
+            assert all(not batch.missing_nodes for batch in batches)
+            (thermostat,) = NativeSnapshot(tuple(batches), ()).thermostats
+            setup = thermostat.setup
+            assert setup.product.model == "553"
+            assert setup.stage_setup and setup.stage_setup.heating_stage1.pump_required
+            assert setup.floor_cooling_enabled is True
+            assert (
+                setup.cooling_setup and setup.cooling_setup.minimum_off_time_raw is None
+            )
+            fan = thermostat.adjustments.fan_setup
+            assert fan and fan.delay_raw == 7 and fan.purge_raw is None
+
     async def test_watch_resumes_busy_wire_after_an_abandoned_firmware_read(
         self,
     ) -> None:

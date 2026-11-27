@@ -215,6 +215,13 @@ def climate_fields(device: NativeClimate) -> dict[str, object]:
         else None,
         "cooling_stages": setup.cooling_stages,
         "enabled_heat_pumps": setup.enabled_heat_pumps,
+        "stage_setup": asdict(setup.stage_setup) if setup.stage_setup else None,
+        "cooling_setup": asdict(setup.cooling_setup) if setup.cooling_setup else None,
+        "heat_pump_setup": asdict(setup.heat_pump_setup)
+        if setup.heat_pump_setup
+        else None,
+        "floor_cooling_raw": setup.floor_cooling_raw,
+        "floor_cooling_enabled": setup.floor_cooling_enabled,
         "air_timestamp_ms": device.air_timestamp_ms,
         "air": device.air.fields() if device.air is not None else None,
         "active_air_target": {
@@ -235,6 +242,7 @@ def adjustment_fields(settings: ThermostatAdjustments) -> dict[str, object]:
     return {
         "floor_configured": settings.floor_configured,
         "fan_adjustment_enabled": fan.enabled if fan is not None else None,
+        "fan_setup": asdict(fan) if fan is not None else None,
         "humidify_enabled": rh.enabled(ThermostatTarget.HUMIDIFY)
         if rh is not None
         else None,
@@ -370,7 +378,7 @@ def _add_watch(
         watch.add_argument(
             "--no-thermostat-targets",
             action="store_true",
-            help="skip additional thermostat adjustment reads",
+            help="skip additional thermostat setup and adjustment reads",
         )
         watch.add_argument(
             "--no-thermostat-sensors",

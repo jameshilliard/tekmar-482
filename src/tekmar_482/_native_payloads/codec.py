@@ -1,9 +1,16 @@
 """Common primitives for native payload decoders."""
 
+from collections.abc import Mapping
+
 from .layouts import H_UNAVAILABLE
 
 Fields = dict[str, str | int | float]
 SETBACK = ("wake", "unoccupied_4", "occupied_4", "sleep", "occupied_2", "unoccupied_2", "away", "unknown")
+
+
+def integer_field(fields: Mapping[str, object], name: str) -> int | None:
+    value = fields.get(name)
+    return value if isinstance(value, int) else None
 
 
 class ShortPayload(ValueError):
