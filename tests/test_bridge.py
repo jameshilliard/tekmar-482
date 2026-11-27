@@ -716,6 +716,7 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
             args = build_parser().parse_args(
                 [
                     "discover",
+                    "--raw",
                     "--probe-subnet",
                     "4:0x16",
                     "--ack-port",
@@ -843,6 +844,7 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
                 args = build_parser().parse_args(
                     [
                         "dump",
+                        "--raw",
                         "--ack-port",
                         "3",
                         "--duration",

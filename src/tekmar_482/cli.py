@@ -67,7 +67,7 @@ from .exceptions import TekmarError
 from .firmware import install_firmware
 from .gateway import open_gateway
 from .management import BridgeManagement
-from .native import NativeAddress, NativeBlockQuery, NativeTargets
+from .native import NativeAddress, NativeBlockQuery, NativeFrame, NativeTargets
 from .native_discovery import NativeDevice, discover_native
 from .native_io import IoDirectory
 from .native_scene import scene_response_fields
@@ -79,7 +79,7 @@ from .native_state import NativeState
 from .native_target_edit import ThermostatTargetChange
 from .native_water import read_water
 from .native_write import NativeWriteStatus
-from .normal_trace import GatewayTraceGap, NormalPeerCapture
+from .normal_trace import GatewayTraceGap, NormalNativeSession, NormalPeerCapture
 from .raw import CaptureGap, InvalidCapture, PortError, TxStatus
 from .trpc import (
     ResponseMatch,
@@ -104,7 +104,7 @@ if TYPE_CHECKING:
         GatewayInfo,
         GatewaySnapshot,
     )
-    from .native import NativeFrame
+    from .native_discovery import NativeDiscovery
     from .native_snapshot import NativeSnapshot
     from .native_status import NativeStatusBatch
     from .native_write import NativeWriteResult
@@ -309,7 +309,7 @@ def build_parser() -> argparse.ArgumentParser:
         subparsers.choices[name].add_argument(
             "--raw",
             action="store_true",
-            help="use Raw rather than Normal for passive capture",
+            help="switch to Raw mode for this capture",
         )
     for name in _ADDRESSED_READS:
         subparsers.choices[name].add_argument(
@@ -706,7 +706,7 @@ def _endpoint(args: argparse.Namespace) -> GatewayEndpoint:
 
 
 def _validate_native_args(args: argparse.Namespace) -> None:
-    if _passive_normal(args) and getattr(args, "ack_port", False):
+    if _capture_normal(args) and getattr(args, "ack_port", False):
         msg = "link ACKs require an explicit --raw capture"
         raise CliError(msg)
     if (
@@ -822,7 +822,7 @@ async def _native_status(
     args: argparse.Namespace,
     emit: Callable[[object], None],
 ) -> int:
-    if args.command in _WATCH_COMMANDS and _passive_normal(args):
+    if args.command in _WATCH_COMMANDS and _capture_normal(args):
         async with (
             bridge.normal(select_mode=False) as client,
             BridgeManagement(client).peer_capture() as peers,
@@ -1151,10 +1151,10 @@ def _write_fields(result: NativeWriteResult) -> dict[str, object]:
     }
 
 
-def _passive_normal(args: argparse.Namespace) -> bool:
+def _capture_normal(args: argparse.Namespace) -> bool:
     return (
-        args.command == "monitor"
-        or (args.command in {"discover", "dump", *_WATCH_COMMANDS} and args.passive)
+        args.command in {"monitor", "discover", "dump"}
+        or (args.command in _WATCH_COMMANDS and args.passive)
     ) and not args.raw
 
 
@@ -1162,11 +1162,11 @@ def _passive_normal(args: argparse.Namespace) -> bool:
 async def _capture_session(
     bridge: BridgeClient,
     args: argparse.Namespace,
-) -> AsyncIterator[NormalPeerCapture | BridgeStream]:
-    if _passive_normal(args):
+) -> AsyncIterator[NormalNativeSession | BridgeStream]:
+    if _capture_normal(args):
         async with (
             bridge.normal(select_mode=False) as client,
-            BridgeManagement(client).peer_capture() as peers,
+            BridgeManagement(client).native_session() as peers,
         ):
             yield peers
     else:
@@ -1199,30 +1199,30 @@ async def _native_capture(
         nonlocal frames
         if args.command == "dump":
             observed.observe(frame)
-        if isinstance(frame, CaptureGap):
-            emit(_capture_gap_fields(frame))
-        elif isinstance(frame, PortError):
-            emit({"port": frame.port, "port_error": frame.reason})
-        elif isinstance(frame, InvalidCapture):
-            if args.command != "discover":
-                emit(
-                    {
-                        "invalid": frame.reason,
-                        "port": frame.port,
-                        "timestamp_ms": frame.timestamp_ms,
-                        "bit_count": frame.bit_count,
-                        "bits": frame.bits.hex(),
-                    },
-                )
-        else:
+        if isinstance(frame, NativeFrame):
             frames += 1
             if args.command in {"discover", "dump"}:
                 nodes.add((frame.port, frame.subnet, frame.node))
-            if args.command != "discover":
-                emit(_frame_fields(frame))
+        if args.command != "discover" or isinstance(frame, (CaptureGap, PortError)):
+            emit(_capture_fields(frame))
 
-    summary = None
+    async def dump(
+        link: NormalNativeSession | BridgeStream,
+        result: NativeDiscovery,
+    ) -> None:
+        await _dump_blocks(
+            link,
+            result.devices,
+            getattr(args, "block_timeout", 20),
+            getattr(args, "block_attempts", 2),
+            capture,
+            emit,
+            include_line_status=getattr(args, "line_status", True),
+        )
+
+    raw_dump = None
     async with _capture_session(bridge, args) as stream:
+        receiver = stream.peers if isinstance(stream, NormalNativeSession) else stream
         if args.command in {"discover", "dump"}:
             summary = await discover_native(
                 stream,
@@ -1231,61 +1231,74 @@ async def _native_capture(
                 subnets=args.probe_subnet,
                 on_record=capture,
             )
+            emit(_discovered(summary, nodes))
+            if args.command == "dump" and not args.passive and summary.devices:
+                if isinstance(stream, NormalNativeSession):
+                    await dump(stream, summary)
+                else:
+                    raw_dump = summary
         else:
             window = asyncio.timeout(duration)
             try:
                 async with window:
                     while limit is None or frames < limit:
-                        capture(await stream.read())
+                        capture(await receiver.read())
             except TimeoutError:
                 if not window.expired():
                     raise
-    if summary is not None:
-        emit(
-            {
-                "observed_nodes": sorted(nodes),
-                "devices": [
-                    _native_device_fields(device) for device in summary.devices
-                ],
-                "identity_probes": [
-                    {
-                        "port": p.port,
-                        "subnet": p.subnet,
-                        "tx_status": p.result.status.name
-                        if p.result is not None
-                        else None,
-                        "reason": p.result.reason if p.result is not None else None,
-                    }
-                    for p in summary.probes
-                ],
-                "host_records_dropped": summary.host_records_dropped,
-                "gateway_trace_records_dropped": summary.gateway_trace_records_dropped,
-            },
-        )
     if args.command in {"diagnostics", "dump"}:
-        _emit_capture_summary(stream, observed, emit)
-    if args.command == "dump" and not args.passive and summary and summary.devices:
+        _emit_capture_summary(receiver, observed, emit)
+    if raw_dump is not None:
         # A discovery deadline can cancel a probe before its TxResult. The
         # previous stream has drained that send before we reuse its port.
         async with bridge.stream(ack_ports=args.ack_port) as scan:
             # A new session must not inherit the previous loop mapping.
             observed = NativeState()
-            await _dump_blocks(
-                scan,
-                summary.devices,
-                getattr(args, "block_timeout", 20),
-                getattr(args, "block_attempts", 2),
-                capture,
-                emit,
-                include_line_status=getattr(args, "line_status", True),
-            )
+            await dump(scan, raw_dump)
         _emit_capture_summary(scan, observed, emit)
+
+
+def _discovered(
+    summary: NativeDiscovery,
+    nodes: set[tuple[int, int, int]],
+) -> dict[str, object]:
+    return {
+        "observed_nodes": sorted(nodes),
+        "devices": [_native_device_fields(device) for device in summary.devices],
+        "identity_probes": [
+            {
+                "port": p.port,
+                "subnet": p.subnet,
+                "tx_status": p.result.status.name if p.result else None,
+                "reason": p.result.reason if p.result else None,
+            }
+            for p in summary.probes
+        ],
+        "host_records_dropped": summary.host_records_dropped,
+        "gateway_trace_records_dropped": summary.gateway_trace_records_dropped,
+    }
 
 
 def _capture_gap_fields(gap: CaptureGap) -> dict[str, object]:
     if isinstance(gap, GatewayTraceGap):
         return {"gateway_trace_records_dropped": gap.dropped, "ports": gap.ports}
     return {"host_records_dropped": gap.dropped}
+
+
+def _capture_fields(frame: CaptureRecord) -> dict[str, object]:
+    if isinstance(frame, CaptureGap):
+        return _capture_gap_fields(frame)
+    if isinstance(frame, PortError):
+        return {"port": frame.port, "port_error": frame.reason}
+    if isinstance(frame, InvalidCapture):
+        return {
+            "invalid": frame.reason,
+            "port": frame.port,
+            "timestamp_ms": frame.timestamp_ms,
+            "bit_count": frame.bit_count,
+            "bits": frame.bits.hex(),
+        }
+    return _frame_fields(frame)
 
 
 def _emit_capture_summary(
@@ -1325,7 +1338,7 @@ def _emit_capture_summary(
 
 
 async def _dump_blocks(
-    stream: BridgeStream,
+    stream: BridgeStream | NormalNativeSession,
     devices: Sequence[NativeDevice],
     timeout: float,
     attempts: int,
@@ -1334,13 +1347,16 @@ async def _dump_blocks(
     *,
     include_line_status: bool,
 ) -> None:
+    receiver = stream.peers if isinstance(stream, NormalNativeSession) else stream
+    reader = stream.management if isinstance(stream, NormalNativeSession) else stream
+
     async def listen() -> None:
         while True:
-            capture(await stream.read())
+            capture(await receiver.read())
 
     async def sample() -> None:
         snapshot = await read_native_snapshot(
-            stream,
+            reader,
             devices,
             timeout=timeout,
             attempts=attempts,

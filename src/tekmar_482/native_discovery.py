@@ -4,13 +4,15 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass, replace
+from math import isfinite
 from typing import TYPE_CHECKING
 
 from ._native_payloads import BLOCK_SELECTORS
 from .constants import TN4_PORTS
+from .exceptions import ConnectionClosedError
 from .native import NativeAddress, NativeFrame, NativeMessage, NativeTargets
 from .native_identity import NativeIdentity
-from .normal_trace import GatewayTraceGap, NormalPeerCapture
+from .normal_trace import GatewayTraceGap, NormalNativeSession, NormalPeerCapture
 from .raw import CaptureGap
 
 if TYPE_CHECKING:
@@ -142,73 +144,130 @@ class NativeDiscovery:
     gateway_trace_records_dropped: int = 0
 
 
+class _SubnetProbes:
+    """One worker per port; never queue an already pending or completed subnet."""
+
+    def __init__(self, ports: Iterable[int]) -> None:
+        self.queues: dict[int, asyncio.Queue[int | None]] = {
+            p: asyncio.Queue() for p in ports
+        }
+        self.pending: set[tuple[int, int]] = set()
+        self.finished: set[tuple[int, int]] = set()
+        self.outcomes: dict[tuple[int, int], TxResult | None] = {}
+        self.accepting = True
+
+    def enqueue(self, port: int, subnet: int) -> None:
+        key = (port, subnet)
+        if self.accepting and key not in self.pending and key not in self.finished:
+            self.pending.add(key)
+            self.queues[port].put_nowait(subnet)
+
+    def lost(self, gap: CaptureGap) -> None:
+        if isinstance(gap, GatewayTraceGap):
+            self.finished = {
+                k for k in self.finished if not gap.port_mask & (1 << k[0])
+            }
+        else:
+            self.finished.clear()
+
+    def stop(self) -> None:
+        self.accepting = False
+        for queue in self.queues.values():
+            queue.put_nowait(None)
+
+    async def probe(
+        self,
+        link: BridgeStream | NormalNativeSession,
+        port: int,
+        sender: NativeAddress,
+    ) -> None:
+        while (subnet := await self.queues[port].get()) is not None and self.accepting:
+            key = port, subnet
+            self.outcomes[key] = None
+            if isinstance(link, NormalNativeSession):
+                self.outcomes[key] = await link.management.discover_subnet(port, subnet)
+            else:
+                request = NativeMessage.request_block(
+                    0,
+                    source=sender,
+                    target=NativeTargets(subnet),
+                    argument=0,
+                )
+                self.outcomes[key] = await link.send(port, request)
+            self.pending.remove(key)
+            self.finished.add(key)
+
+    def results(self) -> tuple[NativeProbe, ...]:
+        return tuple(
+            NativeProbe(*key, self.outcomes[key]) for key in sorted(self.outcomes)
+        )
+
+
 async def discover_native(
-    stream: BridgeStream | NormalPeerCapture,
+    stream: BridgeStream | NormalPeerCapture | NormalNativeSession,
     *,
     duration: float = 30,
     source: NativeAddress | None = _HOST,
     subnets: Iterable[tuple[int, int]] = (),
     on_record: Callable[[CaptureRecord], None] | None = None,
 ) -> NativeDiscovery:
-    """Own the capture consumer for one window; source None sends no requests."""
-    if not duration > 0:
-        msg = "discovery duration must be positive"
+    """Probe each subnet once per window. Passive discovery sends nothing.
+
+    Normal discovery finishes already submitted probes before releasing the
+    ports. Late replies during that drain are observed but start no new probes.
+    """
+    if not isfinite(duration) or duration <= 0:
+        msg = "discovery duration must be finite and positive"
         raise ValueError(msg)
     inventory = NativeInventory()
-    pending: dict[int, asyncio.Queue[int]] = {p: asyncio.Queue() for p in TN4_PORTS}
-    seen: set[tuple[int, int]] = set()
-    probes: dict[tuple[int, int], TxResult | None] = {}
+    capture = stream.peers if isinstance(stream, NormalNativeSession) else stream
+    ports = (
+        tuple(p for p in TN4_PORTS if capture.port_mask & (1 << p))
+        if isinstance(capture, NormalPeerCapture)
+        else TN4_PORTS
+    )
+    probes = _SubnetProbes(ports)
     if isinstance(stream, NormalPeerCapture) and source is not None:
         msg = "a Normal peer capture is passive; use source=None"
         raise ValueError(msg)
-
-    def enqueue(port: int, subnet: int) -> None:
-        key = (port, subnet)
-        if key not in seen:
-            seen.add(key)
-            pending[port].put_nowait(subnet)
+    if isinstance(stream, NormalNativeSession) and stream.peers.closed:
+        msg = "Normal native session has ended"
+        raise ConnectionClosedError(msg)
+    if isinstance(stream, NormalNativeSession) and source not in (None, _HOST):
+        msg = "Normal discovery uses the gateway source address (0, 0)"
+        raise ValueError(msg)
 
     for port, subnet in subnets:
-        if source is None or port not in TN4_PORTS:
-            msg = "an explicit discovery subnet needs active discovery and a valid port"
+        if source is None or port not in ports:
+            msg = (
+                "an explicit discovery subnet needs active discovery on a captured port"
+            )
             raise ValueError(msg)
-        enqueue(port, NativeTargets(subnet).subnet)
+        probes.enqueue(port, NativeTargets(subnet).subnet)
 
     async def receive() -> None:
         while True:
-            record = await stream.read()
+            record = await capture.read()
             if on_record is not None:
                 on_record(record)
             device = inventory.observe(record)
             if isinstance(record, CaptureGap):
                 # Keep queued or in-flight identity probes; fresh traffic can
                 # request a previously completed probe again after the gap.
-                seen.difference_update(k for k, v in probes.items() if v is not None)
+                probes.lost(record)
             elif (
                 isinstance(record, NativeFrame)
                 and device is not None
                 and source is not None
                 and record.node & _NODE_BITS
             ):
-                enqueue(record.port, record.subnet)
+                probes.enqueue(record.port, record.subnet)
 
-    async def probe(raw: BridgeStream, port: int, sender: NativeAddress) -> None:
-        while True:
-            subnet = await pending[port].get()
-            key = (port, subnet)
-            probes[key] = None
-            request = NativeMessage.request_block(
-                0,
-                source=sender,
-                target=NativeTargets(subnet),
-                argument=0,
-            )
-            probes[key] = await raw.send(port, request)
-
-    tasks = [asyncio.create_task(receive())]
+    listener = asyncio.create_task(receive())
+    tasks = [listener]
     if source is not None and not isinstance(stream, NormalPeerCapture):
         tasks.extend(
-            asyncio.create_task(probe(stream, port, source)) for port in TN4_PORTS
+            asyncio.create_task(probes.probe(stream, port, source)) for port in ports
         )
     try:
         done, _ = await asyncio.wait(
@@ -218,13 +277,18 @@ async def discover_native(
         )
         for task in done:
             task.result()  # A transport error is not an empty inventory.
+        if isinstance(stream, NormalNativeSession):
+            probes.stop()
+            await asyncio.gather(*tasks[1:])
+            if listener.done():
+                listener.result()
     finally:
         for task in tasks:
             task.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
     return NativeDiscovery(
         inventory.devices,
-        tuple(NativeProbe(*key, probes[key]) for key in sorted(probes)),
+        probes.results(),
         inventory.host_records_dropped,
         inventory.gateway_trace_records_dropped,
     )

@@ -24,13 +24,18 @@ from ._normal_status import status_key, status_result
 from .constants import DEFAULT_BLOCK_TIMEOUT, TN4_PORTS
 from .error_reports import ALL_SOURCES, ErrorReports, GatewayErrorCounter, source_mask
 from .exceptions import ConnectionClosedError, ProtocolError, TekmarError
-from .native import NativeAddress
+from .native import NativeAddress, NativeTargets
 from .native_schedule import edit_schedule_time
 from .native_snow_control import apply_snowmelt_group
 from .native_status import StatusCollector, snowmelt_status_query
 from .native_target_edit import edit_thermostat_target
 from .native_write import NativeBlockEditor
-from .normal_trace import NormalPeerCapture, NormalTrace, NormalTraceState
+from .normal_trace import (
+    NormalNativeSession,
+    NormalPeerCapture,
+    NormalTrace,
+    NormalTraceState,
+)
 from .raw import NativePortBusyError
 from .traffic import TrafficCounters
 from .trpc import ResponseMatch, TrpcCommand, TrpcMethod, TrpcPacket, TrpcService
@@ -55,7 +60,7 @@ if TYPE_CHECKING:
     from .raw import NativeBlockBatch, TxResult
 
 _CAPABILITY_BYTES = 4
-_ANNOUNCEMENT_RESULT_BYTES = 2  # physical port and link outcome
+_LINK_RESULT_BYTES = 2  # physical port and link outcome
 _GATEWAY_SOURCE = NativeAddress(0, 0)
 
 
@@ -90,6 +95,7 @@ class BridgeFeature(IntFlag):
     NORMAL_ANNOUNCE = 512
     BLOCK_TRANSFERS = 1024
     ORDERED_TRACE_GAPS = 2048
+    NORMAL_DISCOVER = 4096
 
 
 class BridgeMethod(IntEnum):
@@ -111,6 +117,7 @@ class BridgeMethod(IntEnum):
     NORMAL_STATUS_READ = 0x544BF010
     NORMAL_BLOCK_EDIT = 0x544BF011
     NORMAL_ANNOUNCE = 0x544BF012
+    NORMAL_DISCOVER = 0x544BF013
 
 
 @dataclass(frozen=True, slots=True)
@@ -186,6 +193,7 @@ class _Management:
                     BridgeMethod.NORMAL_STATUS_READ,
                     BridgeMethod.NORMAL_BLOCK_EDIT,
                     BridgeMethod.NORMAL_ANNOUNCE,
+                    BridgeMethod.NORMAL_DISCOVER,
                 ):
                     raise NativePortBusyError(msg)
             elif reason == b"\x02":
@@ -548,6 +556,27 @@ class BridgeManagement(_Management):
         self._check_edit_idle(port)
         return await self._announce(port, message, timeout)
 
+    async def discover_subnet(
+        self,
+        port: int,
+        subnet: int,
+        *,
+        timeout: float = DEFAULT_BLOCK_TIMEOUT,
+    ) -> TxResult | None:
+        """Attempt one identity broadcast. Only peer RX identifies respondents."""
+        if port not in TN4_PORTS:
+            msg = "expected a physical port for discovery"
+            raise ValueError(msg)
+        key = bytes((port, NativeTargets(subnet).subnet))
+        self._check_edit_idle(port)
+        async with self._normal_events(
+            BridgeMethod.NORMAL_DISCOVER,
+            BridgeFeature.NORMAL_DISCOVER,
+            key,
+            timeout,
+        ) as receive:
+            return self._link_result(port, await receive())
+
     async def _announce(
         self,
         port: int,
@@ -577,11 +606,14 @@ class BridgeManagement(_Management):
             timeout,
             service=TrpcService.UPDATE,
         ) as receive:
-            data = await receive()
-            if len(data) != _ANNOUNCEMENT_RESULT_BYTES or data[0] != port:
-                msg = "invalid Normal announcement result"
-                raise ProtocolError(msg)
-            return tx_outcome(port, data[1])
+            return self._link_result(port, await receive())
+
+    @staticmethod
+    def _link_result(port: int, data: bytes) -> TxResult | None:
+        if len(data) != _LINK_RESULT_BYTES or data[0] != port:
+            msg = "invalid Normal transmit result"
+            raise ProtocolError(msg)
+        return tx_outcome(port, data[1])
 
     async def set_snowmelt_group(
         self,
@@ -756,6 +788,17 @@ class BridgeManagement(_Management):
         peers = NormalPeerCapture(backlog, mask, self._trace_ack(mask))
         async with self._capture(peers, mask):
             yield peers
+
+    @asynccontextmanager
+    async def native_session(
+        self,
+        ports: Iterable[int] = TN4_PORTS,
+        *,
+        backlog: int = 512,
+    ) -> AsyncIterator[NormalNativeSession]:
+        """Borrow native reads and peer trace on this Normal connection."""
+        async with self.peer_capture(ports, backlog=backlog) as peers:
+            yield NormalNativeSession(self, peers)
 
     @asynccontextmanager
     async def _capture(

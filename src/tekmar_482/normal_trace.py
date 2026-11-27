@@ -19,6 +19,7 @@ from .trpc import TrpcPacket
 if TYPE_CHECKING:
     from collections.abc import Iterator
 
+    from .management import BridgeManagement
     from .packet import Packet
 
 _PREFIX = 6
@@ -242,3 +243,11 @@ class NormalPeerCapture(_CaptureBuffer[NativeFrame | InvalidCapture | GatewayTra
         except StopAsyncIteration as err:
             msg = "Normal peer capture ended"
             raise ConnectionClosedError(msg) from err
+
+
+@dataclass(frozen=True, slots=True)
+class NormalNativeSession:
+    """A single Normal connection providing independent control and peer evidence."""
+
+    management: BridgeManagement
+    peers: NormalPeerCapture

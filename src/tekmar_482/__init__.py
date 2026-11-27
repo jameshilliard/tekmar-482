@@ -285,6 +285,7 @@ from .native_water import WaterMonitor, WaterRead, WaterSource, read_water
 from .native_write import NativeWriteResult, NativeWriteStatus
 from .normal_trace import (
     GatewayTraceGap,
+    NormalNativeSession,
     NormalPeerCapture,
     NormalTrace,
     NormalTraceState,
@@ -551,6 +552,7 @@ __all__ = [
     "NativeWriteStatus",
     "NetworkFault",
     "NetworkLock",
+    "NormalNativeSession",
     "NormalPeerCapture",
     "NormalTrace",
     "NormalTraceState",

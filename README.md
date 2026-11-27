@@ -91,18 +91,23 @@ tekmar-482 discover --tcp 192.0.2.10:3001 --duration 45 --json
 ```
 
 Use `--probe-subnet PORT:SUBNET` to include a known silent subnet, or
-`--passive` to skip all native requests. Passive discovery, dump and
-watch commands use Normal peer capture by default. Use `--raw` to
+`--passive` to skip all native requests. Discovery and dump stay in Normal
+mode by default, including while probing. The gateway attempts one read of
+identity block 00 per observed or specified subnet; only a peer frame
+establishes a device, not a link ACK. The listening window stops new probes;
+already submitted Normal probes finish before a subsequent scan reuses the
+ports. Passive watch commands also use Normal peer capture. Use `--raw` to
 explicitly select Raw capture. A solitary peer in Raw can need a link
 ACK to deliver its frames: `--ack-port PORT` is explicit and repeatable.
 By default the gateway does not ACK incoming Raw frames. Use a longer
 window if devices have not yet answered. Scanning does not change setpoints.
 
 ```python
-from tekmar_482 import discover_native
+from tekmar_482 import BridgeManagement, discover_native
 
-async with bridge.stream(ack_ports=(0,)) as stream:
-    result = await discover_native(stream, duration=45)
+async with bridge.normal(select_mode=False) as client:
+    async with BridgeManagement(client).native_session() as native:
+        result = await discover_native(native, duration=45)
 for device in result.devices:
     print(device.port, device.address, device.identity)
 ```
@@ -142,7 +147,7 @@ nodes sharing a subnet, block and selector into one request. Results contain
 the link outcome, matching frames (including raw bytes and field support
 masks), and any nodes that didn't reply. A missing reply means unknown.
 Use `--block-timeout` on `dump` or `--timeout` on `read-device` to
-adjust the deadline (default 20 seconds for Raw dump, 25 for device reads). Missing peers get
+adjust the deadline (default 20 seconds for dump, 25 for device reads). Missing peers get
 one read-only retry by default; `--block-attempts 1` disables it. Peers
 that already replied are not queried again in the retry. A missing Raw TX
 result stops that port; its send slot may still be occupied. An explicit
