@@ -317,7 +317,12 @@ def build_parser() -> argparse.ArgumentParser:
         _common_parent(default_timeout=DEFAULT_BLOCK_TIMEOUT),
         _add_native_target,
     )
-    add_status_commands(subparsers, _common_parent(default_timeout=20), _int_value)
+    add_status_commands(
+        subparsers,
+        _common_parent(default_timeout=20),
+        _int_value,
+        status_parent=_common_parent(default_timeout=DEFAULT_BLOCK_TIMEOUT),
+    )
     for name in _CAPTURE_COMMANDS:
         subparsers.choices[name].add_argument(
             "--raw",

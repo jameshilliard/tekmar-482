@@ -833,6 +833,12 @@ In Normal mode the gateway returns every matching part followed by its link
 outcome and completion status. A gateway deadline returns the partial batch;
 host timeout, lost serial connection or gateway output overflow are errors,
 not evidence that the peer is absent.
+The gateway starts its reply window after transmitting and renews it when a
+multipart reply covers a new requested key or channel. The Normal
+`read_status` timeout bounds each wait for a part or the terminal, not the
+total length of a reply train. Allow at least 20 seconds plus transport
+latency for the initial wait; the default is 25 seconds. In Raw mode the
+host sets a single deadline for the exchange.
 Active `dump` also requests the six shared
 line services once per responding port; use `--no-line-status` to skip them.
 `read_native_snapshot(..., include_line_status=True)` does the same.

@@ -758,7 +758,7 @@ class BridgeManagement(_Management):
         *,
         source: NativeAddress = _GATEWAY_SOURCE,
         peer: NativeAddress | None = None,
-        timeout: float = 15,
+        timeout: float = DEFAULT_BLOCK_TIMEOUT,
         wait_for_edits: bool = False,
     ) -> NativeStatusBatch:
         """Read peer status without changing mode, trace or link-ACK settings."""
@@ -779,6 +779,7 @@ class BridgeManagement(_Management):
             BridgeFeature.NORMAL_STATUS_READ,
             status_key(port, query, peer),
             timeout,
+            progress_timeout=True,
         ) as receive:
             while True:
                 batch = status_result(port, collector, await receive())

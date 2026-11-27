@@ -417,6 +417,8 @@ def add_status_commands(
     subparsers: argparse._SubParsersAction[argparse.ArgumentParser],
     common: argparse.ArgumentParser,
     number: Callable[[str], int],
+    *,
+    status_parent: argparse.ArgumentParser,
 ) -> None:
     _add_watch(
         subparsers,
@@ -464,7 +466,7 @@ def add_status_commands(
     for kind in StatusRequest:
         args = services.add_parser(
             kind.name.lower().replace("_", "-"),
-            parents=[common],
+            parents=[status_parent],
         )
         args.set_defaults(status_request=kind)
         args.add_argument(

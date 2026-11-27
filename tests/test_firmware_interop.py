@@ -67,7 +67,8 @@ if TYPE_CHECKING:
 
     from tekmar_482 import Packet
 
-type Exchange = tuple[int, str, tuple[str, ...]]
+type ScheduledReply = str | tuple[int, str]
+type Exchange = tuple[int, str, tuple[ScheduledReply, ...]]
 _IMAGE = os.environ.get("TEKMAR_TEST_FLASH_IMAGE")
 _EMULATOR = Path(__file__).resolve().parents[1] / "firmware" / "tests" / "smoke.py"
 
@@ -184,6 +185,26 @@ _SETPOINT = NativeAddress(0x31, 7)
 
 @unittest.skipUnless(_IMAGE, "set TEKMAR_TEST_FLASH_IMAGE to run the ARM interop suite")
 class FirmwareInteropTests(unittest.IsolatedAsyncioTestCase):
+    async def test_io_discovery_collects_a_reply_train_longer_than_ten_seconds(
+        self,
+    ) -> None:
+        parts = tuple(
+            (1850, f"1f52314d 2305 {channel:02x}06 533100000000 01 0100")
+            for channel in range(6)
+        )
+        async with _gateway(((3, "1f600002 2305", parts),)) as manager:
+            batch = await manager.read_status(
+                3,
+                NativeStatusQuery.io(0x23, 5),
+                peer=_THERMOSTAT,
+            )
+            assert batch.answered
+            started = batch.reports[0].timestamp_ms
+            assert batch.reports[-1].timestamp_ms - started > 10_000
+            book = IoDirectory.from_batch(batch)
+            assert book.complete
+            assert tuple(c.sample.channel for c in book.channels) == tuple(range(6))
+
     async def test_stage_commands_keep_exact_targets_and_normal_tx_evidence(
         self,
     ) -> None:

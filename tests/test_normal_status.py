@@ -139,6 +139,27 @@ class NormalStatusTests(unittest.IsolatedAsyncioTestCase):
             assert batch.missing_keys == missing and not batch.answered
             assert (batch.tx_result.status if batch.tx_result else None) is status
 
+    async def test_host_waits_between_parts_not_just_from_admission(self) -> None:
+        wire = Wire()
+        async with Tekmar482Client(wire) as client, asyncio.timeout(4):
+            job = asyncio.create_task(
+                BridgeManagement(client).read_status(
+                    2,
+                    _SNOW_QUERY,
+                    peer=_PEER,
+                    timeout=0.8,
+                ),
+            )
+            await wire.expect(_CAP)
+            wire.feed(_SUPPORT)
+            await wire.expect(_READ + _SNOW)
+            wire.feed(_ADMIT + _SNOW)
+            for part in (_FIRST, _LAST):
+                await asyncio.sleep(0.5)
+                wire.feed(part)
+            wire.feed(_REPORT + "020100")
+            assert (await job).answered
+
     async def test_reject_false_completeness_mismatched_parts_and_overflow(
         self,
     ) -> None:
