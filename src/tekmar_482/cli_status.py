@@ -331,16 +331,23 @@ def _add_watch(
         help="do not request identity or settings",
     )
     watch.add_argument("--duration", type=float, help="stop after this many seconds")
-    watch.add_argument(
+    _add_capture_source(watch, number)
+
+
+def _add_capture_source(
+    command: argparse.ArgumentParser,
+    number: Callable[[str], int],
+) -> None:
+    command.add_argument(
         "--ack-port",
         action="append",
         type=int,
         choices=TN4_PORTS,
         default=[],
-        help="link-ACK incoming frames on this physical port",
+        help="link-ACK incoming frames on this port (requires --raw)",
     )
-    watch.add_argument("--source-subnet", type=number, default=0)
-    watch.add_argument("--source-node", type=number, default=0)
+    command.add_argument("--source-subnet", type=number, default=0)
+    command.add_argument("--source-node", type=number, default=0)
 
 
 def add_status_commands(
@@ -380,8 +387,7 @@ def add_status_commands(
         action="store_true",
         help="only request master topology and loop assignments",
     )
-    water.add_argument("--source-subnet", type=number, default=0)
-    water.add_argument("--source-node", type=number, default=0)
+    _add_capture_source(water, number)
     cmd = subparsers.add_parser(
         "read-status",
         help="request live status directly from the native bus",

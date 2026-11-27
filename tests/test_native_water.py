@@ -241,10 +241,14 @@ class WaterReadTests(unittest.IsolatedAsyncioTestCase):
             self.stream.feed(Packet(1, bytes([2, 3, 0])))
             self.feed(0x3CF, _BASE)
             sample = await read_water(self.stream, [3], duration=0.02)
-            assert sample.master_queries[0].tx_result is None
+            assert not sample.master_queries and sample.unfinished_ports == (3,)
             assert sample.sources[0].has_measurements
             await self.tx.get()
+            idle = asyncio.create_task(self.stream.wait_transmit_idle(3))
+            await asyncio.sleep(0)
+            assert not idle.done()
             self.stream.feed(Packet(1, bytes([2, 3, 0])))
+            await idle
 
     async def test_invalid_inputs_do_not_send_or_consume(self) -> None:
         for ports, duration in (

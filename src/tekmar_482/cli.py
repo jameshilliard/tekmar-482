@@ -118,6 +118,8 @@ class CliError(Exception):
 ClientFactory = Callable[[argparse.Namespace], Tekmar482Client]
 _MAX_TCP_PORT = 65535
 _WATCH_COMMANDS = frozenset({"watch-native", "watch-climate"})
+_OBSERVED_READS = _WATCH_COMMANDS | {"read-water"}
+_CAPTURE_COMMANDS = _OBSERVED_READS | {"monitor", "discover", "dump"}
 _ADDRESSED_READS = frozenset(
     {"read-block", "read-device", "read-schedule", "read-sensors"},
 )
@@ -305,7 +307,7 @@ def build_parser() -> argparse.ArgumentParser:
         _add_native_target,
     )
     add_status_commands(subparsers, _common_parent(default_timeout=20), _int_value)
-    for name in {"monitor", "discover", "dump", *_WATCH_COMMANDS}:
+    for name in _CAPTURE_COMMANDS:
         subparsers.choices[name].add_argument(
             "--raw",
             action="store_true",
@@ -710,7 +712,7 @@ def _validate_native_args(args: argparse.Namespace) -> None:
         msg = "link ACKs require an explicit --raw capture"
         raise CliError(msg)
     if (
-        args.command in _WATCH_COMMANDS
+        args.command in _OBSERVED_READS
         and not args.raw
         and (args.source_subnet or args.source_node)
     ):
@@ -727,11 +729,7 @@ def _validate_native_args(args: argparse.Namespace) -> None:
     ):
         msg = f"custom source addresses and --ack require {args.command} --raw"
         raise CliError(msg)
-    if (
-        args.command in {"watch-native", "watch-climate"}
-        and not args.device
-        and not args.passive
-    ):
+    if args.command in _WATCH_COMMANDS and not args.device and not args.passive:
         msg = f"active {args.command} requires --device PORT SUBNET NODE"
         raise CliError(msg)
     if (
@@ -829,26 +827,25 @@ async def _native_status(
     args: argparse.Namespace,
     emit: Callable[[object], None],
 ) -> int:
-    if args.command in _WATCH_COMMANDS:
-        async with _capture_session(bridge, args) as peers:
-            if args.command == "watch-native":
-                return await watch_all_from_args(peers, args, emit)
-            return await watch_from_args(peers, args, emit)
-    if args.command == "read-status" and not args.raw:
-        async with bridge.normal(select_mode=False) as client:
-            answer = await read_status_from_args(BridgeManagement(client), args)
+    if args.command == "read-status":
+        if args.raw:
+            async with bridge.stream(
+                ack_ports=(args.port,) if args.ack else (),
+                diagnostics=False,
+            ) as stream:
+                answer = await read_status_from_args(stream, args)
+        else:
+            async with bridge.normal(select_mode=False) as client:
+                answer = await read_status_from_args(BridgeManagement(client), args)
         emit(_status_fields(answer))
         return int(not answer.answered)
-    ack_ports = (
-        (args.port,) if getattr(args, "ack", False) else getattr(args, "ack_port", ())
-    )
-    async with bridge.stream(ack_ports=ack_ports, diagnostics=False) as stream:
-        if args.command == "read-status":
-            answer = await read_status_from_args(stream, args)
-            emit(_status_fields(answer))
-            return int(not answer.answered)
+    async with _capture_session(bridge, args) as peers:
+        if args.command == "watch-native":
+            return await watch_all_from_args(peers, args, emit)
+        if args.command == "watch-climate":
+            return await watch_from_args(peers, args, emit)
         water = await read_water(
-            stream,
+            peers,
             args.ports,
             duration=args.duration,
             timeout=args.timeout,
@@ -868,7 +865,9 @@ async def _native_status(
                 _status_fields(q)["status_read"] for q in water.master_queries
             ],
             "block_reads": [_batch_fields(b)["block_read"] for b in water.block_reads],
-            "host_records_dropped": water.dropped,
+            "host_records_dropped": water.host_records_dropped,
+            "gateway_trace_records_dropped": water.gateway_trace_records_dropped,
+            "unfinished_ports": water.unfinished_ports,
         },
     )
     return int(not any(s.has_measurements for s in water.sources))
@@ -1152,10 +1151,7 @@ def _write_fields(result: NativeWriteResult) -> dict[str, object]:
 
 
 def _capture_normal(args: argparse.Namespace) -> bool:
-    return (
-        args.command in {"monitor", "discover", "dump", *_WATCH_COMMANDS}
-        and not args.raw
-    )
+    return args.command in _CAPTURE_COMMANDS and not args.raw
 
 
 @asynccontextmanager
@@ -1167,7 +1163,7 @@ async def _capture_session(
         ports = (
             {port for port, _, _ in args.device}
             if getattr(args, "device", None)
-            else TN4_PORTS
+            else getattr(args, "ports", TN4_PORTS)
         )
         async with (
             bridge.normal(select_mode=False) as client,
@@ -1177,7 +1173,7 @@ async def _capture_session(
     else:
         async with bridge.stream(
             ack_ports=getattr(args, "ack_port", ()),
-            diagnostics=args.command not in _WATCH_COMMANDS,
+            diagnostics=args.command not in _OBSERVED_READS,
         ) as raw:
             yield raw
 

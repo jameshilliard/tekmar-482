@@ -546,21 +546,26 @@ invalidates the affected paths. Start a new monitor on reconnect.
 tekmar-482 read-water 0 3 --duration 60 --tcp 192.0.2.10:3001 --json
 ```
 
-`read-water` listens for the full observation window. It asks each
+`read-water` stays in Normal mode by default. It asks each
 selected port for its master's loop map, identifies an addressable
 responder with block zero, and reads the loop setup, equipment banks and
 runtime registers cataloged for that plant controller within the same
-deadline. A master query does not force a temperature or output report.
+observation window, including time spent waiting for an occupied port.
+A master query does not force a temperature or output report.
 The command returns 1 if it heard no operating data; it still prints the
 setup and link results. Use `--no-plant-settings` for topology-only queries
-or `--passive` to send nothing on tN4.
+or `--passive` to send nothing on tN4. Use `--raw` only to switch the gateway
+out of Normal mode. A custom source address or link ACK requires `--raw`.
 
-`read_water(stream, ports, duration=seconds)` returns immutable samples
-with the gateway timestamp. For push updates, feed each record from
-`stream.read()` to a `WaterMonitor` instead. Start a new monitor on each
-Raw session. The monitor clears observations on a capture gap and discards
-samples for a reassigned loop. It does not poll. The native `dump` command
-includes the water sources it heard in each continuous capture window.
+`read_water(stream, ports, duration=seconds)` accepts a Normal native session
+or a Raw stream; a Normal peer capture also works with `source=None`.
+It reports gateway trace loss separately from host capture loss. A gateway
+gap invalidates observations only on the affected ports; host loss affects
+all selected ports. The scan keeps listening after a loss but does not use
+the interrupted master claim for further equipment reads. `unfinished_ports`
+lists probes still pending when the window ended, not negative replies.
+For push updates on one port, feed its records to a `WaterMonitor`; start a
+new monitor on reconnect. The native `dump` also includes water sources.
 
 Each source is a physical port, full subnet and node. Prefer an explicit
 loop setup over the master's advertised boiler/mix name. A report can be

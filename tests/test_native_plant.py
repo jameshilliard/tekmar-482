@@ -370,11 +370,13 @@ class PlantSessionTests(unittest.IsolatedAsyncioTestCase):
     ) -> None:
         waiting = asyncio.Event()
         unavailable = asyncio.Event()
+        busy = False
 
         async def wait_busy(port: int) -> None:
             assert port == TEST_PATH.port
-            waiting.set()
-            await unavailable.wait()
+            if busy:
+                waiting.set()
+                await unavailable.wait()
 
         with patch.object(self.stream, "wait_transmit_idle", wait_busy):
             async with asyncio.timeout(1):
@@ -385,11 +387,13 @@ class PlantSessionTests(unittest.IsolatedAsyncioTestCase):
                 self.ack()
                 self.rx(frame(0x3FF, bytes([TEST_PATH.subnet])))
                 assert await self.query() == (0, 0)
+                busy = True
                 self.ack()
                 self.rx(identity(_402))
                 await waiting.wait()
                 result = await task
         assert len(result.block_reads) == 1 and self.tx.empty()
+        assert result.unfinished_ports == (TEST_PATH.port,)
         assert result.plant_configurations[0][1].missing
 
     async def test_read_water_uses_same_generation_and_keeps_partial_results(
