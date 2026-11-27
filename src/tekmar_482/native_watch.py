@@ -721,6 +721,8 @@ class _Watch:
                 and (self.snow is None or path not in self.snow.current)
             ):
                 return
+            if self.snow is not None and not self.snow.needs_block(path, block):
+                return
             key = (block, None)
             batch, current = await reader.read(
                 stream,

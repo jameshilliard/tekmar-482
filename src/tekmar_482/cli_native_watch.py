@@ -171,10 +171,12 @@ def snow_fields(device: NativeSnowmelt) -> dict[str, object]:
         device.missing_keys,
     )
     product = device.identity.product
+    reported_groups = device.reported_groups
     return {
         **asdict(device.path),
         "model": product.model if product else None,
         "setup": asdict(device.setup),
+        "reported_groups": asdict(reported_groups) if reported_groups else None,
         "application": app.name.lower() if app is not None else None,
         "primary": {"role": address.role.name.lower(), "number": address.number}
         if address

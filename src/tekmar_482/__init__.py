@@ -265,6 +265,7 @@ from .native_snowmelt import (
     NativeSnowmelt,
     SnowmeltChannel,
     SnowmeltConfiguration,
+    SnowmeltGroups,
     SnowmeltSample,
 )
 from .native_state import (
@@ -646,6 +647,7 @@ __all__ = [
     "SnowmeltGroupBinding",
     "SnowmeltGroupResult",
     "SnowmeltGroupStatus",
+    "SnowmeltGroups",
     "SnowmeltKey",
     "SnowmeltOperatingState",
     "SnowmeltOperation",

@@ -996,8 +996,12 @@ operating state. Preview the actual group and frame first:
 tekmar-482 set-snowmelt-group 0 0x14 6 melt on --tcp 192.0.2.10:3001 --json
 ```
 
-The command reads the product, application, zone and **both** assignments
-from the controller. To broadcast, explicitly add `--expect-group N --confirm`.
+The command reads the product, application and configured zone. It requests
+**both** group assignments from that zone in one status exchange. When the
+exchange ends without both keys, it reads both addressed group registers
+instead and rejects any disagreement with the partial status. An invalid
+complete reply does not fall back to older data or defaults.
+To broadcast, explicitly add `--expect-group N --confirm`.
 This can affect **every device using that group**, not just the selected
 zone. Missing, changed, ambiguous or sensor-only bindings cannot transmit.
 `await BridgeManagement(client).set_snowmelt_group(port, address,
@@ -1014,6 +1018,11 @@ zone melting after a group is disabled. The CLI exits nonzero if the
 observed operation does not match, and never retries the broadcast. During
 a watch, a change in the configured group's enable on the observed port
 triggers an operating-state read, not an optimistic mode change.
+`device.reported_groups` holds a paired observation from the configured
+zone. It is separate from `device.setup.groups`, which reflects addressed
+registers. The watch asks for the pair once when the zone is established
+and the assignments are not already known. It uses the group registers if
+the pair is unavailable. Neither cached view authorizes a send.
 
 Use `device.setpoint(SnowmeltBlock.MELT_SETPOINT)` for the stored slab target,
 not the operating slab setpoint in a status report.

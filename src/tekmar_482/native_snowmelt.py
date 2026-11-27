@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING, Self
 
 from ._native_payloads.layouts import SNOW_SLAB_TARGETS
 from ._native_payloads.layouts import SnowmeltBlock as Block
+from ._native_payloads.line import GROUP_IDS
 from ._native_payloads.queries import NativeStatusQuery
 from ._native_payloads.snowmelt import (
     SnowmeltAddress,
@@ -29,17 +30,38 @@ if TYPE_CHECKING:
     from .native_identity import NativeIdentity
     from .native_state import NativePath
 
+SNOW_GROUP_BLOCKS = (Block.MELT_GROUP, Block.STORM_GROUP)
+SNOW_GROUP_KEYS = bytes([SnowmeltKey.MELT_GROUP, SnowmeltKey.STORM_GROUP])
 SNOW_SETUP = (
     Block.APPLICATION_MODE,
     Block.ZONE_ID,
     Block.SENSOR_ID,
-    Block.MELT_GROUP,
-    Block.STORM_GROUP,
+    *SNOW_GROUP_BLOCKS,
     Block.TRACKED_ZONE,
     Block.MELT_SETPOINT,
     Block.IDLE_SETPOINT,
     Block.STORM_SETPOINT,
 )
+
+
+@dataclass(frozen=True, slots=True)
+class SnowmeltGroups:
+    """Distinct Melt and Storm group numbers from the same source."""
+
+    melt_group: int
+    storm_group: int
+
+    @classmethod
+    def from_values(cls, melt: int | None, storm: int | None) -> Self | None:
+        if (
+            melt is None
+            or storm is None
+            or melt not in GROUP_IDS
+            or storm not in GROUP_IDS
+            or melt == storm
+        ):
+            return None
+        return cls(melt, storm)
 
 
 @dataclass(frozen=True, slots=True)
@@ -93,6 +115,11 @@ class SnowmeltConfiguration:
             return None
         return SnowmeltAddress(app.role, number)
 
+    @property
+    def groups(self) -> SnowmeltGroups | None:
+        """Group assignments supplied by addressed configuration blocks."""
+        return SnowmeltGroups.from_values(self.melt_group, self.storm_group)
+
 
 @dataclass(frozen=True, slots=True)
 class SnowmeltSample:
@@ -105,6 +132,7 @@ class SnowmeltChannel:
     address: SnowmeltAddress
     samples: tuple[SnowmeltSample, ...]
     last_frame: NativeFrame = field(compare=False)
+    reported_groups: SnowmeltGroups | None = None
 
     def sample(self, key: int) -> SnowmeltSample | None:
         return next((s for s in self.samples if s.pair.key == key), None)
@@ -168,12 +196,22 @@ class SnowmeltChannels:
     ) -> bool:
         before = self._channels.get(address)
         samples = {s.pair.key: s for s in before.samples} if before is not None else {}
+        groups = before.reported_groups if before is not None else None
+        group_words = {}
         for pair in report.pairs:
             samples[pair.key] = SnowmeltSample(pair, frame.timestamp_ms)
+            if pair.key in SNOW_GROUP_KEYS:
+                group_words[pair.key] = pair.raw
+        if address.role is SnowmeltRole.ZONE and group_words:
+            groups = SnowmeltGroups.from_values(
+                group_words.get(SnowmeltKey.MELT_GROUP),
+                group_words.get(SnowmeltKey.STORM_GROUP),
+            )
         current = SnowmeltChannel(
             address,
             tuple(samples[k] for k in sorted(samples)),
             frame,
+            groups,
         )
         self._channels[address] = current
         return current != before
@@ -190,6 +228,13 @@ class NativeSnowmelt:
     def primary(self) -> SnowmeltChannel | None:
         address = self.setup.primary
         return next((c for c in self.channels if c.address == address), None)
+
+    @property
+    def reported_groups(self) -> SnowmeltGroups | None:
+        """A paired status observation for the configured zone, not a send guard."""
+        return (
+            channel.reported_groups if (channel := self.primary) is not None else None
+        )
 
     def setpoint(self, block: Block) -> SnowmeltSetpoint | None:
         """Return a supported stored slab target, not an operating sample."""

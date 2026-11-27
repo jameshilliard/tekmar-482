@@ -9,7 +9,7 @@ from ._native_payloads.layouts import SnowmeltBlock
 from ._native_payloads.line import GROUP_IDS, GROUP_REPORT, GROUP_UPDATE
 from ._native_payloads.queries import NativeStatusQuery
 from ._native_payloads.snowmelt import SNOW_REPORT, SnowmeltKey, SnowmeltRole
-from .native_snowmelt import SNOW_SETUP
+from .native_snowmelt import SNOW_GROUP_BLOCKS, SNOW_GROUP_KEYS, SNOW_SETUP
 from .native_state import NativePath
 
 if TYPE_CHECKING:
@@ -27,6 +27,7 @@ _RETRY_REPORTS = 5  # SW 11 retries incomplete snowmelt data every fifth report.
 
 class SnowRead(Enum):
     MISSING = auto()
+    GROUPS = auto()
     OPERATING = auto()
 
 
@@ -74,9 +75,18 @@ class SnowWatch:
         ) != (current.setup.application_raw, current.setup.primary):
             self._retry.pop(path, None)
             self.routes[path] = self.routes.get(path, 0) + 1
+            if self.query(path, SnowRead.GROUPS) is not None:
+                self._queue(path, SnowRead.GROUPS)
             if current.missing_keys:
                 self._queue(path, SnowRead.MISSING)
             return True
+        if (
+            before.reported_groups is not None
+            and current.reported_groups is None
+            and current.setup.groups is None
+        ):
+            for block in SNOW_GROUP_BLOCKS:
+                self._queue(path, block)
         return False
 
     def _retry_setup(
@@ -155,11 +165,15 @@ class SnowWatch:
         self._group_flags[key] = flags
         for p, device in self.current.items():
             setup = device.setup
+            reported = device.reported_groups
+            observed_groups = (
+                (reported.melt_group, reported.storm_group) if reported else ()
+            )
             if (
                 p.port == path.port
                 and setup.primary is not None
                 and setup.primary.role is SnowmeltRole.ZONE
-                and group in (setup.melt_group, setup.storm_group)
+                and group in (*observed_groups, setup.melt_group, setup.storm_group)
             ):
                 self._queue(p, SnowRead.OPERATING)
 
@@ -169,13 +183,23 @@ class SnowWatch:
             return None
         if read is SnowRead.MISSING:
             return current.status_query(missing_only=True)
-        if address.role is SnowmeltRole.ZONE:
-            return NativeStatusQuery.snowmelt(
-                address.role,
-                address.number,
-                bytes([SnowmeltKey.OPERATING_STATE]),
-            )
-        return None
+        if address.role is not SnowmeltRole.ZONE:
+            return None
+        if read is SnowRead.GROUPS:
+            if current.setup.groups is not None or current.reported_groups is not None:
+                return None
+            keys = SNOW_GROUP_KEYS
+        else:
+            keys = bytes([SnowmeltKey.OPERATING_STATE])
+        return NativeStatusQuery.snowmelt(address.role, address.number, keys)
+
+    def needs_block(self, path: NativePath, block: int) -> bool:
+        device = self.current.get(path)
+        return (
+            block not in SNOW_GROUP_BLOCKS
+            or device is None
+            or device.reported_groups is None
+        )
 
     def updated_block(self, target: NativePath, block: int) -> None:
         if target in self.current and block in SNOW_SETUP:

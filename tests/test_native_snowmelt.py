@@ -19,6 +19,7 @@ from tekmar_482 import (
     SnowmeltApplication,
     SnowmeltBlock,
     SnowmeltGroupResult,
+    SnowmeltGroups,
     SnowmeltKey,
     SnowmeltOperatingState,
     SnowmeltRole,
@@ -43,6 +44,7 @@ from tests.native_fixtures import block, frame, identity
 
 SENSOR = SnowmeltAddress(SnowmeltRole.SENSOR, 3)
 ZONE = SnowmeltAddress(SnowmeltRole.ZONE, 3)
+GROUPS = ((0x25, 4), (0x26, 6))
 CONFIG = {
     0xD0: b"\x03\x03\x02",
     0xC0: b"\x01\x03",
@@ -80,6 +82,33 @@ def setup_frames(path: NativePath = SITE) -> list[NativeFrame]:
 
 
 class SnowmeltStateTests(unittest.TestCase):
+    def test_reported_groups_come_from_a_paired_primary_zone_report(self) -> None:
+        state = NativeState()
+        for item in setup_frames():
+            state.observe(item)
+        state.observe(snow(SENSOR, list(GROUPS)))
+        state.observe(snow(ZONE, [GROUPS[0]]))
+        state.observe(snow(ZONE, [GROUPS[1]]))
+        control = state.snowmelt(SITE)
+        assert control and control.setup.groups == SnowmeltGroups(4, 6)
+        assert control.reported_groups is None  # Separate samples are not a pair.
+
+        state.observe(snow(ZONE, list(GROUPS)))
+        state.observe(snow(ZONE, [(0x1B, 0x200)]))
+        control = state.snowmelt(SITE)
+        assert control and control.reported_groups == SnowmeltGroups(4, 6)
+        assert snow_fields(control)["reported_groups"] == {
+            "melt_group": 4,
+            "storm_group": 6,
+        }
+        state.observe(snow(ZONE, [(0x25, 5)]))
+        control = state.snowmelt(SITE)
+        assert control and control.reported_groups is None
+        state.observe(snow(ZONE, list(GROUPS)))
+        state.observe(block(0xC0, b"\x01\x04"))
+        control = state.snowmelt(SITE)
+        assert control and control.reported_groups is None
+
     def test_stored_slab_target_is_distinct_from_operating_target_and_off(self) -> None:
         state = NativeState()
         for item in setup_frames():
@@ -279,9 +308,10 @@ class SnowmeltWatchTests(unittest.IsolatedAsyncioTestCase):
         self.ack()
         self.rx(identity(105801))
 
-    def seed(self) -> None:
+    def seed(self, *, include_groups: bool = True) -> None:
         for b, d in CONFIG.items():
-            self.rx(block(b, d))
+            if include_groups or b not in (0xC2, 0xC3):
+                self.rx(block(b, d))
 
     def command(
         self,
@@ -307,9 +337,9 @@ class SnowmeltWatchTests(unittest.IsolatedAsyncioTestCase):
             ),
         )
 
-    async def assignments(self, overrides: dict[int, bytes] | None = None) -> None:
+    async def configure_zone(self, zone: bytes = CONFIG[0xC0]) -> None:
         await self.boot()
-        for b in (0xD0, 0xC0, 0xC2, 0xC3):
+        for b, data in ((0xD0, CONFIG[0xD0]), (0xC0, zone)):
             port, msg = await self.next_send()
             assert (
                 port == SITE.port
@@ -317,7 +347,19 @@ class SnowmeltWatchTests(unittest.IsolatedAsyncioTestCase):
                 and msg.payload[:2] == b.to_bytes(2, "little")
             )
             self.ack()
-            self.rx(block(b, (overrides or {}).get(b, CONFIG[b])))
+            self.rx(block(b, data))
+
+    async def expect_group_query(self) -> None:
+        port, msg = await self.next_send()
+        assert port == SITE.port
+        assert msg.to_bytes() == bytes.fromhex("17f00004 11022526")
+
+    async def assignments(self, pairs: tuple[tuple[int, int], ...] = GROUPS) -> None:
+        await self.configure_zone()
+        await self.expect_group_query()
+        self.ack()
+        for pair in reversed(pairs):
+            self.rx(snow(ZONE, [pair]))
 
     async def test_control_preview_and_refuse_wrong_or_shared_group(self) -> None:
         task = self.command(Operation.STORM, expected=None, preview=True, enabled=False)
@@ -328,23 +370,68 @@ class SnowmeltWatchTests(unittest.IsolatedAsyncioTestCase):
         assert result.observed_state is None and self.tx.empty()
         with self.assertRaisesRegex(ValueError, "explicit expected group"):
             await self.command(Operation.MELT, expected=None)
-        for expected, setup, error in (
-            (7, {}, "differs from expected"),
-            (4, {0xC3: b"\x01\x04"}, "ambiguous"),
-            (4, {0xC2: b"\x00"}, "invalid"),
-            (4, {0xC0: b"\x01\x00"}, "zone"),
+        for expected, reported, error in (
+            (7, GROUPS, "differs from expected"),
+            (4, ((0x25, 4), (0x26, 4)), "ambiguous"),
+            (4, ((0x25, 0x104), (0x26, 6)), "invalid"),
         ):
             task = self.command(Operation.MELT, expected=expected)
-            await self.assignments(setup)
+            await self.assignments(reported)
             with self.assertRaisesRegex(ValueError, error):
                 await task
             assert self.tx.empty()
 
         task = self.command(Operation.MELT, expected=4, expected_zone=2)
-        await self.assignments()
+        await self.configure_zone()
         with self.assertRaisesRegex(ValueError, "differs from expected zone"):
             await task
         assert self.tx.empty()
+
+        task = self.command(Operation.MELT, expected=4)
+        await self.configure_zone(b"\x01\x00")
+        with self.assertRaisesRegex(
+            ValueError,
+            "missing or invalid configured .* zone",
+        ):
+            await task
+        assert self.tx.empty()
+
+    async def test_incomplete_group_query_checks_both_blocks_and_rejects_conflict(
+        self,
+    ) -> None:
+        other = NativePath(SITE.port, SITE.subnet, SITE.node ^ 1)
+        for reported_melt in (4, 5):
+            task = self.command(Operation.MELT, expected=4, preview=True, timeout=0.05)
+            await self.configure_zone()
+            await self.expect_group_query()
+            self.ack()
+            self.rx(snow(SENSOR, list(GROUPS)))
+            self.rx(snow(ZONE, list(GROUPS), other))
+            self.rx(snow(ZONE, [(0x25, reported_melt)]))
+            for b in (0xC2, 0xC3):
+                _, request = await self.next_send()
+                assert request.message_id == 0x2D7 and request.payload[:2] == bytes(
+                    [b, 0],
+                )
+                self.ack()
+                self.rx(block(b, CONFIG[b]))
+            if reported_melt == 4:
+                result = await task
+                assert result.status is GroupStatus.PREVIEW and result.group == 4
+            else:
+                with self.assertRaisesRegex(ValueError, "conflicts"):
+                    await task
+            assert self.tx.empty()
+
+    async def test_missing_group_query_completion_does_not_read_or_write(self) -> None:
+        task = self.command(Operation.MELT, expected=4, timeout=0.05)
+        await self.configure_zone()
+        await self.expect_group_query()
+        self.rx(snow(ZONE, list(GROUPS)))
+        with self.assertRaisesRegex(TimeoutError, "no terminal"):
+            await task
+        assert self.tx.empty()
+        self.ack()
 
     async def test_target_edit_checks_application_before_transmitting(self) -> None:
         for app in (SnowmeltApplication.MIXING, SnowmeltApplication.SENSOR_ONLY):
@@ -520,7 +607,8 @@ class SnowmeltWatchTests(unittest.IsolatedAsyncioTestCase):
         self.rx(snow(ZONE, [(0x19, 0), (0x22, 0xC000)]))
         self.rx(snow(SENSOR, [(0x1B, 0x4FF), (0x29, 3)]))
         reads: list[int] = []
-        while len(reads) != len(CONFIG):
+        expected = set(CONFIG) - {0xC2, 0xC3}
+        while len(reads) != len(expected):
             port, msg = await self.next_send()
             assert port == SITE.port
             self.ack()
@@ -529,31 +617,38 @@ class SnowmeltWatchTests(unittest.IsolatedAsyncioTestCase):
                 reads.append(b)
                 self.rx(block(b, CONFIG[b]))
             else:
-                assert msg.message_id == 0x17F and msg.payload == bytes.fromhex(
-                    "11031b2329",
-                )
-                self.rx(snow(ZONE, [(0x29, 0), (0x23, 1500), (0x1B, 0x100)]))
+                assert msg.message_id == 0x17F
+                if msg.payload == bytes.fromhex("11022526"):
+                    self.rx(snow(ZONE, list(GROUPS)))
+                else:
+                    assert msg.payload == bytes.fromhex("11031b2329")
+                    self.rx(snow(ZONE, [(0x29, 0), (0x23, 1500), (0x1B, 0x100)]))
         result = await task
         (device,) = result.state.snowmelt_devices
-        assert result.reads == len(CONFIG) + 2 and sorted(reads) == sorted(CONFIG)
+        assert result.reads == len(expected) + 3 and set(reads) == expected
         assert (
             device.primary
             and device.primary.operating_state is SnowmeltOperatingState.OFF
         )
         assert device.missing_keys == b"" and result.latest_statuses[0].answered
+        assert device.setup.groups is None and device.reported_groups == SnowmeltGroups(
+            4,
+            6,
+        )
         assert self.tx.empty()
 
     async def test_group_change_probes_operating_state_on_one_port_without_setting_it(
         self,
     ) -> None:
-        self.seed()
+        self.seed(include_groups=False)
         self.rx(
             snow(
                 ZONE,
                 [
                     (k, 0x200 if k == 0x1B else 0)
                     for k in SnowmeltApplication.ELECTRIC.status_keys
-                ],
+                ]
+                + list(GROUPS),
             ),
         )
         seen: list[SnowmeltOperatingState | None] = []
@@ -590,6 +685,30 @@ class SnowmeltWatchTests(unittest.IsolatedAsyncioTestCase):
         self.rx(frame(0x20F, b"\x04\x11", other))
         result = await task
         assert seen[-1] is SnowmeltOperatingState.MELTING
+        assert result.reads == 3 and self.tx.empty()
+
+    async def test_group_watch_reads_both_registers_when_a_pair_is_invalidated(
+        self,
+    ) -> None:
+        self.seed(include_groups=False)
+        fields = [(k, 0) for k in SnowmeltApplication.ELECTRIC.status_keys]
+        self.rx(snow(ZONE, fields + list(GROUPS)))
+        task = asyncio.create_task(
+            watch_native(self.stream, [SITE], schedules=False, duration=0.18),
+        )
+        await self.boot()
+        self.rx(snow(ZONE, [(0x25, 5)]))
+        for b, data in ((0xC2, bytes([1, 5])), (0xC3, CONFIG[0xC3])):
+            _, request = await self.next_send()
+            assert request.message_id == 0x2D7 and request.payload[:2] == bytes([b, 0])
+            self.ack()
+            self.rx(block(b, data))
+        result = await task
+        (device,) = result.state.snowmelt_devices
+        assert device.reported_groups is None and device.setup.groups == SnowmeltGroups(
+            5,
+            6,
+        )
         assert result.reads == 3 and self.tx.empty()
 
     async def test_inflight_status_does_not_cross_rebinding_or_block_another_port(

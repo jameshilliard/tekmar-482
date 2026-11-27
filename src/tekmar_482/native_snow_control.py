@@ -22,11 +22,17 @@ from ._native_payloads.snowmelt import (
 from ._native_payloads.writes import BlockPatch, NativeField
 from .native import NativeBlockQuery, NativeMessage, SnowmeltSetpoint, require_enum
 from .native_identity import NativeIdentity
-from .native_snowmelt import SnowmeltConfiguration
+from .native_snowmelt import (
+    SNOW_GROUP_BLOCKS,
+    SNOW_GROUP_KEYS,
+    SnowmeltConfiguration,
+    SnowmeltGroups,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
 
+    from ._native_payloads.snowmelt import SnowmeltAddress
     from .native import NativeAddress, NativeFrame
     from .native_status import NativeStatusBatch
     from .native_write import NativeBlockEditor, NativeWriteResult
@@ -54,17 +60,18 @@ class SnowmeltGroupBinding:
         address = setup.primary
         if address is None or address.role is not SnowmeltRole.ZONE:
             return None
-        group, other = setup.melt_group, setup.storm_group
-        if operation is SnowmeltOperation.STORM:
-            group, other = other, group
-        if (
-            group is None
-            or group not in GROUP_IDS
-            or other not in GROUP_IDS
-            or group == other
-        ):
+        if (groups := setup.groups) is None:
             return None
-        return cls(address.number, group)
+        return cls(address.number, _operation_group(groups, operation))
+
+
+def _operation_group(
+    groups: SnowmeltGroups,
+    operation: SnowmeltOperation,
+) -> int:
+    return (
+        groups.melt_group if operation is SnowmeltOperation.MELT else groups.storm_group
+    )
 
 
 class SnowmeltGroupStatus(StrEnum):
@@ -130,6 +137,44 @@ async def _reported_application(
     return frame, app
 
 
+async def _reported_groups(
+    editor: NativeBlockEditor,
+    read_status: Callable[[NativeStatusQuery], Awaitable[NativeStatusBatch]],
+    target: NativeAddress,
+    address: SnowmeltAddress,
+) -> SnowmeltGroups | None:
+    status = await read_status(
+        NativeStatusQuery.snowmelt(address.role, address.number, SNOW_GROUP_KEYS),
+    )
+    melt = status.snowmelt_pair(Key.MELT_GROUP)
+    storm = status.snowmelt_pair(Key.STORM_GROUP)
+    if status.answered:
+        return SnowmeltGroups.from_values(
+            melt.raw if melt is not None else None,
+            storm.raw if storm is not None else None,
+        )
+    if status.transmit_pending:
+        msg = "snowmelt group status request has no terminal transmit result"
+        raise TimeoutError(msg)
+
+    # A controller may not return both status keys. Read both blocks instead
+    # of combining a partial status reply with a separate configuration read.
+    blocks: dict[tuple[int, int | None], NativeFrame] = {
+        (block, None): (
+            await editor.read(NativeBlockQuery(target, block))
+        ).require_report()
+        for block in SNOW_GROUP_BLOCKS
+    }
+    groups = SnowmeltConfiguration.from_blocks(blocks).groups
+    if groups is not None and (
+        (melt is not None and melt.raw != groups.melt_group)
+        or (storm is not None and storm.raw != groups.storm_group)
+    ):
+        msg = "snowmelt group status conflicts with addressed configuration"
+        raise ValueError(msg)
+    return groups
+
+
 async def apply_snowmelt_group(
     editor: NativeBlockEditor,
     send: Callable[[NativeMessage], Awaitable[TxResult | None]],
@@ -157,30 +202,29 @@ async def apply_snowmelt_group(
         return (await editor.read(NativeBlockQuery(target, block))).require_report()
 
     application, _ = await _reported_application(editor, target)
-    blocks: dict[tuple[int, int | None], NativeFrame] = {
-        (Block.APPLICATION_MODE, None): application,
-    }
-    for block in (Block.ZONE_ID, Block.MELT_GROUP, Block.STORM_GROUP):
-        blocks[block, None] = await read(block)
-    setup = SnowmeltConfiguration.from_blocks(blocks)
+    zone = await read(Block.ZONE_ID)
+    setup = SnowmeltConfiguration.from_blocks(
+        {(Block.APPLICATION_MODE, None): application, (Block.ZONE_ID, None): zone},
+    )
     address = setup.primary
     if address is None:
         msg = "missing or invalid configured snowmelt zone"
         raise ValueError(msg)
-    binding = SnowmeltGroupBinding.from_setup(setup, operation)
-    if binding is None:
+    if expected_zone is not None and address.number != expected_zone:
+        msg = (
+            f"configured zone {address.number} "
+            f"differs from expected zone {expected_zone}"
+        )
+        raise ValueError(msg)
+    groups = await _reported_groups(editor, read_status, target, address)
+    if groups is None:
         msg = "missing, invalid or ambiguous melt/storm group assignment"
         raise ValueError(msg)
-    group = binding.group
+    group = _operation_group(groups, operation)
     if expected_group is not None and group != expected_group:
         msg = (
             f"configured {operation.name.lower()} group {group} "
             f"differs from expected group {expected_group}"
-        )
-        raise ValueError(msg)
-    if expected_zone is not None and binding.zone != expected_zone:
-        msg = (
-            f"configured zone {binding.zone} differs from expected zone {expected_zone}"
         )
         raise ValueError(msg)
     message = NativeMessage.setpoint_group(

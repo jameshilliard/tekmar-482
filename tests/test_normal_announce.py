@@ -187,21 +187,40 @@ class NormalAnnounceTests(unittest.IsolatedAsyncioTestCase):
     async def test_snowmelt_reads_live_binding_and_only_zone_state_confirms(
         self,
     ) -> None:
+        def status(query: str, fields: str, terminal: str) -> tuple[str, str]:
+            key = "030112017f01" + query
+            peer = NativeMessage(0x17E, _PEER, bytes.fromhex(fields)).to_bytes().hex()
+            return (
+                "0110f04b54" + key,
+                f"0410f04b54{key} 0210f04b54030001000000{peer} 0210f04b5403{terminal}",
+            )
+
         setup = []
         for block, fields in [
             (0, b"\x07" + (105801).to_bytes(3, "little")),
             (0xD0, b"\x01\x00"),
             (0xC0, b"\x01\x03"),
-            (0xC2, b"\x01\x04"),
-            (0xC3, b"\x01\x06"),
         ]:
             setup.extend([(_CAP, _CAPS), block_read(block, fields)])
-        query = "030112017f0111011b"
-        peer_state = (
-            NativeMessage(0x17E, _PEER, bytes.fromhex("19011b0002")).to_bytes().hex()
-        )
-        for outcome in (None, "ff", "01"):
-            rows = list(setup)
+        for outcome, partial in (
+            (None, False),
+            ("ff", False),
+            ("01", False),
+            (None, True),
+        ):
+            rows = [*setup, (_CAP, _CAPS)]
+            if partial:
+                rows.extend(
+                    (
+                        status("11022526", "1901250400", "0200"),
+                        (_CAP, _CAPS),
+                        block_read(0xC2, b"\x01\x04"),
+                        (_CAP, _CAPS),
+                        block_read(0xC3, b"\x01\x06"),
+                    ),
+                )
+            else:
+                rows.append(status("11022526", "1902250400260600", "0100"))
             if outcome is not None:
                 rows.extend(
                     [
@@ -214,17 +233,7 @@ class NormalAnnounceTests(unittest.IsolatedAsyncioTestCase):
                 )
             if outcome == "01":
                 rows.extend(
-                    [
-                        (_CAP, _CAPS),
-                        (
-                            "0110f04b54" + query,
-                            "0410f04b54"
-                            + query
-                            + " 0210f04b54030001000000"
-                            + peer_state
-                            + " 0210f04b54030100",
-                        ),
-                    ],
+                    ((_CAP, _CAPS), status("11011b", "19011b0002", "0100")),
                 )
             script = Script(*rows)
             async with Tekmar482Client(script) as client:
