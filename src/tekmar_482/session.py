@@ -171,6 +171,7 @@ class Tekmar482Session:
             default=None,
         )
         self._transaction_lock = asyncio.Lock()
+        self.normal_read_admission = asyncio.Lock()
         self._inventory_drained = asyncio.Event()
         self._inventory_address = 0
         self._inventory_drained.set()
@@ -187,7 +188,7 @@ class Tekmar482Session:
         self._packet_backlog: list[Packet] = []
         self._report_queues: dict[
             asyncio.Queue[_ReportItem],
-            frozenset[TrpcMethod],
+            tuple[frozenset[int], int | None],
         ] = {}
         self._observers: set[Callable[[TrpcPacket, TrpcCommand | None], None]] = set()
         self._trace: NormalTrace | None = None
@@ -709,7 +710,8 @@ class Tekmar482Session:
         *,
         max_queue_size: int = 0,
         replay_backlog: bool = False,
-        include_matched: frozenset[TrpcMethod] = frozenset(),
+        include_matched: frozenset[int] = frozenset(),
+        only_method: int | None = None,
     ) -> ReportSubscription:
         """Subscribe to public messages and selected methods' matched replies."""
         queue: asyncio.Queue[_ReportItem] = asyncio.Queue(
@@ -721,8 +723,9 @@ class Tekmar482Session:
 
         if replay_backlog:
             for message in self._message_backlog:
-                self._put_report_item(queue, (message, None))
-        self._report_queues[queue] = include_matched
+                if only_method is None or message.method_id == only_method:
+                    self._put_report_item(queue, (message, None))
+        self._report_queues[queue] = (include_matched, only_method)
         return ReportSubscription(queue, lambda: self._unsubscribe_reports(queue))
 
     @contextmanager
@@ -1235,8 +1238,9 @@ class Tekmar482Session:
         del self._packet_backlog[: -self.max_packet_backlog]
 
     def _publish_report(self, event: ReportEvent, *, public: bool) -> None:
-        for queue, included in self._report_queues.items():
-            if public or event[0].method in included:
+        method = event[0].method_id
+        for queue, (included, only) in self._report_queues.items():
+            if (only is None or method == only) and (public or method in included):
                 self._put_report_item(queue, event)
 
     def _put_report_item(

@@ -383,16 +383,25 @@ An edit does not enable an output, change the operating mode or select a
 different setback. A confirmed edit reads the target back; a missing support
 bit, compact pre-write block or unrepresentable value cannot be written.
 
-The CLI uses the same reader. For example, with an **observed** native node
-on a dedicated single-peer line (addresses below are examples):
+To read a single block without interrupting Normal operation (addresses
+below are examples):
 
 ```bash
-tekmar-482 read-block 2 0x12 3 0x71 --ack --tcp 192.0.2.10:3001 --json
+tekmar-482 read-block 2 0x12 3 0x71 --tcp 192.0.2.10:3001 --json
+tekmar-482 read-block 2 0x12 3 0x38 --selector 3 --tcp 192.0.2.10:3001 --json
 ```
 
-`--ack` supplies a link ACK to valid incoming frames on that port. It is
-off by default. Use `--selector` for indexed blocks and `--timeout` to
-change the CLI's 20-second deadline.
+`await BridgeManagement(client).read_block(port, query)` returns the peer's
+full timestamped `NativeFrame` on an open Normal session. It needs neither
+tracing nor tHA reporting. Distinct ports can read concurrently; a second
+read on an occupied port is rejected. Silence is a timeout, not an empty
+block. The gateway deadline is ten seconds from admission; `--timeout`
+controls the host's wait. This requires the advertised Normal block-read
+feature. It does not silently fall back to Raw or to cached values.
+
+Use `read-block --raw` to explicitly select Raw mode. In that mode,
+`--ack` supplies link ACKs to valid incoming frames on that port and is
+off by default. Only use that flag where the gateway should supply ACKs.
 
 `send()` transmits once and waits for that port's terminal link result:
 `ACK`, `REJECTED` before transmission, or `FAILED` during transmission.

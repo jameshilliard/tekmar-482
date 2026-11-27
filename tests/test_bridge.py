@@ -396,6 +396,7 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
                     "0xc6",
                     "--selector",
                     "5",
+                    "--raw",
                     "--ack",
                     "--tcp",
                     f"{endpoint.address}:{endpoint.port}",

@@ -345,7 +345,12 @@ def _add_block_commands(
     block = subparsers.add_parser(
         "read-block",
         parents=[parent],
-        help="read one native tN4 block",
+        help="read one native tN4 block without leaving Normal mode",
+    )
+    block.add_argument(
+        "--raw",
+        action="store_true",
+        help="switch to Raw mode for this read",
     )
     device = subparsers.add_parser(
         "read-device",
@@ -647,14 +652,14 @@ def _endpoint(args: argparse.Namespace) -> GatewayEndpoint:
     )
 
 
-async def _native(args: argparse.Namespace, stdout: TextIO) -> int:
-    def emit(value: object) -> None:
-        stdout.write((json.dumps(value) if args.json else str(value)) + "\n")
-        if args.command in {"watch-climate", "watch-native", "trace-normal", "errors"}:
-            stdout.flush()
-
-    if args.command in LINE_COMMANDS:
-        return await _broadcast(args, emit)
+def _validate_native_args(args: argparse.Namespace) -> None:
+    if (
+        args.command == "read-block"
+        and not args.raw
+        and (args.ack or args.source_subnet or args.source_node)
+    ):
+        msg = "custom source addresses and --ack require read-block --raw"
+        raise CliError(msg)
     if (
         args.command in {"watch-native", "watch-climate"}
         and not args.device
@@ -669,6 +674,17 @@ async def _native(args: argparse.Namespace, stdout: TextIO) -> int:
     ):
         msg = "a device-based broadcast requires --expect-group and --confirm"
         raise CliError(msg)
+
+
+async def _native(args: argparse.Namespace, stdout: TextIO) -> int:
+    def emit(value: object) -> None:
+        stdout.write((json.dumps(value) if args.json else str(value)) + "\n")
+        if args.command in {"watch-climate", "watch-native", "trace-normal", "errors"}:
+            stdout.flush()
+
+    if args.command in LINE_COMMANDS:
+        return await _broadcast(args, emit)
+    _validate_native_args(args)
     endpoint = _endpoint(args)
     if args.command in {"install", "update"}:
         changed = await install_firmware(
@@ -698,6 +714,19 @@ async def _native(args: argparse.Namespace, stdout: TextIO) -> int:
         elif args.command == "request":
             async with bridge.normal() as client:
                 await _request(client, args, stdout)
+        elif args.command == "read-block" and not args.raw:
+            query = NativeBlockQuery(
+                NativeAddress(args.subnet, args.node),
+                args.block,
+                args.selector,
+            )
+            async with bridge.normal(select_mode=False) as client:
+                report = await BridgeManagement(client).read_block(
+                    args.port,
+                    query,
+                    timeout=args.timeout,
+                )
+            emit(_frame_fields(report))
         elif args.command in {
             "read-block",
             "read-device",

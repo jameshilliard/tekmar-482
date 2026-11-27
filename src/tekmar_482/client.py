@@ -401,7 +401,7 @@ class Tekmar482Client:
         *,
         max_queue_size: int = 0,
         replay_backlog: bool = False,
-        include_matched: frozenset[TrpcMethod] = frozenset(),
+        include_matched: frozenset[int] = frozenset(),
     ) -> ReportSubscription:
         """Subscribe to public messages and matched replies for selected methods."""
         return self.session.reports(

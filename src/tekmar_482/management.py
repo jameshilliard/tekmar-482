@@ -2,16 +2,19 @@
 
 from __future__ import annotations
 
+import asyncio
 import re
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from enum import IntEnum, IntFlag
+from math import isfinite
 from typing import TYPE_CHECKING, Self
 
 from ._bridge_diagnostics import ERROR_REPORTING_METHOD, TRACE_STATE, WIRE_VERSION
+from ._normal_block import read_key, read_result
 from .constants import TN4_PORTS
 from .error_reports import ALL_SOURCES, ErrorReports, GatewayErrorCounter, source_mask
-from .exceptions import ProtocolError, TekmarError
+from .exceptions import ConnectionClosedError, ProtocolError, TekmarError
 from .normal_trace import NormalTrace, NormalTraceState
 from .traffic import TrafficCounters
 from .trpc import ResponseMatch, TrpcCommand, TrpcMethod, TrpcPacket, TrpcService
@@ -22,6 +25,7 @@ if TYPE_CHECKING:
 
     from ._bridge_diagnostics import ErrorReason, ErrorSource
     from .client import Tekmar482Client
+    from .native import NativeBlockQuery, NativeFrame
     from .native_state import NativePath
 
 _CAPABILITY_BYTES = 4
@@ -48,6 +52,7 @@ class BridgeFeature(IntFlag):
     ERROR_REPORTING = 8
     NORMAL_IDENTITY = 16
     TRAFFIC_COUNTS = 32
+    NORMAL_BLOCK_READ = 64
 
 
 class BridgeMethod(IntEnum):
@@ -65,6 +70,7 @@ class BridgeMethod(IntEnum):
     ERROR_REPORTING = ERROR_REPORTING_METHOD
     NORMAL_IDENTITY = 0x544BF00D
     TRAFFIC_COUNTS = 0x544BF00E
+    NORMAL_BLOCK_READ = 0x544BF00F
 
 
 @dataclass(frozen=True, slots=True)
@@ -300,6 +306,58 @@ class BridgeManagement(_Management):
         if reply.method_id != BridgeMethod.NORMAL_IDENTITY or reply.extra != body:
             msg = "gateway did not accept the targeted identity read"
             raise ProtocolError(msg)
+
+    async def read_block(
+        self,
+        port: int,
+        query: NativeBlockQuery,
+        *,
+        timeout: float = 15,
+    ) -> NativeFrame:
+        """Read one peer in Normal mode without relying on trace or cached replies."""
+        if not isfinite(timeout) or timeout <= 0:
+            msg = "Normal block read timeout must be finite and positive"
+            raise ValueError(msg)
+        key = read_key(port, query)
+        command = _ExtensionCommand(
+            TrpcService.REQUEST,
+            BridgeMethod.NORMAL_BLOCK_READ,
+            payload=key,
+        )
+        session = self._session
+        with session.connection_scope():
+            async with session.reports(
+                include_matched=frozenset({command.method_id}),
+                only_method=command.method_id,
+            ) as events:
+                # Drain abandoned admission replies, not outstanding native reads.
+                async with session.normal_read_admission:
+                    caps = await self.capabilities()
+                    if (
+                        caps is None
+                        or caps.mode != BridgeMode.NORMAL
+                        or not caps.features & BridgeFeature.NORMAL_BLOCK_READ
+                    ):
+                        msg = "gateway does not support block reads in Normal mode"
+                        raise ProtocolError(msg)
+                    ack = await self._exchange(command)
+                    if ack.method_id != command.method_id or ack.extra != key:
+                        msg = "gateway did not acknowledge this Normal block read"
+                        raise ProtocolError(msg)
+                armed = False
+                async with asyncio.timeout(timeout):
+                    async for packet in events:
+                        if packet is ack:
+                            armed = True
+                        elif (
+                            armed
+                            and packet.method_id == command.method_id
+                            and packet.service is TrpcService.REPORT
+                            and packet.extra[:1] == key[:1]
+                        ):
+                            return read_result(port, query, packet.extra)
+        msg = "connection closed before the Normal block result"
+        raise ConnectionClosedError(msg)
 
     async def _trace_state(self) -> NormalTraceState:
         reply = await self._exchange(TrpcCommand.request(BridgeMethod.NORMAL_TRACE))
