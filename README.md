@@ -1086,6 +1086,12 @@ async with asyncio.TaskGroup() as tasks:
 disconnected. Fetch it again after reconnect rather than retaining an
 outdated handle. Connection loss invalidates the old observations; a
 firmware that explicitly rejects the required protocol is not retried.
+If no peer trace arrives for `idle_check_interval` (15 seconds by default),
+the monitor checks the gateway's trace subscription on the host link. This
+detects a gateway reboot even when the USB adapter or TCP bridge stays
+connected. A missing subscription or response makes the monitor reopen
+the link and rebuild state. This check never sends on a tN4 line, including
+when the monitor is passive.
 An active monitor also checks a port when its first addressable peer is
 observed without a MasterPresent header. The one MasterQuery uses the
 same per-port queue as other reads; a quiet line does not cause polling.

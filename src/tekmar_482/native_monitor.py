@@ -20,6 +20,8 @@ if TYPE_CHECKING:
 
     from ._wire import GatewayEndpoint
     from .native_state import NativePath
+    from .normal_trace import NormalNativeSession
+    from .raw import CaptureRecord
 
 
 class NativeMonitor:
@@ -32,6 +34,7 @@ class NativeMonitor:
         ports: Iterable[int] = TN4_PORTS,
         passive: bool = False,
         reconnect_interval: float = 10,
+        idle_check_interval: float = 15,
         timeout: float = 20,
         stale_after: float | None = None,
     ) -> None:
@@ -39,13 +42,14 @@ class NativeMonitor:
         if not self._ports or not self._ports.issubset(TN4_PORTS):
             msg = "select at least one valid physical tN4 port"
             raise ValueError(msg)
-        intervals = (reconnect_interval, timeout, stale_after)
+        intervals = (reconnect_interval, idle_check_interval, timeout, stale_after)
         if any(v is not None and (not isfinite(v) or v <= 0) for v in intervals):
             msg = "monitor intervals must be finite and positive"
             raise ValueError(msg)
         self._endpoint = endpoint
         self._passive = passive
         self._reconnect_interval = reconnect_interval
+        self._idle_check_interval = idle_check_interval
         self._timeout = timeout
         self._stale_after = stale_after
         self._state = NativeState()
@@ -130,11 +134,51 @@ class NativeMonitor:
             self._management = manager
             self._last_error = None
             self._publish()
-            await watch_native(
-                link,
-                source=None if self._passive else NativeAddress(0, 0),
-                timeout=self._timeout,
-                stale_after=self._stale_after,
-                check_port_subnets=True,
-                on_change=self._observed,
-            )
+            await self._watch_peers(link)
+
+    async def _watch_peers(self, link: NormalNativeSession) -> None:
+        loop = asyncio.get_running_loop()
+        check_at = loop.time() + self._idle_check_interval
+
+        def note_capture(_record: CaptureRecord) -> None:
+            nonlocal check_at
+            check_at = loop.time() + self._idle_check_interval
+
+        async def check_capture() -> None:
+            nonlocal check_at
+            # A gateway reboot clears trace without dropping the UART or TCP link.
+            while True:
+                delay = check_at - loop.time()
+                if delay > 0:
+                    await asyncio.sleep(delay)
+                    continue
+                async with asyncio.timeout(self._timeout):
+                    state = await link.management.trace_state()
+                mask = link.peers.port_mask
+                if state.port_mask & mask != mask:
+                    msg = "gateway lost the Normal peer trace subscription"
+                    raise ConnectionClosedError(msg)
+                check_at = loop.time() + self._idle_check_interval
+
+        tasks = (
+            asyncio.create_task(
+                watch_native(
+                    link,
+                    source=None if self._passive else NativeAddress(0, 0),
+                    timeout=self._timeout,
+                    stale_after=self._stale_after,
+                    check_port_subnets=True,
+                    on_change=self._observed,
+                    on_record=note_capture,
+                ),
+            ),
+            asyncio.create_task(check_capture()),
+        )
+        try:
+            done, _ = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+            for task in done:
+                task.result()
+        finally:
+            for task in tasks:
+                task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)

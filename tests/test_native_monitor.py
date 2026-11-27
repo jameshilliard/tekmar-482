@@ -338,6 +338,102 @@ class NativeMonitorTests(unittest.IsolatedAsyncioTestCase):
             assert await second.reader.read() == b""
             assert not monitor.state.paths and monitor.management is None
 
+    async def test_quiet_capture_checks_the_gateway_without_polling_peers(self) -> None:
+        monitor = NativeMonitor(
+            self.endpoint,
+            ports=[TEST_PATH.port],
+            passive=True,
+            idle_check_interval=0.05,
+        )
+        async with asyncio.TaskGroup() as tasks, asyncio.timeout(2):
+            running = tasks.create_task(monitor.run())
+            gateway = await self.accepted.get()
+            await gateway.setup("08", active=False)
+            gateway.report(identity(200003))
+            await wait_for_product(monitor, 200003)
+            previous = monitor.state
+
+            for _ in range(2):
+                await gateway.exchange(_CAP, _SUPPORT)
+                await gateway.exchange(_TRACE, "040bf04b5408" + _COUNTS)
+
+            assert monitor.state is previous and monitor.state.paths
+            assert self.accepted.empty()
+            running.cancel()
+            await gateway.restore()
+
+    async def test_gateway_restart_with_open_stream_reopens_capture(self) -> None:
+        monitor = NativeMonitor(
+            self.endpoint,
+            ports=[TEST_PATH.port],
+            passive=True,
+            idle_check_interval=0.05,
+            reconnect_interval=0.05,
+        )
+        async with asyncio.TaskGroup() as tasks, asyncio.timeout(2):
+            running = tasks.create_task(monitor.run())
+            first = await self.accepted.get()
+            await first.setup("08", active=False)
+            first.report(identity(200003))
+            await wait_for_product(monitor, 200003)
+            previous = monitor.state
+            manager = monitor.management
+            assert manager is not None
+
+            # The gateway restarted but neither a UART nor a TCP bridge needs
+            # to close its stream. The new firmware instance has no trace mask.
+            revision = monitor.revision
+            await first.exchange(_CAP, _SUPPORT)
+            await first.exchange(_TRACE, "040bf04b5400" + _COUNTS)
+            await first.restore()
+            await monitor.wait_for_change(revision)
+            assert monitor.management is None and not monitor.state.paths
+            assert not previous.paths
+            self.assertIsInstance(monitor.last_error, ConnectionClosedError)
+
+            second = await self.accepted.get()
+            await second.setup("08", active=False)
+            second.report(identity(200004))
+            await wait_for_product(monitor, 200004)
+            assert monitor.management is not manager and monitor.last_error is None
+            assert await first.reader.read() == b""
+            with self.assertRaises(ConnectionClosedError):
+                await manager.capabilities()
+            running.cancel()
+            await second.restore()
+
+    async def test_unanswered_idle_check_reopens_an_open_stream(self) -> None:
+        monitor = NativeMonitor(
+            self.endpoint,
+            ports=[TEST_PATH.port],
+            passive=True,
+            idle_check_interval=0.05,
+            reconnect_interval=0.05,
+            timeout=0.15,
+        )
+        async with asyncio.TaskGroup() as tasks, asyncio.timeout(2):
+            running = tasks.create_task(monitor.run())
+            first = await self.accepted.get()
+            await first.setup("08", active=False)
+            first.report(identity(200003))
+            await wait_for_product(monitor, 200003)
+
+            revision = monitor.revision
+            await first.expect(_CAP)
+            # No reply and no EOF, as with a powered-off gateway behind serial.
+            await first.restore()
+            await monitor.wait_for_change(revision)
+            assert monitor.management is None and not monitor.state.paths
+            self.assertIsInstance(monitor.last_error, TimeoutError)
+
+            second = await self.accepted.get()
+            await second.setup("08", active=False)
+            second.report(identity(200004))
+            await wait_for_product(monitor, 200004)
+            assert monitor.last_error is None
+            running.cancel()
+            await second.restore()
+
     async def test_independent_plant_probes_require_trace_and_recover_after_loss(
         self,
     ) -> None:
