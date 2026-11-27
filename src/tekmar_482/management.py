@@ -96,6 +96,7 @@ class BridgeFeature(IntFlag):
     BLOCK_TRANSFERS = 1024
     ORDERED_TRACE_GAPS = 2048
     NORMAL_DISCOVER = 4096
+    ORDERED_NATIVE_RESULTS = 8192
 
 
 class BridgeMethod(IntEnum):
@@ -380,7 +381,7 @@ class BridgeManagement(_Management):
 
     def _check_edit_idle(self, port: int) -> None:
         if port in TN4_PORTS and self._session.normal_edit_locks[port].locked():
-            msg = f"block edit in progress on port {port}"
+            msg = f"native operation in progress on port {port}"
             raise NativePortBusyError(msg)
 
     async def read_block_group(
@@ -390,11 +391,25 @@ class BridgeManagement(_Management):
         *,
         source: NativeAddress = _GATEWAY_SOURCE,
         timeout: float = DEFAULT_BLOCK_TIMEOUT,
+        wait_for_edits: bool = False,
     ) -> NativeBlockBatch:
         """Read one native bitmap and retain distinct peer reports on gateway expiry."""
         _check_source(source)
-        self._check_edit_idle(port)
-        return await self._read_block(port, query, timeout)
+        async with self._reader(port, wait_for_edits=wait_for_edits):
+            return await self._read_block(port, query, timeout)
+
+    @asynccontextmanager
+    async def _reader(self, port: int, *, wait_for_edits: bool) -> AsyncIterator[None]:
+        if port not in TN4_PORTS:
+            msg = "expected a physical tN4 port"
+            raise ValueError(msg)
+        if wait_for_edits:
+            with self._session.connection_scope():
+                async with self._session.normal_edit_locks[port]:
+                    yield
+        else:
+            self._check_edit_idle(port)
+            yield
 
     async def _read_block(
         self,
@@ -505,11 +520,12 @@ class BridgeManagement(_Management):
         source: NativeAddress = _GATEWAY_SOURCE,
         peer: NativeAddress | None = None,
         timeout: float = 15,
+        wait_for_edits: bool = False,
     ) -> NativeStatusBatch:
         """Read peer status without changing mode, trace or link-ACK settings."""
         _check_source(source)
-        self._check_edit_idle(port)
-        return await self._read_status(port, query, peer, timeout)
+        async with self._reader(port, wait_for_edits=wait_for_edits):
+            return await self._read_status(port, query, peer, timeout)
 
     async def _read_status(
         self,

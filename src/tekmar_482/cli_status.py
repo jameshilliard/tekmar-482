@@ -19,6 +19,7 @@ if TYPE_CHECKING:
     import argparse
     from collections.abc import Callable
 
+    from ._observation import ObservationStream
     from .native_plant import PlantEquipment, WaterSample, WaterValue
     from .native_plant_registers import PlantRegisters
     from .native_sensors import SensorObservation
@@ -27,7 +28,6 @@ if TYPE_CHECKING:
     from .native_targets import ThermostatAdjustments
     from .native_watch import ClimateChange
     from .native_water import WaterSource
-    from .normal_trace import NormalPeerCapture
     from .raw import BridgeStream
 
 
@@ -235,7 +235,7 @@ def adjustment_fields(settings: ThermostatAdjustments) -> dict[str, object]:
 
 
 async def watch_from_args(
-    stream: BridgeStream | NormalPeerCapture,
+    stream: ObservationStream,
     args: argparse.Namespace,
     emit: Callable[[object], None],
 ) -> int:

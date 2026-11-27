@@ -96,7 +96,8 @@ mode by default, including while probing. The gateway attempts one read of
 identity block 00 per observed or specified subnet; only a peer frame
 establishes a device, not a link ACK. The listening window stops new probes;
 already submitted Normal probes finish before a subsequent scan reuses the
-ports. Passive watch commands also use Normal peer capture. Use `--raw` to
+ports. Active and passive thermostat and device watches also stay in Normal
+mode. Use `--raw` to
 explicitly select Raw capture. A solitary peer in Raw can need a link
 ACK to deliver its frames: `--ack-port PORT` is explicit and repeatable.
 By default the gateway does not ACK incoming Raw frames. Use a longer
@@ -479,7 +480,13 @@ tekmar-482 set-climate-mode 2 0x12 3 heat --tcp 192.0.2.10:3001
 ```
 
 `watch_climate(stream, paths, on_change=callback)` runs until cancellation or
-an optional deadline. It reads identity and cataloged mode setup once.
+an optional deadline. Pass a `BridgeManagement.native_session()` context's
+value to watch without disrupting tHA clients. Active watches request blocks
+from the gateway's own source address on the selected trace ports. They
+require firmware that orders read completions after earlier trace frames
+and loss notices, so an address change or gap retires an obsolete read.
+Passive watches never send. A Raw stream remains available for explicit
+source addresses or link ACKs. The watcher reads identity and cataloged mode setup once.
 There is no periodic poll. An addressed setup update or a change in operating
 channel, enable, demand, setback or active target queues a targeted read,
 with at most one pending follow-up

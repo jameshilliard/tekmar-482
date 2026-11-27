@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING
 
 from ._native_payloads.layouts import MULTI_WEEK
 from ._native_payloads.schedules import SETUP_BLOCK
+from ._observation import OrderedNormalReads
 from .native import NativeBlockQuery, NativeFrame
 from .native_state import BLOCK_REPORT, TAKING_ADDRESS, NativePath
 from .raw import CaptureGap
@@ -18,7 +19,7 @@ if TYPE_CHECKING:
     from ._native_payloads.schedules import ScheduleStatus
     from .native import BlockKey, NativeAddress
     from .native_state import NativeClimate, NativeState
-    from .raw import BridgeStream, CaptureRecord, NativeBlockBatch
+    from .raw import CaptureRecord, NativeBlockBatch, NativeReader
 
 
 @dataclass(slots=True)
@@ -81,7 +82,7 @@ class ConfigurationReader:
 
     async def read(
         self,
-        stream: BridgeStream,
+        stream: NativeReader,
         path: NativePath,
         key: BlockKey,
         revision: int,
@@ -100,7 +101,13 @@ class ConfigurationReader:
                 wait_for_edits=True,
             )
             if batch.reports:
-                await p.seen.wait()
+                if isinstance(stream, OrderedNormalReads):
+                    # The terminal result followed its trace, or a gap. Never
+                    # wait for a future report to stand in for a missing one.
+                    if not p.seen.is_set():
+                        return batch, False
+                else:
+                    await p.seen.wait()
             return batch, self._current(p)
         finally:
             del self.pending[path.port]
@@ -189,7 +196,7 @@ class ConfigurationWatch:
 
     async def read(
         self,
-        stream: BridgeStream,
+        stream: NativeReader,
         path: NativePath,
         key: BlockKey,
         *,

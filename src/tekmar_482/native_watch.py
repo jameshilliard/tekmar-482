@@ -14,19 +14,20 @@ from ._native_payloads.io import IoEndpoint
 from ._native_payloads.layouts import MULTI_WEEK
 from ._native_payloads.queries import NativeStatusQuery
 from ._native_payloads.schedules import SCHEDULE_STATUS, SETUP_BLOCK
+from ._observation import OrderedNormalReads, observation
 from ._snow_watch import SnowRead, SnowWatch
 from .native import NativeAddress, NativeBlockQuery, NativeFrame
 from .native_plant_registers import PLANT_REGISTERS
 from .native_setpoint import SETPOINT_BLOCKS
 from .native_state import BLOCK_UPDATE, TAKING_ADDRESS, NativePath, NativeState
 from .native_targets import ADJUSTMENT_BLOCKS
-from .normal_trace import NormalPeerCapture
 from .raw import CaptureGap
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterable
 
     from ._native_payloads.climate import AirReading, AirStatus
+    from ._observation import ObservationStream
     from .native import BlockKey
     from .native_identity import NativeIdentity
     from .native_state import NativeClimate
@@ -340,7 +341,7 @@ class _Watch:
 
     async def probe(
         self,
-        stream: BridgeStream,
+        stream: BridgeStream | OrderedNormalReads,
         queue: _PortQueue,
         source: NativeAddress,
         timeout: float,
@@ -429,12 +430,12 @@ class _Watch:
                     self.latest[path, block] = batch
                 result = batch.tx_result
             self.count += 1
-            if result is None:
+            if result is None and not isinstance(stream, OrderedNormalReads):
                 await stream.wait_transmit_idle(path.port)
 
 
 async def _run_watch(
-    stream: BridgeStream | NormalPeerCapture,
+    stream: ObservationStream,
     watch: _Watch,
     *,
     source: NativeAddress | None,
@@ -443,9 +444,6 @@ async def _run_watch(
     on_record: Callable[[CaptureRecord], None] | None,
 ) -> None:
     selected = watch.paths
-    if isinstance(stream, NormalPeerCapture) and source is not None:
-        msg = "a Normal peer capture is passive; use source=None"
-        raise ValueError(msg)
     if source is not None and (
         not selected or (not watch.io_discovery and any(not p.node for p in selected))
     ):
@@ -459,17 +457,23 @@ async def _run_watch(
         msg = "expected finite positive response timeout and observation duration"
         raise ValueError(msg)
 
+    capture, reader = await observation(
+        stream,
+        (p.port for p in selected or ()),
+        source,
+    )
+
     async def receive() -> None:
         while True:
-            record = await stream.read()
+            record = await capture.read()
             if on_record is not None:
                 on_record(record)
             watch.observe(record)
 
     tasks = [asyncio.create_task(receive())]
-    if source is not None and not isinstance(stream, NormalPeerCapture):
+    if source is not None and reader is not None:
         tasks.extend(
-            asyncio.create_task(watch.probe(stream, q, source, timeout))
+            asyncio.create_task(watch.probe(reader, q, source, timeout))
             for q in watch.queues.values()
         )
     try:
@@ -487,7 +491,7 @@ async def _run_watch(
 
 
 async def watch_native(
-    stream: BridgeStream | NormalPeerCapture,
+    stream: ObservationStream,
     paths: Iterable[NativePath] | None = None,
     *,
     source: NativeAddress | None = _HOST,
@@ -539,7 +543,7 @@ async def watch_native(
 
 
 async def watch_climate(
-    stream: BridgeStream | NormalPeerCapture,
+    stream: ObservationStream,
     paths: Iterable[NativePath] | None = None,
     *,
     source: NativeAddress | None = _HOST,

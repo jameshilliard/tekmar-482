@@ -20,6 +20,7 @@ if TYPE_CHECKING:
     from collections.abc import Callable
 
     from ._native_payloads.line import LineReportKind
+    from ._observation import ObservationStream
     from .native_calendar import NativeCalendar
     from .native_io import IoDirectory
     from .native_plant_registers import PlantRegisters
@@ -27,7 +28,6 @@ if TYPE_CHECKING:
     from .native_snowmelt import NativeSnowmelt, SnowmeltChannel
     from .native_state import NativeFaultReport, NativeLineReport, NativeState
     from .native_watch import NativeWatchResult
-    from .normal_trace import NormalPeerCapture
     from .raw import BridgeStream
 
 
@@ -224,7 +224,7 @@ def _emit_fault(
 
 
 async def watch_all_from_args(
-    stream: BridgeStream | NormalPeerCapture,
+    stream: ObservationStream,
     args: argparse.Namespace,
     emit: Callable[[object], None],
 ) -> int:

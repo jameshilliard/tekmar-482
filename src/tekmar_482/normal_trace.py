@@ -142,6 +142,9 @@ class _CaptureBuffer[T]:
         self._queue: deque[T] = deque(maxlen=backlog)
         self._ready = asyncio.Event()
         self._lost = 0
+        self._arrived = 0
+        self._consumed = 0
+        self._advanced = asyncio.Event()
         self.host_drops = 0
         self.gateway_drops: tuple[int, ...] | None = None
         self.closed = False
@@ -150,6 +153,7 @@ class _CaptureBuffer[T]:
     def _put(self, item: T) -> None:
         if self.closed:
             return
+        self._arrived += 1
         if len(self._queue) == self._queue.maxlen:
             self._lost += 1
             self.host_drops += 1
@@ -161,6 +165,7 @@ class _CaptureBuffer[T]:
             self.closed = True
             self._error = error
             self._ready.set()
+            self._advanced.set()
 
     def __aiter__(self) -> Self:
         return self
@@ -168,8 +173,28 @@ class _CaptureBuffer[T]:
     def _pop(self) -> T | CaptureGap | None:
         if self._lost:
             lost, self._lost = self._lost, 0
+            self._consumed += lost
+            self._advanced.set()
             return CaptureGap(lost)
-        return self._queue.popleft() if self._queue else None
+        if not self._queue:
+            return None
+        self._consumed += 1
+        self._advanced.set()
+        return self._queue.popleft()
+
+    async def wait_consumed(self) -> None:
+        """Wait until the consumer receives all earlier observations or their loss."""
+        target = self._arrived
+        while True:
+            if self._error is not None:
+                raise self._error
+            if self._consumed >= target:
+                return
+            if self.closed:
+                msg = "capture ended before its observations were consumed"
+                raise ConnectionClosedError(msg)
+            self._advanced.clear()
+            await self._advanced.wait()
 
     def drain(self) -> Iterator[T | CaptureGap]:
         """Return buffered observations, including those before the stop reply."""

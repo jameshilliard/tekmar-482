@@ -283,6 +283,7 @@ class NativeReader(Protocol):
         *,
         source: NativeAddress,
         timeout: float,
+        wait_for_edits: bool = False,
     ) -> NativeBlockBatch: ...
     async def read_status(
         self,
@@ -292,6 +293,7 @@ class NativeReader(Protocol):
         source: NativeAddress,
         peer: NativeAddress | None = None,
         timeout: float,
+        wait_for_edits: bool = False,
     ) -> NativeStatusBatch: ...
 
 

@@ -710,6 +710,13 @@ def _validate_native_args(args: argparse.Namespace) -> None:
         msg = "link ACKs require an explicit --raw capture"
         raise CliError(msg)
     if (
+        args.command in _WATCH_COMMANDS
+        and not args.raw
+        and (args.source_subnet or args.source_node)
+    ):
+        msg = f"custom source addresses require {args.command} --raw"
+        raise CliError(msg)
+    if (
         (
             args.command in _BLOCK_EDITS
             or args.command in _ADDRESSED_READS
@@ -822,11 +829,8 @@ async def _native_status(
     args: argparse.Namespace,
     emit: Callable[[object], None],
 ) -> int:
-    if args.command in _WATCH_COMMANDS and _capture_normal(args):
-        async with (
-            bridge.normal(select_mode=False) as client,
-            BridgeManagement(client).peer_capture() as peers,
-        ):
+    if args.command in _WATCH_COMMANDS:
+        async with _capture_session(bridge, args) as peers:
             if args.command == "watch-native":
                 return await watch_all_from_args(peers, args, emit)
             return await watch_from_args(peers, args, emit)
@@ -839,10 +843,6 @@ async def _native_status(
         (args.port,) if getattr(args, "ack", False) else getattr(args, "ack_port", ())
     )
     async with bridge.stream(ack_ports=ack_ports, diagnostics=False) as stream:
-        if args.command == "watch-native":
-            return await watch_all_from_args(stream, args, emit)
-        if args.command == "watch-climate":
-            return await watch_from_args(stream, args, emit)
         if args.command == "read-status":
             answer = await read_status_from_args(stream, args)
             emit(_status_fields(answer))
@@ -1153,9 +1153,9 @@ def _write_fields(result: NativeWriteResult) -> dict[str, object]:
 
 def _capture_normal(args: argparse.Namespace) -> bool:
     return (
-        args.command in {"monitor", "discover", "dump"}
-        or (args.command in _WATCH_COMMANDS and args.passive)
-    ) and not args.raw
+        args.command in {"monitor", "discover", "dump", *_WATCH_COMMANDS}
+        and not args.raw
+    )
 
 
 @asynccontextmanager
@@ -1164,13 +1164,21 @@ async def _capture_session(
     args: argparse.Namespace,
 ) -> AsyncIterator[NormalNativeSession | BridgeStream]:
     if _capture_normal(args):
+        ports = (
+            {port for port, _, _ in args.device}
+            if getattr(args, "device", None)
+            else TN4_PORTS
+        )
         async with (
             bridge.normal(select_mode=False) as client,
-            BridgeManagement(client).native_session() as peers,
+            BridgeManagement(client).native_session(ports) as peers,
         ):
             yield peers
     else:
-        async with bridge.stream(ack_ports=getattr(args, "ack_port", ())) as raw:
+        async with bridge.stream(
+            ack_ports=getattr(args, "ack_port", ()),
+            diagnostics=args.command not in _WATCH_COMMANDS,
+        ) as raw:
             yield raw
 
 
