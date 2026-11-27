@@ -18,7 +18,7 @@ from .native_schedule import edit_schedule_time
 from .native_snow_control import apply_snowmelt_group
 from .native_status import StatusCollector
 from .native_target_edit import edit_thermostat_target
-from .native_write import NativeBlockEditor
+from .native_write import BlockDelivery, NativeBlockEditor
 from .packet import TYPE_TN4
 
 if TYPE_CHECKING:
@@ -549,6 +549,7 @@ class RawDispatcher:
         async with self._editor(port, target, source, timeout) as editor:
             return await apply_snowmelt_group(
                 editor,
+                lambda msg: self._send(port, msg),
                 lambda query: self._collect_status(
                     port,
                     query,
@@ -595,15 +596,19 @@ class RawDispatcher:
         async def read(query: NativeBlockQuery) -> NativeBlockBatch:
             return await self._collect_blocks(port, query, source, timeout)
 
-        async def send(message: NativeMessage) -> TxResult:
-            return await self._send(port, message)
+        async def update(
+            _query: NativeBlockQuery,
+            _before: NativeFrame,
+            message: NativeMessage,
+        ) -> BlockDelivery:
+            return BlockDelivery(await self._send(port, message))
 
         async with self._edits[port]:
             self._check_active()
             if port in self._pending or port in self._waiters:
                 msg = f"native operation already in progress on port {port}"
                 raise NativePortBusyError(msg)
-            yield NativeBlockEditor(source, read, send, timeout)
+            yield NativeBlockEditor(source, read, update, timeout)
 
     async def _collect_blocks(
         self,

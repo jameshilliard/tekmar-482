@@ -108,16 +108,23 @@ async def write_scene_response(
     preview: bool = False,
 ) -> NativeWriteResult:
     """Change one configurable response using a fresh full block and readback."""
+    return await stream.write_block(
+        port,
+        NativeBlockQuery(target, WritableBlock.SCENE_SETUP),
+        scene_response_fields(scene, response),
+        source=source,
+        timeout=timeout,
+        preview=preview,
+    )
+
+
+def scene_response_fields(
+    scene: NativeScene,
+    response: SceneResponse,
+) -> dict[NativeField, int]:
     require_enum(scene, NativeScene)
     require_enum(response, SceneResponse)
     if (field := scene.response_field) is None:
         msg = f"scene {scene.value} has a fixed response"
         raise ValueError(msg)
-    return await stream.write_block(
-        port,
-        NativeBlockQuery(target, WritableBlock.SCENE_SETUP),
-        {NativeField[field.upper()]: response.value},
-        source=source,
-        timeout=timeout,
-        preview=preview,
-    )
+    return {NativeField[field.upper()]: response.value}

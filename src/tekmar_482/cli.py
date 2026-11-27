@@ -8,6 +8,7 @@ import json
 import sys
 from collections.abc import Callable, Sequence
 from dataclasses import asdict
+from functools import partial
 from typing import TYPE_CHECKING, Any, TextIO
 
 from ._native_payloads.climate import REMOTE_MODES, ThermostatMode
@@ -67,7 +68,7 @@ from .management import BridgeManagement
 from .native import NativeAddress, NativeBlockQuery
 from .native_discovery import NativeDevice, discover_native
 from .native_io import IoDirectory
-from .native_scene import write_scene_response
+from .native_scene import scene_response_fields
 from .native_schedule import read_weekly_schedule
 from .native_sensors import read_thermostat_sensors
 from .native_snapshot import read_native_snapshot
@@ -111,6 +112,15 @@ class CliError(Exception):
 
 ClientFactory = Callable[[argparse.Namespace], Tekmar482Client]
 _MAX_TCP_PORT = 65535
+_BLOCK_EDITS = frozenset(
+    {
+        "write-block",
+        "set-climate-mode",
+        "set-thermostat-target",
+        "scene-response",
+        "write-schedule",
+    },
+)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -286,6 +296,20 @@ def build_parser() -> argparse.ArgumentParser:
         _add_native_target,
     )
     add_status_commands(subparsers, _common_parent(default_timeout=20), _int_value)
+    for name in _BLOCK_EDITS:
+        subparsers.choices[name].add_argument(
+            "--raw",
+            action="store_true",
+            help="use Raw mode instead of guarded Normal editing",
+        )
+    _add_gateway_commands(subparsers, common)
+    return parser
+
+
+def _add_gateway_commands(
+    subparsers: argparse._SubParsersAction[argparse.ArgumentParser],
+    common: argparse.ArgumentParser,
+) -> None:
     for name in (
         "panel",
         "led-test",
@@ -323,7 +347,6 @@ def build_parser() -> argparse.ArgumentParser:
                 action="store_true",
                 help="already in unsynchronized ROM ISP",
             )
-    return parser
 
 
 def _add_block_commands(
@@ -654,7 +677,7 @@ def _endpoint(args: argparse.Namespace) -> GatewayEndpoint:
 
 def _validate_native_args(args: argparse.Namespace) -> None:
     if (
-        args.command in {"read-block", "read-status"}
+        (args.command in _BLOCK_EDITS or args.command in {"read-block", "read-status"})
         and not args.raw
         and (args.ack or args.source_subnet or args.source_node)
     ):
@@ -714,31 +737,15 @@ async def _native(args: argparse.Namespace, stdout: TextIO) -> int:
         elif args.command == "request":
             async with bridge.normal() as client:
                 await _request(client, args, stdout)
-        elif args.command == "read-block" and not args.raw:
-            query = NativeBlockQuery(
-                NativeAddress(args.subnet, args.node),
-                args.block,
-                args.selector,
-            )
-            async with bridge.normal(select_mode=False) as client:
-                report = await BridgeManagement(client).read_block(
-                    args.port,
-                    query,
-                    timeout=args.timeout,
-                )
-            emit(_frame_fields(report))
+        elif args.command in _BLOCK_EDITS:
+            return await _native_block_edit(bridge, args, emit)
         elif args.command in {
             "read-block",
             "read-device",
             "read-sensors",
-            "set-climate-mode",
-            "set-thermostat-target",
             "set-device-group",
             "set-snowmelt-group",
-            "write-block",
-            "scene-response",
             "read-schedule",
-            "write-schedule",
         }:
             return await _native_addressed(bridge, args, emit)
         elif args.command in {
@@ -892,6 +899,16 @@ async def _native_addressed(
     emit: Callable[[object], None],
 ) -> int:
     address = NativeAddress(args.subnet, args.node)
+    if args.command == "read-block" and not args.raw:
+        query = NativeBlockQuery(address, args.block, args.selector)
+        async with bridge.normal(select_mode=False) as client:
+            report = await BridgeManagement(client).read_block(
+                args.port,
+                query,
+                timeout=args.timeout,
+            )
+        emit(_frame_fields(report))
+        return 0
     source = NativeAddress(args.source_subnet, args.source_node)
     async with bridge.stream(
         ack_ports=(args.port,) if args.ack else (),
@@ -947,76 +964,96 @@ async def _native_addressed(
             return int(
                 binding is None or (binding.owns_table and not week.table_complete),
             )
-        if args.command == "set-climate-mode":
-            result = await stream.write_thermostat_mode(
-                args.port,
-                address,
-                ThermostatMode[args.mode.upper()],
-                source=source,
-                timeout=args.timeout,
-                preview=not args.confirm,
-            )
-        elif args.command == "set-thermostat-target":
-            result = await stream.write_thermostat_target(
-                args.port,
-                address,
-                ThermostatTargetChange(
-                    ThermostatTarget[args.target.upper()],
-                    TargetSlot[args.slot.upper()],
-                    args.value,
-                ),
-                source=source,
-                timeout=args.timeout,
-                preview=not args.confirm,
-            )
-        elif args.command == "write-schedule":
-            result = await stream.write_schedule_time(
-                args.port,
-                schedule_target(address, args),
-                schedule_change(args),
-                source=source,
-                timeout=args.timeout,
-                preview=not args.confirm,
-            )
-        elif args.command == "scene-response":
-            result = await write_scene_response(
-                stream,
-                args.port,
-                address,
-                NativeScene(args.scene),
-                SceneResponse[args.response.upper()],
-                source=source,
-                timeout=args.timeout,
-                preview=not args.confirm,
-            )
-        elif args.command == "write-block":
-            result = await stream.write_block(
-                args.port,
-                NativeBlockQuery(address, args.block, args.selector),
-                _native_edits(args.fields),
-                source=source,
-                timeout=args.timeout,
-                preview=not args.confirm,
-            )
-        else:
-            query = NativeBlockQuery(address, args.block, args.selector)
-            try:
-                async with asyncio.timeout(args.timeout):
-                    report = await stream.read_block(args.port, query, source=source)
-            except TimeoutError as err:
-                msg = f"no matching block {args.block:#x} report before the deadline"
-                raise CliError(msg) from err
-            emit(_frame_fields(report))
-            return 0
-        emit(_write_fields(result))
-        return int(
-            result.status
-            not in {
-                NativeWriteStatus.UNCHANGED,
-                NativeWriteStatus.PREVIEW,
-                NativeWriteStatus.CONFIRMED,
-            },
+        query = NativeBlockQuery(address, args.block, args.selector)
+        try:
+            async with asyncio.timeout(args.timeout):
+                report = await stream.read_block(args.port, query, source=source)
+        except TimeoutError as err:
+            msg = f"no matching block {args.block:#x} report before the deadline"
+            raise CliError(msg) from err
+        emit(_frame_fields(report))
+        return 0
+
+
+async def _native_block_edit(
+    bridge: BridgeClient,
+    args: argparse.Namespace,
+    emit: Callable[[object], None],
+) -> int:
+    if args.raw:
+        async with bridge.stream(
+            ack_ports=(args.port,) if args.ack else (),
+            diagnostics=False,
+        ) as stream:
+            result = await _run_block_edit(stream, args)
+    else:
+        async with bridge.normal(select_mode=False) as client:
+            result = await _run_block_edit(BridgeManagement(client), args)
+    emit(_write_fields(result))
+    return int(
+        result.status
+        not in {
+            NativeWriteStatus.UNCHANGED,
+            NativeWriteStatus.PREVIEW,
+            NativeWriteStatus.CONFIRMED,
+        },
+    )
+
+
+async def _run_block_edit(
+    link: BridgeManagement | BridgeStream,
+    args: argparse.Namespace,
+) -> NativeWriteResult:
+    address = NativeAddress(args.subnet, args.node)
+    if isinstance(link, BridgeManagement):
+        mode, target = link.write_thermostat_mode, link.write_thermostat_target
+        schedule, block = link.write_schedule_time, link.write_block
+    else:
+        source = NativeAddress(args.source_subnet, args.source_node)
+        mode = partial(link.write_thermostat_mode, source=source)
+        target = partial(link.write_thermostat_target, source=source)
+        schedule = partial(link.write_schedule_time, source=source)
+        block = partial(link.write_block, source=source)
+    timeout, preview = args.timeout, not args.confirm
+    if args.command == "set-climate-mode":
+        return await mode(
+            args.port,
+            address,
+            ThermostatMode[args.mode.upper()],
+            timeout=timeout,
+            preview=preview,
         )
+    if args.command == "set-thermostat-target":
+        change = ThermostatTargetChange(
+            ThermostatTarget[args.target.upper()],
+            TargetSlot[args.slot.upper()],
+            args.value,
+        )
+        return await target(
+            args.port,
+            address,
+            change,
+            timeout=timeout,
+            preview=preview,
+        )
+    if args.command == "write-schedule":
+        return await schedule(
+            args.port,
+            schedule_target(address, args),
+            schedule_change(args),
+            timeout=timeout,
+            preview=preview,
+        )
+    if args.command == "scene-response":
+        query = NativeBlockQuery(address, WritableBlock.SCENE_SETUP)
+        changes = scene_response_fields(
+            NativeScene(args.scene),
+            SceneResponse[args.response.upper()],
+        )
+    else:
+        query = NativeBlockQuery(address, args.block, args.selector)
+        changes = _native_edits(args.fields)
+    return await block(args.port, query, changes, timeout=timeout, preview=preview)
 
 
 def _write_fields(result: NativeWriteResult) -> dict[str, object]:
@@ -1027,6 +1064,10 @@ def _write_fields(result: NativeWriteResult) -> dict[str, object]:
         "proposed": result.proposed.to_bytes().hex(),
         "tx_status": tx.status.name if tx else None,
         "tx_reason": tx.reason if tx else None,
+        "guard_tx_status": result.guard_result.status.name
+        if result.guard_result
+        else None,
+        "guard_tx_reason": result.guard_result.reason if result.guard_result else None,
         "readback": _batch_fields(result.readback)["block_read"]
         if result.readback
         else None,

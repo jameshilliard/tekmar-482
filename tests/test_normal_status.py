@@ -23,7 +23,7 @@ from .test_management import Script
 from .test_normal_block import Wire
 
 _CAP = "0101f04b54"
-_SUPPORT = "0401f04b54020005ff"
+_SUPPORT = "0401f04b54020005bf01"
 _READ = "0110f04b54"
 _ADMIT = "0410f04b54"
 _REPORT = "0210f04b54"
@@ -49,7 +49,7 @@ class NormalStatusTests(unittest.IsolatedAsyncioTestCase):
                     (_CAP, _SUPPORT),
                     (
                         "010ff04b54" + key,
-                        "040ff04b54" + key + " 020ff04b54010001000000" + frame,
+                        "040ff04b54" + key + " 020ff04b5401000001000000" + frame,
                     ),
                 ),
             )

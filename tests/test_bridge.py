@@ -465,6 +465,7 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
                 args = build_parser().parse_args(
                     [
                         "write-block",
+                        "--raw",
                         "1",
                         "0x12",
                         "3",

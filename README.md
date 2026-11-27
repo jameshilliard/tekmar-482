@@ -358,8 +358,14 @@ readback. A timeout after sending leaves the outcome unknown and does not
 retry. The client serializes edits on the same port, but tN4 does not
 lock out another device or a manual change.
 
-The CLI previews the complete proposed frame by default. Add `--confirm`
-to apply the edit and see the separate link result and device readback:
+The CLI previews the complete proposed frame by default. Block, thermostat,
+scene-response and schedule edits use Normal mode without changing trace,
+reporting or link-ACK settings. Add `--confirm` to apply an edit. The
+gateway first rereads the full baseline from the same device. If a sibling
+or the support mask changed, the result is `baseline_changed`: **nothing
+was written**. Only a separate readback can produce `confirmed`. A link
+ACK alone cannot. Use `--raw` explicitly for a Raw edit without this
+gateway-side comparison. Neither path automatically repeats the update.
 
 ```bash
 tekmar-482 write-fields 0x05
@@ -367,8 +373,8 @@ tekmar-482 write-block 2 0x12 3 0x05 wake=40 --tcp 192.0.2.10:3001 --json
 ```
 
 For a thermostat, use `set-thermostat-target` or
-`stream.write_thermostat_target(port, peer, change, source=source)` to edit a
-stored slot in physical units. Both default to preview. For example:
+`BridgeManagement(client).write_thermostat_target(port, peer, change)`
+to edit a stored slot in physical units. Both default to preview. For example:
 
 ```bash
 tekmar-482 set-thermostat-target 2 0x12 3 heat wake 21.5 --tcp 192.0.2.10:3001
@@ -396,8 +402,10 @@ full timestamped `NativeFrame` on an open Normal session. It needs neither
 tracing nor tHA reporting. Distinct ports can read concurrently; a second
 read on an occupied port is rejected. Silence is a timeout, not an empty
 block. The gateway deadline is ten seconds from admission; `--timeout`
-controls the host's wait. This requires the advertised Normal block-read
-feature. It does not silently fall back to Raw or to cached values.
+controls the host's wait. `read_block_result()` also exposes the actual
+transmit outcome, including no ACK or a request never sent. Reads and edits
+require the advertised `BLOCK_TRANSFERS` feature. They do not silently fall
+back to Raw or to cached values.
 
 Use `read-block --raw` to explicitly select Raw mode. In that mode,
 `--ack` supplies link ACKs to valid incoming frames on that port and is

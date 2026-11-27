@@ -77,6 +77,7 @@ class SnowmeltGroupResult:
 
 async def apply_snowmelt_group(
     editor: NativeBlockEditor,
+    send: Callable[[NativeMessage], Awaitable[TxResult]],
     read_status: Callable[[NativeStatusQuery], Awaitable[NativeStatusBatch]],
     target: NativeAddress,
     operation: SnowmeltOperation,
@@ -151,7 +152,7 @@ async def apply_snowmelt_group(
     deadline = asyncio.timeout(editor.timeout)
     try:
         async with deadline:
-            tx = await editor.send(message)
+            tx = await send(message)
     except TimeoutError:
         if not deadline.expired():
             raise

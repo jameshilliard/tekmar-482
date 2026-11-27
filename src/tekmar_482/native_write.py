@@ -31,6 +31,8 @@ class NativeWriteStatus(StrEnum):
     DIFFERENT = "different"
     UNCONFIRMED = "unconfirmed"
     LINK_FAILED = "link_failed"
+    BASELINE_CHANGED = "baseline_changed"
+    NOT_SENT = "not_sent"
 
 
 @dataclass(frozen=True, slots=True)
@@ -40,6 +42,14 @@ class NativeWriteResult:
     proposed: NativeMessage
     tx_result: TxResult | None = None
     readback: NativeBlockBatch | None = None
+    guard_result: TxResult | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class BlockDelivery:
+    tx: TxResult | None
+    guard: TxResult | None = None
+    baseline_changed: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -48,7 +58,10 @@ class NativeBlockEditor:
 
     source: NativeAddress
     read: Callable[[NativeBlockQuery], Awaitable[NativeBlockBatch]]
-    send: Callable[[NativeMessage], Awaitable[TxResult]]
+    update: Callable[
+        [NativeBlockQuery, NativeFrame, NativeMessage],
+        Awaitable[BlockDelivery],
+    ]
     timeout: float
 
     async def write_mode(
@@ -109,7 +122,7 @@ class NativeBlockEditor:
             before,
             source=self.source,
             read=lambda: self.read(query),
-            send=self.send,
+            send=lambda message: self.update(query, before, message),
             timeout=self.timeout,
             preview=preview,
         )
@@ -121,7 +134,7 @@ async def _write_verified_block(
     *,
     source: NativeAddress,
     read: Callable[[], Awaitable[NativeBlockBatch]],
-    send: Callable[[NativeMessage], Awaitable[TxResult]],
+    send: Callable[[NativeMessage], Awaitable[BlockDelivery]],
     timeout: float,
     preview: bool,
 ) -> NativeWriteResult:
@@ -138,25 +151,43 @@ async def _write_verified_block(
     if preview:
         return NativeWriteResult(NativeWriteStatus.PREVIEW, before, proposed)
 
-    deadline = asyncio.timeout(timeout)
     try:
-        async with deadline:
-            result = await send(proposed)
+        async with asyncio.timeout(timeout):
+            delivery = await send(proposed)
     except TimeoutError:
-        if not deadline.expired():
-            raise
+        # A missing UART admission or terminal cannot prove non-delivery.
         return NativeWriteResult(NativeWriteStatus.UNCONFIRMED, before, proposed)
+    result = delivery.tx
+    if result is None:
+        return NativeWriteResult(
+            NativeWriteStatus.BASELINE_CHANGED
+            if delivery.baseline_changed
+            else NativeWriteStatus.NOT_SENT,
+            before,
+            proposed,
+            guard_result=delivery.guard,
+        )
     if not result.may_have_reached_peer:
         return NativeWriteResult(
             NativeWriteStatus.LINK_FAILED,
             before,
             proposed,
             result,
+            guard_result=delivery.guard,
         )
 
     # Start a separate addressed read after TX. An unsolicited update or link
     # ACK seen during the send does not verify the destination's current value.
-    batch = await read()
+    try:
+        batch = await read()
+    except TimeoutError:
+        return NativeWriteResult(
+            NativeWriteStatus.UNCONFIRMED,
+            before,
+            proposed,
+            result,
+            guard_result=delivery.guard,
+        )
     matches = None
     if batch.reports and batch.tx_result and batch.tx_result.completed_frame:
         payload = batch.reports[0].message.payload
@@ -168,4 +199,4 @@ async def _write_verified_block(
             status = NativeWriteStatus.DIFFERENT
         case None:
             status = NativeWriteStatus.UNCONFIRMED
-    return NativeWriteResult(status, before, proposed, result, batch)
+    return NativeWriteResult(status, before, proposed, result, batch, delivery.guard)

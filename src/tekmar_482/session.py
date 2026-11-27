@@ -12,7 +12,7 @@ from enum import Enum, auto
 from typing import TYPE_CHECKING, Self
 
 from ._bridge_diagnostics import ERROR_REPORTING_METHOD
-from .constants import ThaSetback, ThaValue
+from .constants import TN4_PORTS, ThaSetback, ThaValue
 from .exceptions import ConnectionClosedError, InventoryDrainTimeoutError, ProtocolError
 from .packet import TYPE_TRPC
 from .trpc import (
@@ -172,6 +172,7 @@ class Tekmar482Session:
         )
         self._transaction_lock = asyncio.Lock()
         self.normal_read_admission = asyncio.Lock()
+        self.normal_edit_locks = {port: asyncio.Lock() for port in TN4_PORTS}
         self._inventory_drained = asyncio.Event()
         self._inventory_address = 0
         self._inventory_drained.set()

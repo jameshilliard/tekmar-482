@@ -7,10 +7,10 @@ from struct import Struct
 from typing import TYPE_CHECKING
 
 from ._native_payloads.queries import StatusRequest
-from ._normal_block import peer_frame
+from ._normal_block import peer_frame, tx_outcome
 from .constants import TN4_PORTS
 from .exceptions import ProtocolError
-from .raw import FailureReason, RejectReason, TxResult, TxStatus
+from .raw import FailureReason
 
 if TYPE_CHECKING:
     from ._native_payloads.queries import NativeStatusQuery
@@ -20,8 +20,6 @@ if TYPE_CHECKING:
 _KEY = Struct("<BBBBH")
 _EVENT_HEADER = 2
 _END_SIZE = 3
-_PIN_UNAVAILABLE = 0xFE
-_NOT_SENT = 0xFF
 _NODE_MASK = 31
 
 
@@ -58,19 +56,6 @@ def status_key(
     )
 
 
-def _link(port: int, code: int) -> TxResult | None:
-    if code == _NOT_SENT:
-        return None
-    if code == _PIN_UNAVAILABLE:
-        return TxResult(port, TxStatus.REJECTED, RejectReason.PIN_UNAVAILABLE)
-    if code == 0:
-        return TxResult(port, TxStatus.ACK)
-    if code in FailureReason and code != FailureReason.ARBITRATION_LOST:
-        return TxResult(port, TxStatus.FAILED, FailureReason(code))
-    msg = f"invalid Normal status transmit outcome {code:#x}"
-    raise ProtocolError(msg)
-
-
 def status_result(
     port: int,
     collector: StatusCollector,
@@ -88,13 +73,14 @@ def status_result(
     if len(body) != _END_SIZE:
         msg = "invalid Normal status terminal length"
         raise ProtocolError(msg)
-    tx = _link(port, body[2])
+    tx = tx_outcome(port, body[2])
     if event is _Event.CONTROL_FULL:
         msg = "gateway control queue could not return every native status frame"
         raise ProtocolError(msg)
     batch = collector.batch(port, tx)
     if (
-        (event is _Event.COMPLETE) != batch.answered
+        (tx is not None and tx.reason is FailureReason.ARBITRATION_LOST)
+        or (event is _Event.COMPLETE) != batch.answered
         or (batch.reports and not (tx and tx.completed_frame))
         or (event is _Event.TRANSMIT_FAULT and (tx is None or tx.completed_frame))
     ):

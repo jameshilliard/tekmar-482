@@ -10,6 +10,7 @@ from tekmar_482 import (
     NativeAddress,
     NativeBlockQuery,
     NativeTargets,
+    NativeTransmitError,
     NullTransport,
     ProtocolError,
     Tekmar482Client,
@@ -20,7 +21,7 @@ from tekmar_482.packet import TYPE_TRPC, Packet
 from .test_management import Script
 
 _CAP = "0101f04b54"
-_SUPPORT = "0401f04b540200057f"
+_SUPPORT = "0401f04b540200053f01"
 _READ = "010ff04b54"
 _ADMIT = "040ff04b54"
 _EVENT = "020ff04b54"
@@ -56,7 +57,7 @@ class NormalBlockTests(unittest.IsolatedAsyncioTestCase):
     async def test_cli_uses_normal_without_switching_or_enabling_link_ack(self) -> None:
         script = Script(
             (_CAP, _SUPPORT),
-            (_READ + _KEY, _ADMIT + _KEY + " " + _EVENT + "0200" + _TIME + _PEER),
+            (_READ + _KEY, _ADMIT + _KEY + " " + _EVENT + "020000" + _TIME + _PEER),
         )
         args = [
             "read-block",
@@ -89,7 +90,7 @@ class NormalBlockTests(unittest.IsolatedAsyncioTestCase):
     async def test_stale_before_admission_and_unrelated_ports_cannot_satisfy(
         self,
     ) -> None:
-        reply = _EVENT + "0200" + _TIME + _PEER
+        reply = _EVENT + "020001" + _TIME + _PEER
         script = Script(
             (_CAP, _SUPPORT),
             (
@@ -107,14 +108,15 @@ class NormalBlockTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_errors_never_become_an_empty_or_cached_block(self) -> None:
         for tail, exc in (
-            ("01", TimeoutError),
-            ("02", ProtocolError),
-            ("03", ProtocolError),
+            ("01ff", TimeoutError),
+            ("02fe", NativeTransmitError),
+            ("0305", NativeTransmitError),
             ("ff", ProtocolError),
-            ("0100", ProtocolError),
+            ("0103", ProtocolError),
             ("00", ProtocolError),
-            ("00" + _TIME + _PEER[:-2], ProtocolError),
-            ("00" + _TIME + _PEER.replace("f322", "f422"), ProtocolError),
+            ("0000" + _TIME + _PEER[:-2], ProtocolError),
+            ("0001" + _TIME + _PEER.replace("f322", "f422"), ProtocolError),
+            ("0002" + _TIME + _PEER, ProtocolError),
         ):
             with self.subTest(tail=tail):
                 script = Script(
@@ -163,9 +165,9 @@ class NormalBlockTests(unittest.IsolatedAsyncioTestCase):
             await wire.expect("0104f04b54")
             wire.feed("0404f04b54" + "61" * 40)
             assert await revision == "a" * 40
-            wire.feed(_EVENT + "0300" + _TIME + "6e7007c3cdab00")
+            wire.feed(_EVENT + "030001" + _TIME + "6e7007c3cdab00")
             assert (await b).decoded["support_mask"] == "0x00" and not a.done()
-            wire.feed(_EVENT + "0200" + _TIME + _PEER)
+            wire.feed(_EVENT + "020000" + _TIME + _PEER)
             assert (await a).body == bytes.fromhex(_PEER)
 
     async def test_cancelled_admission_drains_before_same_query_reuse(self) -> None:
@@ -186,7 +188,7 @@ class NormalBlockTests(unittest.IsolatedAsyncioTestCase):
                 _EVENT + "0202",
             )  # Its terminal report precedes read B's admission.
             wire.feed(_ADMIT + _KEY)
-            wire.feed(_EVENT + "0200" + _TIME + _PEER)
+            wire.feed(_EVENT + "020000" + _TIME + _PEER)
             assert (await b).timestamp_ms == 0x1234
             assert not client.session.report_subscription_count
 

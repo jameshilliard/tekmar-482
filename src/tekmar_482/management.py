@@ -11,26 +11,38 @@ from math import isfinite
 from typing import TYPE_CHECKING, Self
 
 from ._bridge_diagnostics import ERROR_REPORTING_METHOD, TRACE_STATE, WIRE_VERSION
-from ._normal_block import read_key, read_result
+from ._native_payloads.writes import BlockPatch
+from ._normal_block import edit_key, edit_result, read_key, read_result
 from ._normal_status import status_key, status_result
 from .constants import TN4_PORTS
 from .error_reports import ALL_SOURCES, ErrorReports, GatewayErrorCounter, source_mask
 from .exceptions import ConnectionClosedError, ProtocolError, TekmarError
+from .native import NativeAddress
+from .native_schedule import edit_schedule_time
 from .native_status import StatusCollector, snowmelt_status_query
+from .native_target_edit import edit_thermostat_target
+from .native_write import NativeBlockEditor
 from .normal_trace import NormalTrace, NormalTraceState
+from .raw import NativePortBusyError
 from .traffic import TrafficCounters
 from .trpc import ResponseMatch, TrpcCommand, TrpcMethod, TrpcPacket, TrpcService
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Awaitable, Callable, Iterable
+    from collections.abc import AsyncIterator, Awaitable, Callable, Iterable, Mapping
     from struct import Struct
 
     from ._bridge_diagnostics import ErrorReason, ErrorSource
+    from ._native_payloads.climate import ThermostatMode
     from ._native_payloads.queries import NativeStatusQuery
+    from ._native_payloads.writes import NativeField
     from .client import Tekmar482Client
-    from .native import NativeAddress, NativeBlockQuery, NativeFrame
+    from .native import NativeBlockQuery, NativeFrame, NativeMessage
+    from .native_schedule import ScheduleChange, ScheduleTarget
     from .native_state import NativePath
     from .native_status import NativeStatusBatch
+    from .native_target_edit import ThermostatTargetChange
+    from .native_write import BlockDelivery, NativeWriteResult
+    from .raw import NativeBlockBatch
 
 _CAPABILITY_BYTES = 4
 
@@ -56,8 +68,8 @@ class BridgeFeature(IntFlag):
     ERROR_REPORTING = 8
     NORMAL_IDENTITY = 16
     TRAFFIC_COUNTS = 32
-    NORMAL_BLOCK_READ = 64
     NORMAL_STATUS_READ = 128
+    BLOCK_TRANSFERS = 256
 
 
 class BridgeMethod(IntEnum):
@@ -77,6 +89,7 @@ class BridgeMethod(IntEnum):
     TRAFFIC_COUNTS = 0x544BF00E
     NORMAL_BLOCK_READ = 0x544BF00F
     NORMAL_STATUS_READ = 0x544BF010
+    NORMAL_BLOCK_EDIT = 0x544BF011
 
 
 @dataclass(frozen=True, slots=True)
@@ -88,8 +101,9 @@ class BridgeCapabilities:
 
     @classmethod
     def from_payload(cls, data: bytes) -> Self:
-        if len(data) == _CAPABILITY_BYTES:
-            version, mode, ports, flags = data
+        if len(data) >= _CAPABILITY_BYTES:
+            version, mode, ports = data[:3]
+            flags = int.from_bytes(data[3:], "little")
             if mode in BridgeMode and ports == len(TN4_PORTS):
                 if version != WIRE_VERSION:
                     msg = (
@@ -321,13 +335,122 @@ class BridgeManagement(_Management):
         timeout: float = 15,
     ) -> NativeFrame:
         """Read one peer in Normal mode without relying on trace or cached replies."""
+        return (
+            await self.read_block_result(port, query, timeout=timeout)
+        ).require_report()
+
+    def _check_edit_idle(self, port: int) -> None:
+        if port in TN4_PORTS and self._session.normal_edit_locks[port].locked():
+            msg = f"block edit in progress on port {port}"
+            raise NativePortBusyError(msg)
+
+    async def read_block_result(
+        self,
+        port: int,
+        query: NativeBlockQuery,
+        *,
+        timeout: float = 15,
+    ) -> NativeBlockBatch:
+        """Return observed link and peer evidence, including an unanswered request."""
+        self._check_edit_idle(port)
+        return await self._read_block(port, query, timeout)
+
+    async def _read_block(
+        self,
+        port: int,
+        query: NativeBlockQuery,
+        timeout: float,
+    ) -> NativeBlockBatch:
         async with self._read_events(
             BridgeMethod.NORMAL_BLOCK_READ,
-            BridgeFeature.NORMAL_BLOCK_READ,
+            BridgeFeature.BLOCK_TRANSFERS,
             read_key(port, query),
             timeout,
         ) as receive:
             return read_result(port, query, await receive())
+
+    @asynccontextmanager
+    async def _block_editor(
+        self,
+        port: int,
+        timeout: float,
+    ) -> AsyncIterator[NativeBlockEditor]:
+        if port not in TN4_PORTS or not isfinite(timeout) or timeout <= 0:
+            msg = "expected a physical port and a finite positive edit timeout"
+            raise ValueError(msg)
+
+        async def update(
+            query: NativeBlockQuery,
+            before: NativeFrame,
+            proposed: NativeMessage,
+        ) -> BlockDelivery:
+            async with self._read_events(
+                BridgeMethod.NORMAL_BLOCK_EDIT,
+                BridgeFeature.BLOCK_TRANSFERS,
+                edit_key(port, query, before, proposed),
+                timeout,
+                service=TrpcService.UPDATE,
+            ) as receive:
+                return edit_result(port, await receive())
+
+        with self._session.connection_scope():
+            async with self._session.normal_edit_locks[port]:
+                yield NativeBlockEditor(
+                    NativeAddress(0, 0),
+                    lambda query: self._read_block(port, query, timeout),
+                    update,
+                    timeout,
+                )
+
+    async def write_block(
+        self,
+        port: int,
+        query: NativeBlockQuery,
+        changes: Mapping[NativeField, int],
+        *,
+        timeout: float = 15,
+        preview: bool = True,
+    ) -> NativeWriteResult:
+        """Preview or conditionally edit known fields, then read back from the peer."""
+        patch = BlockPatch.from_fields(query.block_id, changes)
+        async with self._block_editor(port, timeout) as editor:
+            return await editor.write(query, patch, preview=preview)
+
+    async def write_thermostat_mode(
+        self,
+        port: int,
+        target: NativeAddress,
+        mode: ThermostatMode,
+        *,
+        timeout: float = 15,
+        preview: bool = True,
+    ) -> NativeWriteResult:
+        async with self._block_editor(port, timeout) as editor:
+            return await editor.write_mode(target, mode, preview=preview)
+
+    async def write_thermostat_target(
+        self,
+        port: int,
+        target: NativeAddress,
+        change: ThermostatTargetChange,
+        *,
+        timeout: float = 15,
+        preview: bool = True,
+    ) -> NativeWriteResult:
+        async with self._block_editor(port, timeout) as editor:
+            return await edit_thermostat_target(editor, target, change, preview=preview)
+
+    async def write_schedule_time(
+        self,
+        port: int,
+        target: ScheduleTarget,
+        change: ScheduleChange,
+        *,
+        timeout: float = 15,
+        preview: bool = True,
+    ) -> NativeWriteResult:
+        async with self._block_editor(port, timeout) as editor:
+            return await edit_schedule_time(editor, target, change, preview=preview)
 
     async def read_status(
         self,
@@ -338,6 +461,7 @@ class BridgeManagement(_Management):
         timeout: float = 15,
     ) -> NativeStatusBatch:
         """Read peer status without changing mode, trace or link-ACK settings."""
+        self._check_edit_idle(port)
         collector = StatusCollector(query, peer)
         async with self._read_events(
             BridgeMethod.NORMAL_STATUS_READ,
@@ -372,11 +496,13 @@ class BridgeManagement(_Management):
         feature: BridgeFeature,
         key: bytes,
         timeout: float,
+        *,
+        service: TrpcService = TrpcService.REQUEST,
     ) -> AsyncIterator[Callable[[], Awaitable[bytes]]]:
         if not isfinite(timeout) or timeout <= 0:
             msg = "Normal read timeout must be finite and positive"
             raise ValueError(msg)
-        command = _ExtensionCommand(TrpcService.REQUEST, method, payload=key)
+        command = _ExtensionCommand(service, method, payload=key)
         session = self._session
         with session.connection_scope():
             async with session.reports(

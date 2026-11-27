@@ -390,6 +390,7 @@ class NativeScheduleTests(unittest.IsolatedAsyncioTestCase):
             args = build_parser().parse_args(
                 [
                     "write-schedule",
+                    "--raw",
                     "1",
                     "0x23",
                     "5",
