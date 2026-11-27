@@ -1,6 +1,11 @@
+from __future__ import annotations
+
 import asyncio
+import json
 import unittest
+from contextlib import suppress
 from io import StringIO
+from typing import TYPE_CHECKING
 from unittest.mock import MagicMock, patch
 
 from tekmar_482 import (
@@ -28,6 +33,9 @@ from tekmar_482.cli import CliError, build_parser, run
 from .native_fixtures import TEST_PATH, block, frame, identity
 from .test_normal_block import Wire
 from .test_peer_capture import restore, start, trace
+
+if TYPE_CHECKING:
+    from tekmar_482 import NativeState
 
 _CAP = "0101f04b54"
 _SUPPORT = "0401f04b54020005bf3e"
@@ -64,6 +72,89 @@ def plant_report(wire: Wire, f: NativeFrame, *, traced: bool = True) -> None:
 
 
 class NormalWatchTests(unittest.IsolatedAsyncioTestCase):
+    async def test_automatic_watch_follows_only_observed_ports_and_retires_a_move(
+        self,
+    ) -> None:
+        wire = Wire()
+        other = NativePath(2, TEST_PATH.subnet, TEST_PATH.node)
+        moved = NativePath(3, TEST_PATH.subnet, 8)
+        product = 200003  # An identified product without a known configuration profile.
+
+        def announce(f: NativeFrame) -> None:
+            wire.queue_packet(trace(f"00 {f.port:02x} 01000000 01 " + f.body.hex()))
+
+        async def gateway() -> None:
+            await start(
+                wire,
+                "0e",
+            )  # Capture includes a port the watcher does not select.
+            await wire.expect(_CAP)
+            wire.feed(_SUPPORT)
+            announce(frame(0x3FF, b"", NativePath(1, TEST_PATH.subnet, 7)))
+            announce(frame(0x3FF, b"", NativePath(2, TEST_PATH.subnet, 0)))
+            announce(frame(0x17E, b"\x09\x01", NativePath(3, TEST_PATH.subnet, 5)))
+            announce(frame(0x3FF, b"\x35", TEST_PATH))
+            announce(frame(0x3FF, b"\x35", other))
+            announce(frame(0x3FF, b"\x35", TEST_PATH))
+            remaining = {(2, 0), (3, 0)}
+            await admit_read(wire, remaining)
+            await admit_read(wire, remaining)
+            announce(frame(0x3E7, bytes.fromhex("3507"), moved))
+            plant_report(wire, identity(product, path=TEST_PATH))
+            plant_report(wire, identity(product, path=other))
+            key = "03358000000000000000"
+            await wire.until_read(key)
+            wire.feed("040ff04b54" + key)
+            plant_report(wire, identity(product, path=moved))
+            await restore(wire)
+
+        async with Tekmar482Client(wire) as client, asyncio.TaskGroup() as tasks:
+            tasks.create_task(gateway())
+            async with BridgeManagement(client).native_session([1, 2, 3]) as link:
+                result = await watch_native(link, ports=[2, 3], duration=0.23)
+        assert result.state.paths == (NativePath(2, TEST_PATH.subnet, 0), other, moved)
+        assert result.state.identity(TEST_PATH) is None
+        assert result.state.identity(other) == result.state.identity(moved) is not None
+        assert {
+            (b.port, b.query.target.request_mask()) for b in result.latest_blocks
+        } == {(2, 1 << 6), (3, 1 << 7)}
+        assert result.reads == 3
+
+    async def test_idle_expiry_does_not_probe_or_count_a_drop(self) -> None:
+        fence = Packet(6, b"start")
+        peers = NormalPeerCapture(8, 8, fence)
+        peers.record(fence, outbound=False)
+        appeared = asyncio.Event()
+        expired = asyncio.Event()
+        events: list[int | None] = []
+
+        def changed(path: NativePath, state: NativeState) -> None:
+            assert path == TEST_PATH and state.dropped == 0
+            if (product := state.identity(path)) is not None:
+                events.append(product.product_number)
+                appeared.set()
+            else:
+                assert path not in state.paths
+                events.append(None)
+                expired.set()
+
+        task = asyncio.create_task(
+            watch_native(peers, source=None, stale_after=0.03, on_change=changed),
+        )
+        try:
+            async with asyncio.timeout(1):
+                peers.record(record(identity(200003)), outbound=False)
+                await appeared.wait()
+                await expired.wait()
+                appeared.clear()
+                peers.record(record(identity(200004)), outbound=False)
+                await appeared.wait()
+            assert events == [200003, None, 200004]
+        finally:
+            task.cancel()
+            with suppress(asyncio.CancelledError):
+                await task
+
     async def test_background_block_read_waits_its_turn_on_the_same_port(self) -> None:
         wire = Wire()
         async with Tekmar482Client(wire) as client:
@@ -268,3 +359,42 @@ class NormalWatchTests(unittest.IsolatedAsyncioTestCase):
                 await run(parser.parse_args(args), stdout=StringIO())
             bridge.normal.assert_called_once_with(select_mode=False)
             bridge.stream.assert_not_called()
+
+    async def test_cli_autodiscovers_without_an_address_list(self) -> None:
+        wire = Wire()
+
+        async def gateway() -> None:
+            await start(wire, "08")
+            await wire.expect(_CAP)
+            wire.feed(_SUPPORT)
+            wire.queue_packet(record(identity(200003)))
+            await restore(wire)
+
+        parser = build_parser()
+        args = [
+            "watch-native",
+            "--port",
+            "3",
+            "--duration",
+            "0.1",
+            "--tcp",
+            "localhost:4567",
+            "--json",
+        ]
+        output = StringIO()
+        async with Tekmar482Client(wire) as client, asyncio.TaskGroup() as tasks:
+            bridge = MagicMock(spec=BridgeClient)
+            bridge.normal.return_value.__aenter__.return_value = client
+            with patch("tekmar_482.cli.open_gateway") as opened:
+                opened.return_value.__aenter__.return_value = bridge
+                with self.assertRaisesRegex(CliError, "--stale-after"):
+                    await run(parser.parse_args([*args, "--stale-after", "nan"]))
+                opened.assert_not_called()
+                tasks.create_task(gateway())
+                assert await run(parser.parse_args(args), stdout=output) == 0
+            bridge.normal.assert_called_once_with(select_mode=False)
+            bridge.stream.assert_not_called()
+        identity_event, summary = map(json.loads, output.getvalue().splitlines())
+        assert identity_event["native_identity"]["product_number"] == 200003
+        assert summary["observed_paths"] == [{"port": 3, "subnet": 0x35, "node": 7}]
+        assert not summary["missing_identities"]

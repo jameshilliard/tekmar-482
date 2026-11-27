@@ -1211,10 +1211,12 @@ class Tekmar482Session:
 
     def _raise_if_unavailable(self) -> None:
         self._check_generation(self._generation)
-        if self._reader_error is not None:
+        # Once explicitly closed, new callers are not part of the old
+        # failure's fan-out and must not raise its shared exception object.
+        if self._reader_task is not None and self._reader_error is not None:
             raise self._reader_error
         if self._closed:
-            raise ConnectionClosedError(_SESSION_NOT_OPEN)
+            raise ConnectionClosedError(_SESSION_NOT_OPEN) from self._reader_error
 
     async def _fail_pending(self, err: BaseException) -> None:
         async with self._condition:

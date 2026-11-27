@@ -1,4 +1,4 @@
-"""Source-scoped native configuration and live telemetry for one Raw session."""
+"""Source-scoped native configuration and telemetry for one capture session."""
 
 from __future__ import annotations
 
@@ -269,6 +269,16 @@ class NativeState:
             for w in self.water_sources
         )
         return tuple(sorted(self._peers.keys() | set(water)))
+
+    def forget(self, path: NativePath) -> bool:
+        """Invalidate one path without recording a capture loss."""
+        self._reidentify.add(path)
+        self._moves.pop(path, None)
+        peer = self._peers.pop(path, None)
+        if peer is not None and peer.air is not None and peer.air.cycle is not None:
+            self._air_groups = AirGroupTargets()
+        water = self._water.forget(path.port, path.address)
+        return peer is not None or water
 
     @property
     def thermostats(self) -> tuple[NativeClimate, ...]:

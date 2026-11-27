@@ -729,8 +729,15 @@ def _validate_native_args(args: argparse.Namespace) -> None:
     ):
         msg = f"custom source addresses and --ack require {args.command} --raw"
         raise CliError(msg)
-    if args.command in _WATCH_COMMANDS and not args.device and not args.passive:
+    if args.command == "watch-climate" and not args.device and not args.passive:
         msg = f"active {args.command} requires --device PORT SUBNET NODE"
+        raise CliError(msg)
+    if (
+        args.command == "watch-native"
+        and args.stale_after is not None
+        and (not isfinite(args.stale_after) or args.stale_after <= 0)
+    ):
+        msg = "--stale-after must be finite and positive"
         raise CliError(msg)
     if (
         args.command in {"set-device-group", "set-snowmelt-group"}
@@ -1163,7 +1170,7 @@ async def _capture_session(
         ports = (
             {port for port, _, _ in args.device}
             if getattr(args, "device", None)
-            else getattr(args, "ports", TN4_PORTS)
+            else getattr(args, "ports", None) or TN4_PORTS
         )
         async with (
             bridge.normal(select_mode=False) as client,

@@ -133,6 +133,16 @@ class WaterMonitor:
             (port, NativeAddress(address.subnet, address.node & _NODE)),
         )
 
+    def forget(self, port: int, address: NativeAddress) -> bool:
+        """Discard measurements and identity for a single interrupted path."""
+        return self._forget((port, NativeAddress(address.subnet, address.node & _NODE)))
+
+    def _forget(self, path: _Path) -> bool:
+        self._reidentify.add(path)
+        self._moves.pop(path, None)
+        self._identities.pop(path, None)
+        return self._sources.pop(path, None) is not None
+
     def _identity(self, path: _Path, frame: NativeFrame) -> bool:
         fields = frame.decoded
         if "truncated" in fields or fields.get("block_layout") == "ambiguous":
@@ -172,10 +182,7 @@ class WaterMonitor:
             return False
         changed = False
         for site in (previous, path):
-            self._reidentify.add(site)
-            self._moves.pop(site, None)
-            self._identities.pop(site, None)
-            changed |= self._sources.pop(site, None) is not None
+            changed |= self._forget(site)
         self._moves[path] = previous
         return changed
 
@@ -226,11 +233,9 @@ class WaterMonitor:
                 for p in self._sources.keys() | self._identities.keys()
                 if record.affects(p[0])
             }
-            self._reidentify.update(lost)
             changed = False
             for path in lost:
-                changed |= self._sources.pop(path, None) is not None
-                self._identities.pop(path, None)
+                changed |= self._forget(path)
             self._moves = {
                 path: old
                 for path, old in self._moves.items()

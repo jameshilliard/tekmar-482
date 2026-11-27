@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from math import isfinite
 from typing import TYPE_CHECKING
 
-from ._configuration_watch import ConfigurationWatch
+from ._configuration_watch import ConfigurationReader, ConfigurationWatch
 from ._native_payloads.climate import AIR_MASTER, AIR_MEMBER, HEATING_SETUP, MODE_BLOCKS
 from ._native_payloads.io import IoEndpoint
 from ._native_payloads.layouts import MULTI_WEEK
@@ -16,11 +16,13 @@ from ._native_payloads.queries import NativeStatusQuery
 from ._native_payloads.schedules import SCHEDULE_STATUS, SETUP_BLOCK
 from ._observation import OrderedNormalReads, observation
 from ._snow_watch import SnowRead, SnowWatch
-from .native import NativeAddress, NativeBlockQuery, NativeFrame
+from .constants import TN4_PORTS
+from .native import NativeAddress, NativeFrame
 from .native_plant_registers import PLANT_REGISTERS
 from .native_setpoint import SETPOINT_BLOCKS
 from .native_state import BLOCK_UPDATE, TAKING_ADDRESS, NativePath, NativeState
 from .native_targets import ADJUSTMENT_BLOCKS
+from .normal_trace import NormalNativeSession, NormalPeerCapture
 from .raw import CaptureGap
 
 if TYPE_CHECKING:
@@ -30,9 +32,10 @@ if TYPE_CHECKING:
     from ._observation import ObservationStream
     from .native import BlockKey
     from .native_identity import NativeIdentity
+    from .native_io import IoDirectory
     from .native_state import NativeClimate
     from .native_status import NativeStatusBatch
-    from .raw import BridgeStream, CaptureRecord, NativeBlockBatch
+    from .raw import BridgeStream, CaptureRecord, NativeBlockBatch, TxResult
 
 _HOST = NativeAddress(0, 0)
 _UPDATE_HEADER = 4
@@ -50,6 +53,24 @@ def _mode_hint(air: AirStatus) -> _ModeHint:
         return (reading.flags & 31, reading.target_raw) if reading is not None else None
 
     return air.group, side(air.heat), side(air.cool)
+
+
+def _listen_ports(
+    stream: ObservationStream,
+    ports: Iterable[int] | None,
+) -> frozenset[int]:
+    if ports is None:
+        capture = stream.peers if isinstance(stream, NormalNativeSession) else stream
+        ports = (
+            (p for p in TN4_PORTS if capture.port_mask & (1 << p))
+            if isinstance(capture, NormalPeerCapture)
+            else TN4_PORTS
+        )
+    selected = frozenset(ports)
+    if not selected or not selected.issubset(TN4_PORTS):
+        msg = "select at least one valid physical tN4 port"
+        raise ValueError(msg)
+    return selected
 
 
 @dataclass(frozen=True, slots=True)
@@ -106,8 +127,10 @@ class _Watch:
     def __init__(
         self,
         paths: frozenset[NativePath] | None,
+        ports: frozenset[int],
         *,
         active: bool,
+        stale_after: float | None = None,
         on_change: Callable[[ClimateChange], None] | None,
         include_snow: bool = False,
         schedules: bool = False,
@@ -144,15 +167,28 @@ class _Watch:
             and active
             else None
         )
+        self.reader = (
+            self.configuration.reader
+            if self.configuration is not None
+            else ConfigurationReader(self.state)
+            if active
+            else None
+        )
         self.on_native = on_native
         self.count = 0
         self.epochs: dict[NativePath, int] = {}
         self.retry_hints: dict[_Job, _ModeHint] = {}
         self.on_change = on_change
-        self.queues = {p.port: _PortQueue() for p in paths or ()} if active else {}
+        self.queues = {p: _PortQueue() for p in sorted(ports)} if active else {}
         self.paths = paths
+        self.ports = ports
+        self.discover = active and paths is None
+        self.enrolled: set[NativePath] = set()
+        self.stale_after = stale_after
+        self.deadlines: OrderedDict[NativePath, float] = OrderedDict()
         for p in sorted(paths or ()):
-            self._queue(p, 0)
+            if active:
+                self._enroll(p)
 
     def _queue(self, path: NativePath, block: _Read) -> None:
         if not path.node and not isinstance(block, IoEndpoint):
@@ -174,6 +210,8 @@ class _Watch:
         self.identities.pop(path, None)
         if self.configuration is not None:
             self.configuration.discard(path)
+        elif self.reader is not None:
+            self.reader.discard(path)
         if self.snow is not None:
             self.snow.discard(path)
         if queue := self.queues.get(path.port):
@@ -187,14 +225,43 @@ class _Watch:
             self.io_pending = {k for k in self.io_pending if k[0] != path}
             self.statuses = {k: b for k, b in self.statuses.items() if k[0] != path}
 
-    def _reidentify(self, paths: Iterable[NativePath]) -> None:
-        for path in paths:
-            self._invalidate(path)
-            if self.current.pop(path, None) is not None and self.on_change is not None:
-                self.on_change(ClimateChange(path, None))
-            self._queue(path, 0)
-            if self.on_native is not None:
-                self.on_native(path, self.state)
+    def _enroll(self, path: NativePath) -> None:
+        if path not in self.enrolled:
+            self.enrolled.add(path)
+            if self.state.identity(path) is None:
+                self._queue(path, 0)
+
+    @property
+    def next_expiration(self) -> float | None:
+        return next(iter(self.deadlines.values()), None)
+
+    def expire(self, now: float) -> None:
+        while (deadline := self.next_expiration) is not None and deadline <= now:
+            path = next(iter(self.deadlines))
+            seen = self.state.forget(path)
+            self._retire(path, notify=seen)
+
+    def _fresh(self, path: NativePath, now: float) -> None:
+        if self.stale_after is not None:
+            self.deadlines[path] = now + self.stale_after
+            self.deadlines.move_to_end(path)
+
+    def _retire(
+        self,
+        path: NativePath,
+        *,
+        reidentify: bool = False,
+        notify: bool,
+    ) -> None:
+        self.enrolled.discard(path)
+        self.deadlines.pop(path, None)
+        self._invalidate(path)
+        if self.current.pop(path, None) is not None and self.on_change is not None:
+            self.on_change(ClimateChange(path, None))
+        if reidentify and self.paths is not None:
+            self._enroll(path)
+        if notify and self.on_native is not None:
+            self.on_native(path, self.state)
 
     def _updated(self, path: NativePath) -> None:
         before = self.current.get(path)
@@ -234,7 +301,19 @@ class _Watch:
         if self.on_native is not None:
             self.on_native(path, self.state)
 
-    def observe(self, record: CaptureRecord) -> None:
+    def _capture_gap(
+        self,
+        record: CaptureGap,
+        changed: tuple[NativePath, ...],
+    ) -> None:
+        if self.snow is not None:
+            self.snow.capture_gap(record)
+        known = set(changed)
+        for path in sorted(known | (self.paths or set()) | self.enrolled):
+            if record.affects(path.port):
+                self._retire(path, reidentify=True, notify=path in known)
+
+    def observe(self, record: CaptureRecord, now: float) -> None:
         if isinstance(record, NativeFrame):
             self.capture_index = record.capture_index
             self.capture_advanced.set()
@@ -250,24 +329,33 @@ class _Watch:
             if io is not None and isinstance(record, NativeFrame)
             else None
         )
+        moved = isinstance(record, NativeFrame) and record.message_id == TAKING_ADDRESS
+        prior_paths = set(self.state.paths) if moved else set()
         changed = (
-            self.configuration.reader.observe(record)
-            if self.configuration is not None
+            self.reader.observe(record)
+            if self.reader is not None
             else self.state.observe(record)
         )
         if changed is None:
             return
         if isinstance(record, CaptureGap):
-            if self.snow is not None:
-                self.snow.capture_gap(record)
-            self._reidentify(
-                p for p in sorted(self.paths or changed) if record.affects(p.port)
-            )
+            self._capture_gap(record, changed)
             return
-        if isinstance(record, NativeFrame) and record.message_id == TAKING_ADDRESS:
-            self._reidentify(changed)
+        if not isinstance(record, NativeFrame):
             return
-        if isinstance(record, NativeFrame) and record.message_id == BLOCK_UPDATE:
+        sender = NativePath.from_frame(record)
+        if moved:
+            for path in changed:
+                self._retire(path, reidentify=True, notify=path in prior_paths)
+            if self.discover and changed:
+                self._enroll(sender)
+                self._fresh(sender, now)
+            return
+        if sender in self.deadlines or (
+            record.message_id != BLOCK_UPDATE and sender in changed
+        ):
+            self._fresh(sender, now)
+        if record.message_id == BLOCK_UPDATE:
             # A block update names its destination, not its author. Only a
             # subsequent report can confirm that the destination applied it.
             data = record.message.payload
@@ -283,6 +371,8 @@ class _Watch:
                 self._updated(path)
             return
         for path in changed:
+            if self.reader is not None:
+                self._enroll(path)
             self._updated(path)
             if io is not None:
                 key = (path, io.endpoint)
@@ -296,28 +386,19 @@ class _Watch:
         if (
             self.configuration is not None
             and self.configuration.schedules
-            and isinstance(record, NativeFrame)
             and record.message_id == SCHEDULE_STATUS
-            and self.paths
-            and (path := NativePath.from_frame(record)) in self.paths
+            and sender.port in self.queues
+            and (self.paths is None or sender in self.paths)
             and (status := record.schedule_status) is not None
         ):
             self.configuration.schedule_announced(
-                path,
+                sender,
                 status,
-                self.latest.get((path, 0)),
+                self.latest.get((sender, 0)),
             )
-        if isinstance(record, NativeFrame) and record.message_id in (
-            AIR_MEMBER,
-            AIR_MASTER,
-        ):
+        if record.message_id in (AIR_MEMBER, AIR_MASTER):
             self._retry_on_air(record)
-        if (
-            self.snow is not None
-            and isinstance(record, NativeFrame)
-            and record.port in self.queues
-        ):
-            sender = NativePath.from_frame(record)
+        if self.snow is not None and record.port in self.queues:
             self.snow.observe(
                 record,
                 self.latest,
@@ -339,6 +420,36 @@ class _Watch:
                 self.retry_hints[path, block] = hint
                 self._queue(path, block)
 
+    async def _read_io(
+        self,
+        stream: BridgeStream | OrderedNormalReads,
+        path: NativePath,
+        before: IoDirectory,
+        epoch: int,
+        source: NativeAddress,
+        timeout: float,
+    ) -> TxResult | None:
+        endpoint = before.endpoint
+        answer = await stream.read_status(
+            path.port,
+            NativeStatusQuery.io(endpoint.subnet, endpoint.node),
+            source=source,
+            peer=path.address,
+            timeout=timeout,
+            wait_for_edits=True,
+        )
+        # Apply directory membership only after capture consumed the evidence.
+        last = max((f.capture_index for f in answer.reports), default=0)
+        while last > self.capture_index and epoch == self.epochs.get(path, 0):
+            self.capture_advanced.clear()
+            await self.capture_advanced.wait()
+        if epoch == self.epochs.get(path, 0):
+            self.io_pending.discard((path, endpoint))
+            self.statuses[path, endpoint] = answer
+            if self.state.reconcile_io(answer, before=before) and self.on_native:
+                self.on_native(path, self.state)
+        return answer.tx_result
+
     async def probe(
         self,
         stream: BridgeStream | OrderedNormalReads,
@@ -346,6 +457,9 @@ class _Watch:
         source: NativeAddress,
         timeout: float,
     ) -> None:
+        if (reader := self.reader) is None:
+            msg = "a passive watcher cannot probe a port"
+            raise RuntimeError(msg)
         while True:
             path, block = await queue.take()
             epoch = self.epochs.get(path, 0)
@@ -367,30 +481,14 @@ class _Watch:
                 if before is None:
                     self.io_pending.discard((path, block))
                     continue
-                answer = await stream.read_status(
-                    path.port,
-                    NativeStatusQuery.io(block.subnet, block.node),
-                    source=source,
-                    peer=path.address,
-                    timeout=timeout,
-                    wait_for_edits=True,
+                result = await self._read_io(
+                    stream,
+                    path,
+                    before,
+                    epoch,
+                    source,
+                    timeout,
                 )
-                # The collector can wake before our sole capture consumer.
-                # Apply membership only after all its evidence passed that
-                # consumer, or discard the result on a gap or reassignment.
-                last = max((f.capture_index for f in answer.reports), default=0)
-                while last > self.capture_index and epoch == self.epochs.get(path, 0):
-                    self.capture_advanced.clear()
-                    await self.capture_advanced.wait()
-                if epoch == self.epochs.get(path, 0):
-                    self.io_pending.discard((path, block))
-                    self.statuses[path, block] = answer
-                    if (
-                        self.state.reconcile_io(answer, before=before)
-                        and self.on_native
-                    ):
-                        self.on_native(path, self.state)
-                result = answer.tx_result
             elif isinstance(block, SnowRead):
                 if self.snow is None or (query := self.snow.query(path, block)) is None:
                     continue
@@ -414,19 +512,27 @@ class _Watch:
                 result = answer.tx_result
             else:
                 if (
+                    not block
+                    and self.discover
+                    and self.state.identity(path) is not None
+                ):
+                    continue  # Already identified before this queued read got the line.
+                if (
                     block
                     and path not in self.current
                     and (self.snow is None or path not in self.snow.current)
                 ):
                     continue
-                batch = await stream.read_block_group(
-                    path.port,
-                    NativeBlockQuery(path.address, block),
+                key = (block, None)
+                batch, current = await reader.read(
+                    stream,
+                    path,
+                    key,
+                    self.state.block_revision(path, key),
                     source=source,
                     timeout=timeout,
-                    wait_for_edits=True,
                 )
-                if epoch == self.epochs.get(path, 0):
+                if current and epoch == self.epochs.get(path, 0):
                     self.latest[path, block] = batch
                 result = batch.tx_result
             self.count += 1
@@ -444,8 +550,13 @@ async def _run_watch(
     on_record: Callable[[CaptureRecord], None] | None,
 ) -> None:
     selected = watch.paths
-    if source is not None and (
-        not selected or (not watch.io_discovery and any(not p.node for p in selected))
+    if (
+        source is not None
+        and not watch.discover
+        and (
+            not selected
+            or (not watch.io_discovery and any(not p.node for p in selected))
+        )
     ):
         msg = "active observation requires explicit addressable device paths"
         raise ValueError(msg)
@@ -459,16 +570,33 @@ async def _run_watch(
 
     capture, reader = await observation(
         stream,
-        (p.port for p in selected or ()),
+        watch.ports,
         source,
     )
 
     async def receive() -> None:
+        loop = asyncio.get_running_loop()
         while True:
-            record = await capture.read()
+            expiry = asyncio.timeout_at(watch.next_expiration)
+            try:
+                async with expiry:
+                    record = await capture.read()
+            except TimeoutError:
+                if not expiry.expired():
+                    raise
+                watch.expire(loop.time())
+                continue
+            now = loop.time()
+            watch.expire(now)
+            if (
+                watch.paths is None
+                and not isinstance(record, CaptureGap)
+                and (record.port not in watch.ports)
+            ):
+                continue
             if on_record is not None:
                 on_record(record)
-            watch.observe(record)
+            watch.observe(record, now)
 
     tasks = [asyncio.create_task(receive())]
     if source is not None and reader is not None:
@@ -494,9 +622,11 @@ async def watch_native(
     stream: ObservationStream,
     paths: Iterable[NativePath] | None = None,
     *,
+    ports: Iterable[int] | None = None,
     source: NativeAddress | None = _HOST,
     duration: float | None = None,
     timeout: float = 20,
+    stale_after: float | None = None,
     schedules: bool = True,
     thermostat_targets: bool = True,
     plant_settings: bool = True,
@@ -505,15 +635,27 @@ async def watch_native(
     on_change: Callable[[NativePath, NativeState], None] | None = None,
     on_record: Callable[[CaptureRecord], None] | None = None,
 ) -> NativeWatchResult:
-    """Observe selected paths and read configuration for identified devices.
+    """Discover reporting peers and read their configuration, or follow explicit paths.
 
+    Without explicit paths, observe ports selected by the caller or capture.
     Synchronous callbacks may inspect immutable snapshots in the current state.
     Passive mode (source=None) never sends. Use a new watch on each connection.
+    An optional stale_after timeout marks a silent path unknown without sending.
     """
     selected = None if paths is None else frozenset(paths)
+    if selected is not None and ports is not None:
+        msg = "select device paths or discovery ports, not both"
+        raise ValueError(msg)
+    if stale_after is not None and (not isfinite(stale_after) or stale_after <= 0):
+        msg = "expected a finite positive inactivity interval"
+        raise ValueError(msg)
     watch = _Watch(
         selected,
+        _listen_ports(stream, ports)
+        if selected is None
+        else frozenset(p.port for p in selected),
         active=source is not None,
+        stale_after=stale_after,
         on_change=None,
         include_snow=True,
         schedules=schedules,
@@ -559,7 +701,14 @@ async def watch_climate(
     path/block is retained; no retry is triggered by silence or a link ACK.
     """
     selected = None if paths is None else frozenset(paths)
-    watch = _Watch(selected, active=source is not None, on_change=on_change)
+    watch = _Watch(
+        selected,
+        _listen_ports(stream, None)
+        if selected is None
+        else frozenset(p.port for p in selected),
+        active=source is not None,
+        on_change=on_change,
+    )
     await _run_watch(
         stream,
         watch,

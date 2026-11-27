@@ -294,6 +294,12 @@ def _add_watch(
     )
     if name == "watch-native":
         watch.add_argument(
+            "--stale-after",
+            type=float,
+            metavar="SECONDS",
+            help="forget a path after this much silence, without sending a probe",
+        )
+        watch.add_argument(
             "--no-setpoint-settings",
             action="store_true",
             help="skip application and target reads for setpoint controls",
@@ -318,13 +324,23 @@ def _add_watch(
             action="store_true",
             help="skip calendar reads and output",
         )
-    watch.add_argument(
+    target = watch.add_mutually_exclusive_group()
+    target.add_argument(
         "--device",
         action="append",
         nargs=3,
         type=number,
         metavar=("PORT", "SUBNET", "NODE"),
     )
+    if name == "watch-native":
+        target.add_argument(
+            "--port",
+            dest="ports",
+            action="append",
+            type=int,
+            choices=TN4_PORTS,
+            help="discover peers on this physical port; repeat to select more ports",
+        )
     watch.add_argument(
         "--passive",
         action="store_true",

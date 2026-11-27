@@ -213,6 +213,7 @@ from .native_line import (
     DeviceGroupBinding,
     LineBroadcast,
 )
+from .native_monitor import NativeMonitor
 from .native_plant import PlantEquipment, WaterSample
 from .native_plant_registers import (
     EquipmentAvailability,
@@ -532,6 +533,7 @@ __all__ = [
     "NativeInventory",
     "NativeLineReport",
     "NativeMessage",
+    "NativeMonitor",
     "NativePath",
     "NativePortBusyError",
     "NativeProbe",

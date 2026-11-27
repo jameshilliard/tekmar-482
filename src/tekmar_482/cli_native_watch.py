@@ -295,11 +295,13 @@ async def watch_all_from_args(
     result = await watch_native(
         stream,
         paths,
+        ports=args.ports,
         source=None
         if args.passive
         else NativeAddress(args.source_subnet, args.source_node),
         duration=args.duration,
         timeout=args.timeout,
+        stale_after=args.stale_after,
         schedules=not args.no_schedules,
         thermostat_targets=not args.no_thermostat_targets,
         plant_settings=not args.no_plant_settings,
@@ -307,7 +309,8 @@ async def watch_all_from_args(
         io_discovery=not args.no_io_discovery,
         on_change=changed,
     )
-    return _watch_summary(result, paths or (), args, emit)
+    expected = paths or (() if args.passive else result.state.paths)
+    return _watch_summary(result, expected, args, emit)
 
 
 def _watch_summary(

@@ -751,9 +751,16 @@ and can rediscover when a later report supplies a new channel, type or count.
 It does not poll or scan guessed channel numbers. `--no-io-discovery`
 keeps I/O observation passive while other requested reads continue.
 
-**Watch several devices on one connection.** `watch-native` can watch an
-identified snowmelt controller and thermostats together. It reads identity
-and configuration on each selected path. For a snowmelt control it then
+**Watch several devices on one connection.** With no `--device`, `watch-native`
+automatically identifies peers that report on its captured ports. Repeat
+`--port` to limit the watch to specific physical lines. It reads identity
+at the observed address, not every possible address, and does not merge
+copies on different ports even when their products and revisions match.
+A node-zero report can supply telemetry but has no addressed block slot.
+Use `--device` instead to explicitly watch a path, even before it speaks.
+Ordinary monitoring never sends a setting update.
+
+For a snowmelt control the watcher
 requests the missing status keys for that application, while continuing to
 receive other devices' reports. After an incomplete request, a new valid
 report from either role can prompt a retry to the configured primary role.
@@ -763,6 +770,7 @@ no retries. There is no timer poll. The final summary shows unanswered
 blocks, link outcomes and which keys the latest status requests received.
 
 ```bash
+tekmar-482 watch-native --port 0 --port 2 --duration 60 --tcp 192.0.2.10:3001 --json
 tekmar-482 watch-native --device 0 0x14 6 --device 2 0x12 3 --duration 60 --tcp 192.0.2.10:3001 --json
 ```
 
@@ -809,7 +817,43 @@ has no reported maximum. `--no-setpoint-settings` skips these reads.
 `snapshot.setpoint_controls` exposes configuration from a block scan, not
 a synthetic live status: there is no known request for a fresh `22F`.
 
-The library equivalent is `await watch_native(stream, paths, on_change=callback)`.
+The library equivalent is `await watch_native(stream, ports=(0, 2), on_change=callback)`.
+Pass explicit `paths` instead of `ports` to watch a fixed set of addresses.
+An automatic watch follows TakingAddress on the same wire without moving
+old measurements to the new address. A trace gap retires only affected
+routes; fresh reports can discover replacements.
+Set `stale_after=seconds` (CLI `--stale-after`) to discard a path after
+that much silence on the connection. Unchanged frames renew the interval;
+expiry neither sends a probe nor claims the device has been removed.
+Without this option, silence alone does not invalidate the latest sample.
+
+For a long-running application that owns the connection, run
+`NativeMonitor(endpoint, ports=(0, 2)).run()` as a task. The monitor opens
+an already-running Normal gateway, discovers reporting peers, and rebuilds
+state on reconnect without flashing or replaying an operation. Consumers
+can wait on its coalesced revisions:
+
+```python
+import asyncio
+
+from tekmar_482 import GatewayEndpoint, NativeMonitor
+
+monitor = NativeMonitor(GatewayEndpoint.tcp("192.0.2.10", 3001))
+async with asyncio.TaskGroup() as tasks:
+    observer = tasks.create_task(monitor.run())
+    revision = -1
+    try:
+        while True:
+            revision = await monitor.wait_for_change(revision)
+            print(monitor.state.thermostats)
+    finally:
+        observer.cancel()
+```
+
+`monitor.management` is the shared command channel, or `None` when
+disconnected. Fetch it again after reconnect rather than retaining an
+outdated handle. Connection loss invalidates the old observations; a
+firmware that explicitly rejects the required protocol is not retried.
 The synchronous callback receives `(path, state)`. Use
 `state.snowmelt(path)`, `state.climate(path)`, `state.schedule(path)`,
 `state.water_source(path)` or `state.plant_registers(path)` to
