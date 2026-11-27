@@ -146,8 +146,10 @@ from .decoding import (
 from .error_reports import ErrorReports, GatewayErrorCounter
 from .exceptions import (
     ConnectionClosedError,
+    FirmwareImageUnavailableError,
     InventoryDrainTimeoutError,
     ProtocolError,
+    StockFirmwareError,
     TekmarError,
     TransportError,
     UnknownFieldError,
@@ -474,6 +476,7 @@ __all__ = [
     "FanSetup",
     "FieldSpec",
     "FirmwareBundle",
+    "FirmwareImageUnavailableError",
     "FrameCounts",
     "GatewayAccess",
     "GatewayEndpoint",
@@ -635,6 +638,7 @@ __all__ = [
     "StageDemand",
     "StageSelection",
     "StatusRequest",
+    "StockFirmwareError",
     "SystemSchedule",
     "TankStatus",
     "TargetSlot",

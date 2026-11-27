@@ -11,7 +11,11 @@ from importlib.resources import files
 from typing import TYPE_CHECKING
 
 from .bridge import BridgeClient
-from .exceptions import ConnectionClosedError, ProtocolError
+from .exceptions import (
+    ConnectionClosedError,
+    FirmwareImageUnavailableError,
+    ProtocolError,
+)
 
 if TYPE_CHECKING:
     from ._wire import GatewayEndpoint, Wire
@@ -39,7 +43,7 @@ class FirmwareBundle:
             image = files("tekmar_482").joinpath("_images", "bridge.bin").read_bytes()
         except FileNotFoundError as err:
             msg = "No flash image in this source checkout; install from the sdist"
-            raise ProtocolError(msg) from err
+            raise FirmwareImageUnavailableError(msg) from err
         revision = image[0x108:0x130]
         if (
             image[0x100:0x108] != b"TK48REV\x00"

@@ -21,6 +21,7 @@ from tekmar_482 import (
     NativeFrame,
     Packet,
     ProtocolError,
+    StockFirmwareError,
     Tekmar482Client,
     TxResult,
     TxStatus,
@@ -78,6 +79,36 @@ RAW_CAPABILITIES = management(1, 4, bytes([2, 0, 5, 3]))
 
 
 class BridgeTests(unittest.IsolatedAsyncioTestCase):
+    async def test_stock_requires_null_capabilities_and_real_protocol_reply(
+        self,
+    ) -> None:
+        async def stock(
+            version: bytes,
+            reader: asyncio.StreamReader,
+            writer: asyncio.StreamWriter,
+        ) -> None:
+            caps = management(1, 1)
+            assert await reader.readexactly(len(caps)) == caps
+            writer.write(serialize(Packet(6, bytes.fromhex("0400000000"))))
+            query = serialize(Packet(6, bytes.fromhex("018f0100000000")))
+            assert await reader.readexactly(len(query)) == query
+            writer.write(serialize(Packet(6, bytes.fromhex("048f010000") + version)))
+            assert not await reader.read()
+
+        for version, expected in (
+            (b"\x03\0", StockFirmwareError),
+            (b"\xff", ProtocolError),
+        ):
+            async with listen(partial(stock, version)) as address:
+                assert address.port is not None
+                async with GatewayEndpoint.tcp(
+                    address.address,
+                    address.port,
+                ).connect() as wire:
+                    with self.assertRaises(expected) as error:
+                        await BridgeClient(wire).identify()
+                    assert type(error.exception) is expected
+
     async def test_wire_observer_belongs_to_the_connection(self) -> None:
         async def app(
             reader: asyncio.StreamReader,

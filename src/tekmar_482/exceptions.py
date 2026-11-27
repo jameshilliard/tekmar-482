@@ -9,6 +9,14 @@ class ProtocolError(TekmarError):
     """Raised when a packet or message violates the tekmar protocol."""
 
 
+class StockFirmwareError(ProtocolError):
+    """A stock-style NullMethod and a valid tHA version identified the application."""
+
+
+class FirmwareImageUnavailableError(ProtocolError):
+    """The installation has no bundled flash image."""
+
+
 class TransportError(TekmarError):
     """Raised when a transport cannot read or write data."""
 

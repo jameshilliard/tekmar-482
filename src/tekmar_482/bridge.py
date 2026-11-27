@@ -12,7 +12,12 @@ from typing import TYPE_CHECKING
 from ._bridge_diagnostics import CAPTURE_COUNTERS, PANEL, PORT_DROPS
 from .client import Tekmar482Client
 from .constants import TN4_PORTS
-from .exceptions import ConnectionClosedError, ProtocolError, TekmarError
+from .exceptions import (
+    ConnectionClosedError,
+    ProtocolError,
+    StockFirmwareError,
+    TekmarError,
+)
 from .management import (
     BridgeCapabilities,
     BridgeFeature,
@@ -46,6 +51,10 @@ class PanelState:
     led_mask: int
     pin_mask: int
     testing: bool
+
+
+class _NullCapabilitiesError(ProtocolError):
+    """The extension request received the stock unknown-method reply."""
 
 
 class BridgeClient:
@@ -95,7 +104,7 @@ class BridgeClient:
 
     async def _call(
         self,
-        method: BridgeMethod,
+        method: BridgeMethod | TrpcMethod,
         body: bytes = b"",
         *,
         update: bool = False,
@@ -120,6 +129,8 @@ class BridgeClient:
                     return payload
                 if header == bytes([response]) + bytes(4):
                     msg = "gateway does not implement this extension"
+                    if method is BridgeMethod.CAPABILITIES and not payload:
+                        raise _NullCapabilitiesError(msg)
                     raise ProtocolError(msg)
                 if (
                     header
@@ -144,7 +155,15 @@ class BridgeClient:
                 for preamble in (burst, burst, b"\xca"):
                     await self._wire.write(preamble)
                     await asyncio.sleep(0.08)
-            data = await self._call(BridgeMethod.CAPABILITIES)
+            try:
+                data = await self._call(BridgeMethod.CAPABILITIES)
+            except _NullCapabilitiesError as err:
+                version = await self._call(TrpcMethod.PROTOCOL_VERSION, bytes(2))
+                if version in (b"\x01\0", b"\x02\0", b"\x03\0"):
+                    msg = "stock tHA firmware has no command to enter the bootloader"
+                    raise StockFirmwareError(msg) from err
+                msg = "unrecognized tHA protocol version after NullMethod"
+                raise ProtocolError(msg) from err
             self._features = BridgeCapabilities.from_payload(data).features
 
     async def enter_update_mode(self) -> None:
