@@ -134,6 +134,7 @@ class _PortQueue:
         self.master_probe: _MasterProbe | None = None
         self.master_answer: NativeStatusBatch | None = None
         self.has_master_map = False
+        self.master_subnets: tuple[int, ...] = ()
         self.subnet_jobs: dict[int, _SubnetProbe] = {}
         self.subnet_results: dict[int, NativeProbe] = {}
 
@@ -148,10 +149,10 @@ class _PortQueue:
             self.jobs.move_to_end(job, last=False)
         self.ready.set()
 
-    def request_master(self) -> None:
+    def request_master(self, *, urgent: bool = False) -> None:
         if self.master_probe is None and not self.has_master_map:
             self.master_probe = _MasterProbe(self.port)
-            self.add(self.master_probe, urgent=False)
+            self.add(self.master_probe, urgent=urgent)
 
     def reset_master(self) -> None:
         if self.master_probe is not None:
@@ -159,6 +160,7 @@ class _PortQueue:
         self.master_probe = None
         self.master_answer = None
         self.has_master_map = False
+        self.master_subnets = ()
 
     def request_subnet(self, subnet: int) -> None:
         if subnet not in self.subnet_jobs:
@@ -199,6 +201,7 @@ class _Watch:
         plant_settings: bool = False,
         setpoint_settings: bool = False,
         io_discovery: bool = False,
+        check_port_subnets: bool = False,
         on_native: Callable[[NativePath, NativeState], None] | None = None,
     ) -> None:
         self.state = NativeState(paths)
@@ -251,6 +254,7 @@ class _Watch:
         self.ports = ports
         self.discover = active and paths is None
         self.discover_plant = self.discover and plant_settings
+        self.check_port_subnets = self.discover and check_port_subnets
         self.discover_subnets = False
         self.enrolled: set[NativePath] = set()
         self.stale_after = stale_after
@@ -304,6 +308,12 @@ class _Watch:
     def _enroll(self, path: NativePath) -> None:
         if path not in self.enrolled:
             self.enrolled.add(path)
+            if (
+                self.check_port_subnets
+                and path.node
+                and not self.state.port_subnets_checked(path.port)
+            ):
+                self.queues[path.port].request_master(urgent=True)
             if self.state.identity(path) is None:
                 self._queue(path, 0)
 
@@ -317,34 +327,52 @@ class _Watch:
             seen = self.state.forget(path)
             self._update_master_map(path.port)
             self._retire(path, notify=seen)
+            if self.check_port_subnets and not any(
+                p.port == path.port for p in self.state.paths
+            ):
+                self.queues[path.port].reset_master()
 
     def _update_master_map(self, port: int) -> None:
-        if self.discover_plant and (queue := self.queues.get(port)) is not None:
+        if (self.discover_plant or self.check_port_subnets) and (
+            queue := self.queues.get(port)
+        ) is not None:
             present = self.state.has_master_announcement(port)
-            if queue.has_master_map and not present:
+            subnets = self.state.master_subnets(port)
+            lost_header = bool(queue.master_subnets) and not subnets
+            if (queue.has_master_map and not present) or lost_header:
                 queue.reset_master()
             queue.has_master_map = present
+            queue.master_subnets = subnets
+            if (
+                self.check_port_subnets
+                and lost_header
+                and any(p.port == port and p.node for p in self.state.paths)
+            ):
+                queue.request_master(urgent=True)
 
     def _observe_plant(self, frame: NativeFrame) -> None:
         if self.discover_subnets and frame.message_id == MASTER_PRESENT:
             subnets = self.state.master_subnets(frame.port)
             if len(subnets) == 1:
                 self.queues[frame.port].request_subnet(subnets[0])
-        if not self.discover_plant:
+        if not (self.discover_plant or self.check_port_subnets):
             return
         if frame.message_id in (MASTER_PRESENT, TAKING_ADDRESS) or (
             frame.message_id == BLOCK_REPORT
             and frame.message.payload.startswith(b"\0\0")
         ):
             self._update_master_map(frame.port)
-        elif frame.message_id in (MASTER_STATUS, PLANT_LOOP_STATUS):
+        elif self.discover_plant and frame.message_id in (
+            MASTER_STATUS,
+            PLANT_LOOP_STATUS,
+        ):
             queue = self.queues[frame.port]
             if (
                 queue.master_probe is None
                 and not queue.has_master_map
                 and "truncated" not in frame.decoded
             ):
-                queue.request_master()
+                queue.request_master(urgent=self.check_port_subnets)
 
     def _fresh(self, path: NativePath, now: float) -> None:
         if self.stale_after is not None:
@@ -703,15 +731,23 @@ class _Watch:
             )
         except DeferredReadError:
             if queue.master_probe is job:
-                queue.add(job, urgent=False)
+                queue.add(job, urgent=self.check_port_subnets)
             return
         except ExpiredReadError:
             self.count += 1
             return
         self.count += 1
-        # Only the peer capture establishes the map. The batch is diagnostic.
         if queue.master_probe is job:
             queue.master_answer = answer
+            # Only the peer capture establishes a subnet, not an inline reply.
+            if (
+                self.check_port_subnets
+                and self.state.record_master_query(answer)
+                and self.on_native is not None
+            ):
+                for path in self.state.paths:
+                    if path.port == job.port:
+                        self.on_native(path, self.state)
         if answer.tx_result is None and not isinstance(stream, OrderedNormalReads):
             await stream.wait_transmit_idle(job.port)
 
@@ -872,6 +908,7 @@ async def _run_watch(
         and isinstance(reader, OrderedNormalReads)
         and BridgeFeature.NORMAL_DISCOVER in reader.features
     )
+    watch.check_port_subnets &= isinstance(reader, OrderedNormalReads)
 
     async def receive() -> None:
         loop = asyncio.get_running_loop()
@@ -932,6 +969,7 @@ async def watch_native(
     plant_settings: bool = True,
     setpoint_settings: bool = True,
     io_discovery: bool = True,
+    check_port_subnets: bool = False,
     on_change: Callable[[NativePath, NativeState], None] | None = None,
     on_record: Callable[[CaptureRecord], None] | None = None,
 ) -> NativeWatchResult:
@@ -942,6 +980,8 @@ async def watch_native(
     Passive mode (source=None) never sends. Use a new watch on each connection.
     Active Normal watches without explicit paths also probe each observed
     unambiguous master subnet once when the gateway supports it.
+    With check_port_subnets, query the master once per observed port that
+    has addressable peers but no subnet evidence yet.
     An optional stale_after timeout marks a silent path unknown without sending.
     Each Normal worker waits for its own occupied slot; an admitted read is
     never replayed after a timeout.
@@ -968,6 +1008,7 @@ async def watch_native(
         plant_settings=plant_settings,
         setpoint_settings=setpoint_settings,
         io_discovery=io_discovery,
+        check_port_subnets=check_port_subnets,
         on_native=on_change,
     )
     await _run_watch(

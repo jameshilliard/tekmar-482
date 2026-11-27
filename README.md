@@ -1027,6 +1027,17 @@ async with asyncio.TaskGroup() as tasks:
 disconnected. Fetch it again after reconnect rather than retaining an
 outdated handle. Connection loss invalidates the old observations; a
 firmware that explicitly rejects the required protocol is not retried.
+An active monitor also checks a port when its first addressable peer is
+observed without a MasterPresent header. The one MasterQuery uses the
+same per-port queue as other reads; a quiet line does not cause polling.
+Inventory consumers can wait for `state.port_subnets_checked(port)`
+before registering peers. A fresh header establishes the claimed subnet.
+A query that completed transmission with no reply permits an unclaimed,
+port-scoped view but does not prove a subnet or absence of a master. An
+unsent query, timeout, or reply missing from the ordered trace does not
+settle the port. Trace loss invalidates this evidence on affected ports;
+reconnecting starts a fresh check.
+
 The synchronous callback receives `(path, state)`. Use
 `state.snowmelt(path)`, `state.climate(path)`, `state.schedule(path)`,
 `state.water_source(path)` or `state.plant_registers(path)` to

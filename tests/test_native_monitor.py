@@ -49,12 +49,13 @@ class Gateway:
         await self.expect(request)
         self.send(reply)
 
-    async def setup(self, mask: str) -> None:
+    async def setup(self, mask: str, *, active: bool = True) -> None:
         await self.exchange(_CAP, self.support)  # Application identification.
         await self.exchange(_CAP, self.support)  # Normal peer capture features.
         await self.exchange(_TRACE, "040bf04b5400" + _COUNTS)
         await self.exchange("000bf04b54" + mask, "030bf04b54" + mask)
-        await self.exchange(_CAP, self.support)  # Ordered active reads.
+        if active:
+            await self.exchange(_CAP, self.support)  # Ordered active reads.
 
     def report(self, packet: NativeFrame) -> None:
         self.send(
@@ -90,6 +91,9 @@ class Gateway:
         self.send(f"0210f04b54{packet.port:02x}0001000000" + packet.body.hex())
         self.send(f"0210f04b54{packet.port:02x}0100")
 
+    def expire_master(self, port: int, *, tx_outcome: str = "00") -> None:
+        self.send(f"0210f04b54{port:02x}02{tx_outcome}")
+
     async def start(self, product: int) -> None:
         await self.setup("08")
         self.report(frame(0x3FF, b""))
@@ -122,6 +126,12 @@ async def wait_for_master(monitor: NativeMonitor, port: int) -> None:
         revision = await monitor.wait_for_change(revision)
 
 
+async def wait_for_port_check(monitor: NativeMonitor, port: int) -> None:
+    revision = monitor.revision
+    while not monitor.state.port_subnets_checked(port):
+        revision = await monitor.wait_for_change(revision)
+
+
 class NativeMonitorTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self) -> None:
         self.accepted: asyncio.Queue[Gateway] = asyncio.Queue()
@@ -138,6 +148,100 @@ class NativeMonitorTests(unittest.IsolatedAsyncioTestCase):
             "127.0.0.1",
             server.sockets[0].getsockname()[1],
         )
+
+    async def test_first_peer_checks_subnets_without_blocking_other_ports(self) -> None:
+        quiet = TEST_PATH
+        known = NativePath(2, 0x52, 5)
+        monitor = NativeMonitor(self.endpoint, ports=[quiet.port, known.port])
+        async with asyncio.TaskGroup() as tasks, asyncio.timeout(2):
+            running = tasks.create_task(monitor.run())
+            gateway = await self.accepted.get()
+            await gateway.setup("0c")
+            gateway.report(identity(200003, path=quiet))
+            await gateway.request_master(quiet.port)
+            await wait_for_product(monitor, 200003, quiet)
+            assert not monitor.state.port_subnets_checked(quiet.port)
+
+            gateway.report(frame(0x3FF, b"", NativePath(known.port, known.subnet, 0)))
+            gateway.report(identity(200004, path=known))
+            await wait_for_product(monitor, 200004, known)
+            assert monitor.state.port_subnets_checked(known.port)
+            assert not monitor.state.port_subnets_checked(quiet.port)
+
+            gateway.expire_master(quiet.port)
+            await wait_for_port_check(monitor, quiet.port)
+            assert not monitor.state.master_subnets(quiet.port)
+            gateway.report(identity(200003, path=quiet))
+            with self.assertRaises(TimeoutError):
+                async with asyncio.timeout(0.04):
+                    await gateway.reader.read(1)
+            running.cancel()
+            await gateway.restore()
+
+        assert not monitor.state.port_subnets_checked(quiet.port)
+
+    async def test_unsent_query_does_not_check_port(self) -> None:
+        path = TEST_PATH
+        monitor = NativeMonitor(self.endpoint, ports=[path.port])
+        async with asyncio.TaskGroup() as tasks, asyncio.timeout(2):
+            running = tasks.create_task(monitor.run())
+            gateway = await self.accepted.get()
+            await gateway.setup("08")
+            gateway.report(identity(200003, path=path))
+            await gateway.request_master(path.port)
+            gateway.expire_master(path.port, tx_outcome="ff")
+            with self.assertRaises(TimeoutError):
+                async with asyncio.timeout(0.04):
+                    await gateway.reader.read(1)
+            assert not monitor.state.port_subnets_checked(path.port)
+
+            gateway.report(frame(0x3FF, b"", NativePath(path.port, path.subnet, 0)))
+            await wait_for_port_check(monitor, path.port)
+            assert monitor.state.master_subnets(path.port) == (path.subnet,)
+            running.cancel()
+            await gateway.restore()
+
+    async def test_passive_monitor_does_not_query_an_unclaimed_port(self) -> None:
+        path = TEST_PATH
+        monitor = NativeMonitor(self.endpoint, ports=[path.port], passive=True)
+        async with asyncio.TaskGroup() as tasks, asyncio.timeout(2):
+            running = tasks.create_task(monitor.run())
+            gateway = await self.accepted.get()
+            await gateway.setup("08", active=False)
+            gateway.report(identity(200003, path=path))
+            await wait_for_product(monitor, 200003, path)
+            assert not monitor.state.port_subnets_checked(path.port)
+            with self.assertRaises(TimeoutError):
+                async with asyncio.timeout(0.04):
+                    await gateway.reader.read(1)
+            running.cancel()
+            await gateway.restore()
+
+    async def test_gap_supersedes_inflight_port_check_and_rearms_only_that_port(
+        self,
+    ) -> None:
+        path = TEST_PATH
+        other = NativePath(2, 0x55, 0)
+        monitor = NativeMonitor(self.endpoint, ports=[path.port, other.port])
+        async with asyncio.TaskGroup() as tasks, asyncio.timeout(2):
+            running = tasks.create_task(monitor.run())
+            gateway = await self.accepted.get()
+            await gateway.setup("0c")
+            gateway.report(frame(0x3FF, b"", other))
+            await wait_for_port_check(monitor, other.port)
+            gateway.report(identity(200003, path=path))
+            await gateway.request_master(path.port)
+            gateway.send("05080100000000000000", packet_type=0xD0)
+            gateway.report(identity(200004, path=path))
+            gateway.expire_master(path.port)
+            await gateway.request_master(path.port)
+            await wait_for_product(monitor, 200004, path)
+            assert not monitor.state.port_subnets_checked(path.port)
+            assert monitor.state.port_subnets_checked(other.port)
+            gateway.expire_master(path.port, tx_outcome="01")  # Completed without ACK.
+            await wait_for_port_check(monitor, path.port)
+            running.cancel()
+            await gateway.restore()
 
     async def test_subnet_scan_identifies_quiet_nodes_and_rearms_only_after_loss(
         self,
@@ -258,6 +362,7 @@ class NativeMonitorTests(unittest.IsolatedAsyncioTestCase):
                 async with asyncio.timeout(0.04):
                     await gateway.reader.read(1)
             assert not monitor.state.has_master_announcement(3)
+            assert not monitor.state.port_subnets_checked(3)
 
             gateway.send("05080100000000000000", packet_type=0xD0)
             gateway.report(frame(0x3CE, _LOOP, boiler))
@@ -354,6 +459,8 @@ class NativeMonitorTests(unittest.IsolatedAsyncioTestCase):
             gateway.send("0406f04b54 0ff04b54 01")
             gateway.report(frame(0x3E7, bytes.fromhex("3507"), moved))
             gateway.send("0210f04b54 0302ff")  # A different method owned the slot.
+            await gateway.request_master(moved.port)
+            gateway.expire_master(moved.port)
             await gateway.identify("03358000000000000000", 200003, moved)
             await wait_for_product(monitor, 200003, moved)
             assert monitor.state.paths == (moved,) and self.accepted.empty()

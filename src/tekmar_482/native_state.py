@@ -26,6 +26,7 @@ from ._native_payloads.sensors import SENSOR_BLOCKS, ThermostatSensors
 from ._native_payloads.setpoint import SETPOINT_STATUS
 from ._native_payloads.snowmelt import SNOW_REPORT
 from ._native_payloads.thermostat import FAN_STATUS, HUMIDITY_STATUS, SLAB_STATUS
+from ._native_payloads.water import MASTER_PRESENT
 from ._water_monitor import WaterMonitor
 from .constants import TN4_PORTS
 from .native import BlockKey, NativeAddress, NativeFrame
@@ -188,6 +189,7 @@ class NativeState:
         self._peers: defaultdict[NativePath, _Peer] = defaultdict(_Peer)
         self._moves: dict[NativePath, NativePath] = {}
         self._reidentify: set[NativePath] = set()
+        self._unanswered_master_ports: set[int] = set()
         self._water = WaterMonitor()
         self._air_groups = AirGroupTargets()
 
@@ -209,6 +211,26 @@ class NativeState:
     def master_subnets(self, port: int) -> tuple[int, ...]:
         """List distinct MasterPresent header subnets observed on a physical port."""
         return self._water.master_subnets(port)
+
+    def port_subnets_checked(self, port: int) -> bool:
+        """Return whether this capture has a header or a completed master probe."""
+        return port in self._unanswered_master_ports or bool(self.master_subnets(port))
+
+    def record_master_query(self, batch: NativeStatusBatch) -> bool:
+        """Record a transmitted, unanswered query once its earlier trace is consumed."""
+        port = batch.port
+        if batch.query.kind is not StatusRequest.MASTER or port not in TN4_PORTS:
+            msg = "expected a MasterQuery batch on a physical port"
+            raise ValueError(msg)
+        if (
+            batch.reports
+            or batch.tx_result is None
+            or not batch.tx_result.completed_frame
+            or self.port_subnets_checked(port)
+        ):
+            return False
+        self._unanswered_master_ports.add(port)
+        return True
 
     def device_routes(self, *, ports: Iterable[int]) -> tuple[NativeDeviceRoutes, ...]:
         """Resolve identified addresses in a caller-confirmed network scope."""
@@ -307,6 +329,10 @@ class NativeState:
         if peer is not None and peer.air is not None and peer.air.cycle is not None:
             self._air_groups = AirGroupTargets()
         water = self._water.forget(path.port, path.address)
+        if path.port in self._unanswered_master_ports and not any(
+            p.port == path.port for p in self.paths
+        ):
+            self._unanswered_master_ports.remove(path.port)
         return peer is not None or water
 
     @property
@@ -627,6 +653,9 @@ class NativeState:
         """Return changed paths. Equal samples refresh timestamps without notifying."""
         if isinstance(record, CaptureGap):
             changed = tuple(p for p in self.paths if record.affects(p.port))
+            self._unanswered_master_ports = {
+                p for p in self._unanswered_master_ports if not record.affects(p)
+            }
             self._reidentify.update(
                 p for p in self._selected or changed if record.affects(p.port)
             )
@@ -657,6 +686,8 @@ class NativeState:
         if self._selected is not None and path not in self._selected:
             return ()
         changed_water = self._water.observe(record)
+        if changed_water and record.message_id == MASTER_PRESENT:
+            self._unanswered_master_ports.discard(path.port)
         if (source_changed := self._source_report(path, record)) is not None:
             return (path,) if source_changed or changed_water else ()
         if record.message_id == BLOCK_REPORT:

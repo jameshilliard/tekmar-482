@@ -135,5 +135,6 @@ class NativeMonitor:
                 source=None if self._passive else NativeAddress(0, 0),
                 timeout=self._timeout,
                 stale_after=self._stale_after,
+                check_port_subnets=True,
                 on_change=self._observed,
             )
