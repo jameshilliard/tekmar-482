@@ -42,6 +42,11 @@ from ._native_payloads.schedules import (
     ScheduleProfile,
     ScheduleStatus,
 )
+from ._native_payloads.service import (
+    CALIBRATION_MODE,
+    NETWORK_TEST_MODE,
+    NETWORK_TEST_TIME,
+)
 from ._native_payloads.setpoint import SETPOINT_STATUS, SetpointStatus
 from ._native_payloads.snowmelt import SNOW_REPORT, SnowmeltReport
 from ._native_payloads.thermostat import (
@@ -198,6 +203,68 @@ class NativeMessage:
         """Build one native stage command without sending it or assuming a response."""
         require_enum(command, StageCommand)
         return cls(command, source, selection.payload, priority)
+
+    @classmethod
+    def calibration_mode(
+        cls,
+        mode: int,
+        *,
+        source: NativeAddress,
+        priority: int,
+    ) -> Self:
+        """Encode the reported wire mode value; do not assume a device supports it."""
+        return cls(CALIBRATION_MODE, source, bytes([_uint(mode, 8)]), priority)
+
+    @classmethod
+    def network_test_mode(
+        cls,
+        mode: int,
+        expected_duration_raw: int,
+        *,
+        source: NativeAddress,
+        priority: int,
+    ) -> Self:
+        """Build a network test frame with the original duration word."""
+        payload = bytes([_uint(mode, 8)]) + _uint(expected_duration_raw, 16).to_bytes(
+            2,
+            "little",
+        )
+        return cls(NETWORK_TEST_MODE, source, payload, priority)
+
+    @classmethod
+    def network_test_time(
+        cls,
+        additional_time_raw: int,
+        *,
+        source: NativeAddress,
+        priority: int,
+    ) -> Self:
+        """Build a network test extension using the wire time word."""
+        payload = _uint(additional_time_raw, 16).to_bytes(2, "little")
+        return cls(NETWORK_TEST_TIME, source, payload, priority)
+
+    @classmethod
+    def mixing_module_update(
+        cls,
+        *,
+        source: NativeAddress,
+        priority: int,
+        output_mode: int,
+        cooling_logic: bool,
+        clear_error: bool,
+        target_raw: int,
+        target_pump_output: int,
+    ) -> Self:
+        """Build the three-byte mixing command without guessing a motor-speed byte."""
+        high, low = divmod(_uint(target_raw, 10), 256)
+        packed = (
+            _uint(output_mode, 2)
+            | _uint(cooling_logic, 1) << 2
+            | _uint(clear_error, 1) << 3
+            | high << 6
+        )
+        payload = bytes((packed, low, _uint(target_pump_output, 8)))
+        return cls(MIXING_UPDATE, source, payload, priority)
 
     @classmethod
     def scene_report(cls, scene: NativeScene, *, source: NativeAddress) -> Self:

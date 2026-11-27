@@ -21,6 +21,7 @@ from .plant import MIXING_PRESENT, MIXING_REPORT, MIXING_UPDATE, PLANT_OUTPUT, M
 from .products import corrected_identification, identify_product
 from .scenes import SCENE_RESPONSE_FIELDS, SceneResponse
 from .schedules import DAY_NAMES, SCHEDULE_STATUS, SINGLE_WEEK, DailyEvents, ScheduleBinding, ScheduleCycle, ScheduleEvent, ScheduleStatus
+from .service import CALIBRATION_MODE, NETWORK_TEST_MODE, NETWORK_TEST_TIME
 from .setpoint import SETPOINT_STATUS, SetpointStatus
 from .snowmelt import SNOW_REPORT, SNOW_REQUEST, SnowmeltApplication, SnowmeltReport
 from .thermostat import FAN_STATUS, HUMIDITY_STATUS, SLAB_STATUS, FanDuctStatus, HumidityStatus, SlabStatus
@@ -286,7 +287,7 @@ DECODERS: dict[int, tuple[str, Callable[[Reader], Fields]]] = {
     GROUP_UPDATE: ("SetpointRemoteEnable", octets("group_id", "enable")),
     FAN_STATUS: ("FanDuctStatus", lambda r: FanDuctStatus.read(r).fields()),
     SLAB_STATUS: ("SlabStatus", lambda r: SlabStatus.read(r).fields()),
-    0x287: ("CalibrationMode", octets("mode")),
+    CALIBRATION_MODE: ("CalibrationMode", octets("mode")),
     SCHEDULE_STATUS: ("ScheduleStatus", lambda r: ScheduleStatus.read(r).fields()),
     0x307: ("WWSDRequest", octets()),
     0x317: ("RealTimeClockRequest", octets()),
@@ -303,8 +304,8 @@ DECODERS: dict[int, tuple[str, Callable[[Reader], Fields]]] = {
         ("master", 7, 1)) | bits(r.byte(), ("previous_group", 0, 31), ("previous_master", 7, 1))),
     AIR_MASTER: ("AirGroupMasterStatus", lambda r: AirStatus.read(r, master=True).fields()),
     WATER_CYCLE: ("WaterCycleStart", lambda r: WaterCycle(r.byte()).fields()),
-    0x387: ("NetworkTestTime", lambda r: {"additional_time": r.word()}),
-    0x38f: ("NetworkTestMode", lambda r: {"test_mode": r.byte(), "expected_duration": r.word()}),
+    NETWORK_TEST_TIME: ("NetworkTestTime", lambda r: {"additional_time": r.word()}),
+    NETWORK_TEST_MODE: ("NetworkTestMode", lambda r: {"test_mode": r.byte(), "expected_duration": r.word()}),
     PLANT_LOOP_STATUS: ("PlantLoopStatus", lambda r: LoopStatus.read(r, master=False).fields()),
     0x3e7: ("TakingAddress", lambda r: {"previous_subnet": r.byte()} | bits(
         r.byte(), ("previous_node", 0, 31), ("locked", 5, 1))),

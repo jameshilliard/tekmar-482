@@ -27,6 +27,7 @@ from tekmar_482 import (
     NativeField,
     NativeIdentity,
     NativeIdentityMismatchError,
+    NativeMessage,
     NativePath,
     NativeScene,
     NativeSnapshot,
@@ -362,6 +363,36 @@ class FirmwareInteropTests(unittest.IsolatedAsyncioTestCase):
             assert target is not None and target.counts.tx_ack == 1
             for node in (1, 16, 24):
                 assert await manager.traffic.device(NativePath(1, 0xAB, node)) is None
+        assert trace.gateway_drops == (0,) * 5 and not trace.host_drops
+
+    async def test_normal_service_frames_preserve_explicit_headers_and_trace(
+        self,
+    ) -> None:
+        script = (
+            (0, "687431c1 03", ()),
+            (1, "b57431c3 cffe63", ()),
+            (3, "b87431c2 3412", ()),
+            (4, "b8f431c3 025634", ()),
+        )
+        async with _gateway(script) as manager, manager.trace((0, 1, 3, 4)) as trace:
+            outcomes = await asyncio.gather(
+                *(
+                    manager.send_service_frame(
+                        p,
+                        NativeMessage.from_bytes(bytes.fromhex(body)),
+                    )
+                    for p, body, _ in script
+                ),
+            )
+            assert all(tx is not None and tx.status is TxStatus.ACK for tx in outcomes)
+            attempts = sorted(
+                (tx.frame.port, tx.frame.body)
+                for record in trace.drain()
+                if isinstance(record, TracePacket)
+                and isinstance(tx := record.decoded, TraceTx)
+                and tx.origin is TraceOrigin.SERVICE_FRAME
+            )
+            assert attempts == [(p, bytes.fromhex(body)) for p, body, _ in script]
         assert trace.gateway_drops == (0,) * 5 and not trace.host_drops
 
     async def test_link_timing_reads_from_the_production_image(self) -> None:

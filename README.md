@@ -656,6 +656,34 @@ an explicitly Raw session, build the same payload with
 `NativeMessage.stage_command(command, selection, source=source, priority=0)`
 and pass it to `stream.send`.
 
+### Service frames
+
+The 483 references define base layouts for CalibrationMode,
+MixingModuleUpdate, NetworkTestMode and NetworkTestTime. Build an exact
+frame with the corresponding `NativeMessage` constructor, supplying the
+native source and priority. For example, this **encodes only**:
+
+```python
+from tekmar_482 import NativeAddress, NativeMessage
+
+frame = NativeMessage.network_test_mode(
+    2, 0x3456, source=NativeAddress(0x43, 7), priority=2,
+)
+print(frame.to_bytes().hex())
+```
+
+For an intentional transmit, call `await manager.send_service_frame(port, frame)`
+on a Normal gateway advertising `NORMAL_SERVICE_FRAME`. It attempts the
+frame once on the selected physical port without changing modes. An ACK
+reports link delivery, not a device's acceptance. A result of `None`
+means the request expired before starting.
+
+The example uses synthetic wire values. These layouts do not establish
+the required source, valid mode codes, timer units or supporting models
+for an installation. Normal mode accepts only the base layouts. An
+extended mixing frame stays opaque past the base fields and requires an
+explicit Raw send to preserve its full bytes.
+
 ### Weekly schedules
 
 Read an addressed device's assignment and the event times it actually

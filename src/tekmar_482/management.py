@@ -25,6 +25,7 @@ from ._native_payloads.line import (
     ZONE_ADJUSTMENT,
 )
 from ._native_payloads.scenes import SCENE_REPORT
+from ._native_payloads.service import service_frame_supported
 from ._native_payloads.water import StageCommand
 from ._native_payloads.writes import BlockPatch
 from ._normal_block import (
@@ -124,6 +125,7 @@ class BridgeFeature(IntFlag):
     ORDERED_NATIVE_RESULTS = 8192
     LINK_TIMING = 16384
     NORMAL_STAGE_COMMAND = 32768
+    NORMAL_SERVICE_FRAME = 65536
 
 
 class BridgeMethod(IntEnum):
@@ -148,6 +150,7 @@ class BridgeMethod(IntEnum):
     NORMAL_DISCOVER = 0x544BF013
     LINK_TIMING = LINK_TIMING_METHOD
     NORMAL_STAGE_COMMAND = 0x544BF015
+    NORMAL_SERVICE_FRAME = 0x544BF016
 
 
 _PORT_OPERATIONS = frozenset(
@@ -158,6 +161,7 @@ _PORT_OPERATIONS = frozenset(
         BridgeMethod.NORMAL_ANNOUNCE,
         BridgeMethod.NORMAL_DISCOVER,
         BridgeMethod.NORMAL_STAGE_COMMAND,
+        BridgeMethod.NORMAL_SERVICE_FRAME,
     },
 )
 
@@ -189,6 +193,7 @@ def _port_terminal(port: int, packet: TrpcPacket) -> bool:
             BridgeMethod.NORMAL_ANNOUNCE
             | BridgeMethod.NORMAL_DISCOVER
             | BridgeMethod.NORMAL_STAGE_COMMAND
+            | BridgeMethod.NORMAL_SERVICE_FRAME
         ):
             return len(body) == _LINK_RESULT_BYTES
     return False
@@ -861,6 +866,31 @@ class BridgeManagement(_Management):
         async with self._normal_events(
             BridgeMethod.NORMAL_STAGE_COMMAND,
             BridgeFeature.NORMAL_STAGE_COMMAND,
+            key,
+            timeout,
+            service=TrpcService.UPDATE,
+        ) as receive:
+            return self._link_result(port, await receive())
+
+    async def send_service_frame(
+        self,
+        port: int,
+        message: NativeMessage,
+        *,
+        timeout: float = 15,
+    ) -> TxResult | None:
+        """Send one known service frame without changing modes or assuming delivery."""
+        if port not in TN4_PORTS or not service_frame_supported(
+            message.message_id,
+            message.payload,
+        ):
+            msg = "expected a physical port and a supported base service frame"
+            raise ValueError(msg)
+        self._check_edit_idle(port)
+        key = bytes([port]) + message.to_bytes()
+        async with self._normal_events(
+            BridgeMethod.NORMAL_SERVICE_FRAME,
+            BridgeFeature.NORMAL_SERVICE_FRAME,
             key,
             timeout,
             service=TrpcService.UPDATE,

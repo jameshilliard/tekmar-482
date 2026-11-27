@@ -40,6 +40,7 @@ class TraceOrigin(IntEnum):
     DISCOVERY = 2
     PROBE = 3
     STAGE_COMMAND = 4
+    SERVICE_FRAME = 5
 
 
 class RxFlag(IntFlag):
