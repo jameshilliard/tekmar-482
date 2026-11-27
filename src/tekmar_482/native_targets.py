@@ -125,11 +125,15 @@ class AdjustmentState:
         self.revisions[block] = self.revisions.get(block, 0) + 1
         blocks.pop((block, None), None)
 
+    def _expire_floor(self, blocks: _Blocks) -> None:
+        self.slab = None
+        self._expire(ThermostatTarget.FLOOR, blocks)
+
     def _expire_inputs(self, slots: Iterable[SensorSlot], blocks: _Blocks) -> None:
         for slot in slots:
             self._expire(slot.block, blocks)
         self._expire(ROOM_STATS, blocks)
-        self._expire(ThermostatTarget.FLOOR, blocks)
+        self._expire_floor(blocks)
 
     def update(self, block: int, blocks: _Blocks) -> None:
         self._expire(block, blocks)
@@ -141,7 +145,7 @@ class AdjustmentState:
         elif block == SENSOR_SETUP:
             self._expire_inputs(SensorSlot, blocks)
         elif block == _INPUT_ONE:
-            self._expire(ThermostatTarget.FLOOR, blocks)
+            self._expire_floor(blocks)
 
     def reconfigured(
         self,
@@ -183,7 +187,7 @@ class AdjustmentState:
                 for f in (old, new)
             )
             if roles[0] != roles[1]:
-                self._expire(ThermostatTarget.FLOOR, blocks)
+                self._expire_floor(blocks)
 
     def _target_hint(
         self,

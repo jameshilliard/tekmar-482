@@ -64,6 +64,21 @@ class AdjustmentTests(unittest.TestCase):
             assert SlabStatus(0, 42, word).temperature_f is None
         assert SlabStatus(0, 42, 1530).temperature_f == 68
 
+    def test_floor_reassignment_discards_old_operating_sample(self) -> None:
+        state = NativeState()
+        state.observe(identity(_MODERN))
+        floor = _report(0x0D, "03 01 02")
+        slab = frame(0x26F, bytes.fromhex("00 2a fa05"))
+        state.observe(floor)
+        assert state.observe(slab) == (TEST_PATH,)
+        assert state.thermostats[0].adjustments.slab is not None
+
+        state.observe(_report(0x0D, "03 01 04"))
+        state.observe(floor)
+        restored = state.thermostats[0].adjustments
+        assert restored.floor_configured is True and restored.slab is None
+        assert state.observe(slab) == (TEST_PATH,)
+
     def test_physical_slots_units_off_masks_and_limits(self) -> None:
         state = NativeState()
         state.observe(identity(_MODERN))
