@@ -455,6 +455,137 @@ class IoExchangeTests(unittest.IsolatedAsyncioTestCase):
         (only,) = result.latest_statuses
         assert not only.answered
 
+    async def test_known_endpoint_overrides_the_model_probe_and_requires_its_peer(
+        self,
+    ) -> None:
+        task = asyncio.create_task(
+            watch_native(
+                self.stream,
+                [PATH],
+                duration=0.25,
+                timeout=0.08,
+                schedules=False,
+                thermostat_targets=False,
+                thermostat_sensors=False,
+                plant_settings=False,
+                setpoint_settings=False,
+                io_endpoints={PATH: (END, END)},
+            ),
+        )
+        assert (await self.send()).message_id == 0x2D7
+        self.ack()
+        for b in (3, 4, 0x97):
+            self.rx(block(b, b"\0"))
+        self.rx(identity(105102))
+        request = await self.send()
+        assert (request.message_id, request.payload) == (0x1F6, b"\x43\xa5")
+        self.ack()
+        self.rx(discover(9, 1, path=NEIGHBOR))
+        self.rx(discover(7, 1))
+        self.rx(value(7, 0, stamp=2))
+        result = await task
+        ((path, directory),) = result.state.io_directories
+        assert path == PATH and directory.complete and directory.endpoint == END
+        (channel,) = directory.channels
+        assert channel.sample.channel == 7 and channel.sample.active is False
+        assert result.reads == 2 and self.tx.empty()
+
+    async def test_address_move_drops_a_known_endpoint_before_it_can_be_read(
+        self,
+    ) -> None:
+        task = asyncio.create_task(
+            watch_native(
+                self.stream,
+                [PATH],
+                duration=0.25,
+                timeout=0.04,
+                io_endpoints={PATH: (END,)},
+            ),
+        )
+        assert (await self.send()).message_id == 0x2D7
+        self.ack()
+        self.rx(frame(0x3E7, bytes([PATH.subnet, PATH.node]), NEIGHBOR))
+        assert (await self.send()).message_id == 0x2D7
+        self.ack()
+        self.rx(identity(0x123456))
+        result = await task
+        assert not result.latest_statuses
+        assert not result.state.io_directories and self.tx.empty()
+
+    async def test_watch_rejects_io_endpoints_without_active_selected_paths(
+        self,
+    ) -> None:
+        for paths, source, enabled in (
+            (None, NativeAddress(0, 0), True),
+            ([NEIGHBOR], NativeAddress(0, 0), True),
+            ([PATH], None, True),
+            ([PATH], NativeAddress(0, 0), False),
+        ):
+            with (
+                self.subTest(paths=paths, source=source, enabled=enabled),
+                self.assertRaisesRegex(
+                    ValueError,
+                    "active watch of their device paths",
+                ),
+            ):
+                await watch_native(
+                    self.stream,
+                    paths,
+                    source=source,
+                    io_discovery=enabled,
+                    io_endpoints={PATH: (END,)},
+                )
+        assert self.tx.empty()
+
+    async def test_cli_reads_node_zero_endpoint_and_lists_silent_endpoint(self) -> None:
+        master = NativePath(PATH.port, 0x81, 0)
+        args = build_parser().parse_args(
+            [
+                "watch-native",
+                "--io-endpoint",
+                str(master.port),
+                "0x81",
+                "0",
+                "0x43",
+                "0xa5",
+                "--io-endpoint",
+                str(master.port),
+                "0x81",
+                "0",
+                "0x43",
+                "0x85",
+                "--duration",
+                "0.25",
+                "--timeout",
+                "0.08",
+                "--tcp",
+                "localhost:1234",
+            ],
+        )
+        output: list[object] = []
+        task = asyncio.create_task(
+            watch_all_from_args(self.stream, args, output.append),
+        )
+        first = await self.send()
+        assert (first.message_id, first.payload) == (0x1F6, b"\x43\x85")
+        self.ack()
+        self.rx(discover(11, 1, path=master, endpoint=OTHER))
+        second = await self.send()
+        assert (second.message_id, second.payload) == (0x1F6, b"\x43\xa5")
+        self.ack()
+        assert await task == 1 and self.tx.empty()
+        summary = output[-1]
+        assert isinstance(summary, dict)
+        assert summary["completed_reads"] == 2 and not summary["missing_identities"]
+        assert summary["incomplete_io"] == [
+            {
+                "port": master.port,
+                "subnet": master.subnet,
+                "node": 0,
+                "endpoint": {"subnet": END.subnet, "node": END.node},
+            },
+        ]
+
     async def test_read_directory_supplements_a_missing_known_sparse_channel(
         self,
     ) -> None:

@@ -242,6 +242,49 @@ class FirmwareInteropTests(unittest.IsolatedAsyncioTestCase):
             await complete.wait()
             watch.cancel()
 
+    async def test_normal_watch_reads_known_io_endpoint_from_a_node_zero_peer(
+        self,
+    ) -> None:
+        path = NativePath(3, 0x23, 0)
+        endpoint = IoEndpoint(0x43, 0xA5)
+        script = (
+            (
+                3,
+                "1f600002 43a5",
+                (
+                    "1f52300d 43a5 0802 473100000000 01 0000",
+                    "1f52300d 43a5 f202 503200000000 09 1900",
+                ),
+            ),
+        )
+        complete = asyncio.Event()
+
+        def observe(updated: NativePath, state: NativeState) -> None:
+            if (
+                updated == path
+                and (directory := state.io_directory(path, endpoint))
+                and directory.complete
+            ):
+                assert [c.sample.channel for c in directory.channels] == [8, 242]
+                complete.set()
+
+        async with (
+            _gateway(script) as manager,
+            manager.native_session([path.port]) as capture,
+            asyncio.TaskGroup() as tasks,
+        ):
+            watch = tasks.create_task(
+                watch_native(
+                    capture,
+                    [path],
+                    io_endpoints={path: (endpoint,)},
+                    on_change=observe,
+                ),
+            )
+            async with asyncio.timeout(5):
+                await complete.wait()
+            watch.cancel()
+
     async def test_io_recovery_requests_only_the_missing_channel_in_normal_mode(
         self,
     ) -> None:

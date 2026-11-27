@@ -43,7 +43,7 @@ from .normal_trace import NormalNativeSession, NormalPeerCapture
 from .raw import CaptureGap
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Iterable
+    from collections.abc import Callable, Iterable, Mapping
 
     from ._native_payloads.climate import AirReading, AirStatus
     from ._observation import ObservationStream
@@ -216,6 +216,7 @@ class _Watch:
         plant_settings: bool = False,
         setpoint_settings: bool = False,
         io_discovery: bool = False,
+        io_endpoints: Mapping[NativePath, Iterable[IoEndpoint]] | None = None,
         check_port_subnets: bool = False,
         on_native: Callable[[NativePath, NativeState], None] | None = None,
     ) -> None:
@@ -228,6 +229,10 @@ class _Watch:
         self.io_discovery = io_discovery and active
         self.io_pending: set[tuple[NativePath, IoEndpoint]] = set()
         self.io_attempted: set[NativePath] = set()
+        self.io_seeds = {
+            path: frozenset(endpoints)
+            for path, endpoints in (io_endpoints or {}).items()
+        }
         self.capture_index = 0
         self.capture_advanced = asyncio.Event()
         self.reading_status: set[NativePath] = set()
@@ -277,6 +282,9 @@ class _Watch:
         for p in sorted(paths or ()):
             if active:
                 self._enroll(p)
+        for path, endpoints in self.io_seeds.items():
+            for endpoint in sorted(endpoints):
+                self._queue_io(path, endpoint)
 
     def _queue(self, path: NativePath, block: _Read) -> None:
         if not path.node and not isinstance(block, IoEndpoint):
@@ -324,6 +332,7 @@ class _Watch:
                 job: batch for job, batch in self.latest.items() if job[0] != path
             }
             self.io_attempted.discard(path)
+            self.io_seeds.pop(path, None)
             self.io_pending = {k for k in self.io_pending if k[0] != path}
             self.statuses = {k: b for k, b in self.statuses.items() if k[0] != path}
             self.io_reads = {k: r for k, r in self.io_reads.items() if k[0] != path}
@@ -458,7 +467,7 @@ class _Watch:
             self.on_native(path, self.state)
 
     def _local_io_candidate(self, path: NativePath) -> IoEndpoint | None:
-        if path in self.io_attempted:
+        if path in self.io_attempted or self.io_seeds.get(path):
             return None
         endpoint = local_io_endpoint(self.state.block(path, 0))
         if endpoint is None or self.state.io_for(path):
@@ -837,7 +846,11 @@ class _Watch:
             result = observation.tx_result
         elif isinstance(block, IoEndpoint):
             before = self.state.io_directory(path, block)
-            if before is None and self._local_io_candidate(path) != block:
+            if (
+                before is None
+                and block not in self.io_seeds.get(path, ())
+                and self._local_io_candidate(path) != block
+            ):
                 self.io_pending.discard((path, block))
                 return
             result = await self._read_io(
@@ -997,6 +1010,7 @@ async def watch_native(
     plant_settings: bool = True,
     setpoint_settings: bool = True,
     io_discovery: bool = True,
+    io_endpoints: Mapping[NativePath, Iterable[IoEndpoint]] | None = None,
     check_port_subnets: bool = False,
     on_change: Callable[[NativePath, NativeState], None] | None = None,
     on_record: Callable[[CaptureRecord], None] | None = None,
@@ -1010,6 +1024,9 @@ async def watch_native(
     unambiguous master subnet once when the gateway supports it.
     With check_port_subnets, query the master once per observed port that
     has addressable peers but no subnet evidence yet.
+    Known I/O endpoints for explicit paths can seed one directory read each
+    at startup, including for sources with node zero. An address move or
+    capture gap invalidates the old observation instead of replaying the hint.
     An optional stale_after timeout marks a silent path unknown without sending.
     Each Normal worker waits for its own occupied slot; an admitted read is
     never replayed after a timeout.
@@ -1017,6 +1034,14 @@ async def watch_native(
     selected = None if paths is None else frozenset(paths)
     if selected is not None and ports is not None:
         msg = "select device paths or discovery ports, not both"
+        raise ValueError(msg)
+    if io_endpoints and (
+        source is None
+        or not io_discovery
+        or selected is None
+        or not io_endpoints.keys() <= selected
+    ):
+        msg = "initial I/O endpoints require an active watch of their device paths"
         raise ValueError(msg)
     if stale_after is not None and (not isfinite(stale_after) or stale_after <= 0):
         msg = "expected a finite positive inactivity interval"
@@ -1036,6 +1061,7 @@ async def watch_native(
         plant_settings=plant_settings,
         setpoint_settings=setpoint_settings,
         io_discovery=io_discovery,
+        io_endpoints=io_endpoints,
         check_port_subnets=check_port_subnets,
         on_native=on_change,
     )

@@ -881,6 +881,21 @@ endpoint, the scan tries its wire address once. A node-zero I/O reporter
 needs no block request. Other models and locked 553 nodes still require
 an observed or explicit I/O endpoint.
 
+Start a live watch of a known endpoint without waiting for an I/O change:
+
+```bash
+tekmar-482 watch-native --io-endpoint 2 0x12 3 0x43 0xa5 --tcp 192.0.2.10:3001 --json
+```
+
+The first three fields are the reporting path, not the payload endpoint.
+Repeat the option for more endpoints or add `--device` for more paths. In
+Python use `watch_native(stream, [path], io_endpoints={path: (endpoint,)})`.
+Each supplied pair seeds one read. A reply must match both the source and
+the two payload bytes. If there is no matching directory, the summary
+lists the endpoint as incomplete; it does not create empty channels or
+poll. A capture gap or move invalidates the previous evidence. This option
+is only for active watches with I/O discovery enabled.
+
 `frame.io_report` provides the typed value, raw type ID and discovery
 label bytes. `IoDirectory.from_batch(answer)` describes one discovery
 exchange. `state.io_directory(path, endpoint)` combines live observations;

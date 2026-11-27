@@ -352,6 +352,14 @@ def _add_watch(
             help="observe I/O telemetry without querying channel directories",
         )
         watch.add_argument(
+            "--io-endpoint",
+            type=number,
+            action="append",
+            nargs=5,
+            metavar=("PORT", "SUBNET", "NODE", "IO_SUBNET", "IO_NODE"),
+            help="watch a device path and query its known I/O endpoint at startup",
+        )
+        watch.add_argument(
             "--no-plant-settings",
             action="store_true",
             help="skip plant topology, setup and runtime reads",

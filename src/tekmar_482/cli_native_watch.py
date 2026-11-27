@@ -6,7 +6,7 @@ from dataclasses import asdict
 from functools import partial
 from typing import TYPE_CHECKING
 
-from ._native_payloads.io import io_terminal
+from ._native_payloads.io import IoEndpoint, io_terminal
 from .cli_schedule import schedule_fields
 from .cli_status import climate_fields, plant_register_fields, water_fields
 from .management import BridgeManagement
@@ -241,6 +241,17 @@ def _emit_fault(
         emit({"network_fault_unknown": asdict(path)})
 
 
+def _watch_selection(
+    args: argparse.Namespace,
+) -> tuple[tuple[NativePath, ...] | None, dict[NativePath, set[IoEndpoint]]]:
+    endpoints: dict[NativePath, set[IoEndpoint]] = {}
+    for port, subnet, node, io_subnet, io_node in args.io_endpoint or ():
+        path = NativePath(port, subnet, node)
+        endpoints.setdefault(path, set()).add(IoEndpoint(io_subnet, io_node))
+    devices = tuple(NativePath(*p) for p in args.device or ())
+    return tuple(dict.fromkeys((*devices, *endpoints))) or None, endpoints
+
+
 async def watch_all_from_args(
     stream: ObservationStream,
     args: argparse.Namespace,
@@ -309,7 +320,7 @@ async def watch_all_from_args(
             previous.pop(path, None)
             emit({"native_removed": asdict(path)})
 
-    paths = tuple(NativePath(*p) for p in args.device) if args.device else None
+    paths, endpoints = _watch_selection(args)
     result = await watch_native(
         stream,
         paths,
@@ -326,15 +337,17 @@ async def watch_all_from_args(
         plant_settings=not args.no_plant_settings,
         setpoint_settings=not args.no_setpoint_settings,
         io_discovery=not args.no_io_discovery,
+        io_endpoints=endpoints,
         on_change=changed,
     )
     expected = paths or (() if args.passive else result.state.paths)
-    return _watch_summary(result, expected, args, emit)
+    return _watch_summary(result, expected, endpoints, args, emit)
 
 
 def _watch_summary(
     result: NativeWatchResult,
     paths: tuple[NativePath, ...],
+    endpoints: dict[NativePath, set[IoEndpoint]],
     args: argparse.Namespace,
     emit: Callable[[object], None],
 ) -> int:
@@ -387,11 +400,17 @@ def _watch_summary(
             if (c := state.schedule(p)) is not None and c.incomplete
         ]
     )
-    no_io = [
-        {**asdict(p), "endpoint": asdict(d.endpoint)}
+    incomplete_io = {
+        (p, d.endpoint)
         for p, d in state.io_directories
         if not d.complete and not args.no_io_discovery
-    ]
+    } | {
+        (p, endpoint)
+        for p, known in endpoints.items()
+        for endpoint in known
+        if state.io_directory(p, endpoint) is None
+    }
+    no_io = [{**asdict(p), "endpoint": asdict(e)} for p, e in sorted(incomplete_io)]
     no_setpoints = [
         {**asdict(p), "missing_blocks": [b for b, _ in missing]}
         for p in state.paths
