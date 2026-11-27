@@ -282,6 +282,7 @@ class GroupReadTests(unittest.IsolatedAsyncioTestCase):
                 args = build_parser().parse_args(
                     [
                         "set-device-group",
+                        "--raw",
                         "3",
                         "0x23",
                         "6",

@@ -171,7 +171,7 @@ class Tekmar482Session:
             default=None,
         )
         self._transaction_lock = asyncio.Lock()
-        self.normal_read_admission = asyncio.Lock()
+        self.normal_operation_admission = asyncio.Lock()
         self.normal_edit_locks = {port: asyncio.Lock() for port in TN4_PORTS}
         self._inventory_drained = asyncio.Event()
         self._inventory_address = 0

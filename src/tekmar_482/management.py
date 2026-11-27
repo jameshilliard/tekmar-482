@@ -11,14 +11,22 @@ from math import isfinite
 from typing import TYPE_CHECKING, Self
 
 from ._bridge_diagnostics import ERROR_REPORTING_METHOD, TRACE_STATE, WIRE_VERSION
+from ._native_payloads.line import (
+    CLOCK_REPORT,
+    GROUP_UPDATE,
+    NETWORK_INIT_REQUEST,
+    ZONE_ADJUSTMENT,
+)
+from ._native_payloads.scenes import SCENE_REPORT
 from ._native_payloads.writes import BlockPatch
-from ._normal_block import edit_key, edit_result, read_key, read_result
+from ._normal_block import edit_key, edit_result, read_key, read_result, tx_outcome
 from ._normal_status import status_key, status_result
 from .constants import TN4_PORTS
 from .error_reports import ALL_SOURCES, ErrorReports, GatewayErrorCounter, source_mask
 from .exceptions import ConnectionClosedError, ProtocolError, TekmarError
 from .native import NativeAddress
 from .native_schedule import edit_schedule_time
+from .native_snow_control import apply_snowmelt_group
 from .native_status import StatusCollector, snowmelt_status_query
 from .native_target_edit import edit_thermostat_target
 from .native_write import NativeBlockEditor
@@ -38,13 +46,15 @@ if TYPE_CHECKING:
     from .client import Tekmar482Client
     from .native import NativeBlockQuery, NativeFrame, NativeMessage
     from .native_schedule import ScheduleChange, ScheduleTarget
+    from .native_snow_control import SnowmeltGroupResult, SnowmeltOperation
     from .native_state import NativePath
     from .native_status import NativeStatusBatch
     from .native_target_edit import ThermostatTargetChange
     from .native_write import BlockDelivery, NativeWriteResult
-    from .raw import NativeBlockBatch
+    from .raw import NativeBlockBatch, TxResult
 
 _CAPABILITY_BYTES = 4
+_ANNOUNCEMENT_RESULT_BYTES = 2  # physical port and link outcome
 
 
 def unpack_diagnostic(layout: Struct, data: bytes) -> tuple[int, ...]:
@@ -70,6 +80,7 @@ class BridgeFeature(IntFlag):
     TRAFFIC_COUNTS = 32
     NORMAL_STATUS_READ = 128
     BLOCK_TRANSFERS = 256
+    NORMAL_ANNOUNCE = 512
 
 
 class BridgeMethod(IntEnum):
@@ -90,6 +101,7 @@ class BridgeMethod(IntEnum):
     NORMAL_BLOCK_READ = 0x544BF00F
     NORMAL_STATUS_READ = 0x544BF010
     NORMAL_BLOCK_EDIT = 0x544BF011
+    NORMAL_ANNOUNCE = 0x544BF012
 
 
 @dataclass(frozen=True, slots=True)
@@ -160,6 +172,13 @@ class _Management:
             reason = packet.extra[4:]
             if reason == b"\x01":
                 msg = "gateway is busy; management operation was not accepted"
+                if command.method in (
+                    BridgeMethod.NORMAL_BLOCK_READ,
+                    BridgeMethod.NORMAL_STATUS_READ,
+                    BridgeMethod.NORMAL_BLOCK_EDIT,
+                    BridgeMethod.NORMAL_ANNOUNCE,
+                ):
+                    raise NativePortBusyError(msg)
             elif reason == b"\x02":
                 msg = "gateway rejected the management service or payload"
             elif reason == b"\x03":
@@ -361,7 +380,7 @@ class BridgeManagement(_Management):
         query: NativeBlockQuery,
         timeout: float,
     ) -> NativeBlockBatch:
-        async with self._read_events(
+        async with self._normal_events(
             BridgeMethod.NORMAL_BLOCK_READ,
             BridgeFeature.BLOCK_TRANSFERS,
             read_key(port, query),
@@ -384,7 +403,7 @@ class BridgeManagement(_Management):
             before: NativeFrame,
             proposed: NativeMessage,
         ) -> BlockDelivery:
-            async with self._read_events(
+            async with self._normal_events(
                 BridgeMethod.NORMAL_BLOCK_EDIT,
                 BridgeFeature.BLOCK_TRANSFERS,
                 edit_key(port, query, before, proposed),
@@ -462,8 +481,17 @@ class BridgeManagement(_Management):
     ) -> NativeStatusBatch:
         """Read peer status without changing mode, trace or link-ACK settings."""
         self._check_edit_idle(port)
+        return await self._read_status(port, query, peer, timeout)
+
+    async def _read_status(
+        self,
+        port: int,
+        query: NativeStatusQuery,
+        peer: NativeAddress | None,
+        timeout: float,
+    ) -> NativeStatusBatch:
         collector = StatusCollector(query, peer)
-        async with self._read_events(
+        async with self._normal_events(
             BridgeMethod.NORMAL_STATUS_READ,
             BridgeFeature.NORMAL_STATUS_READ,
             status_key(port, query, peer),
@@ -489,8 +517,78 @@ class BridgeManagement(_Management):
         )
         return await self.read_status(port, query, peer=peer, timeout=timeout)
 
+    async def send_announcement(
+        self,
+        port: int,
+        message: NativeMessage,
+        *,
+        timeout: float = 15,
+    ) -> TxResult | None:
+        """Send one known announcement in Normal mode. None means it expired unsent."""
+        self._check_edit_idle(port)
+        return await self._announce(port, message, timeout)
+
+    async def _announce(
+        self,
+        port: int,
+        message: NativeMessage,
+        timeout: float,
+    ) -> TxResult | None:
+        if (
+            port not in TN4_PORTS
+            or message.source != NativeAddress(0, 0)
+            or message.message_id
+            not in (
+                CLOCK_REPORT,
+                GROUP_UPDATE,
+                NETWORK_INIT_REQUEST,
+                SCENE_REPORT,
+                ZONE_ADJUSTMENT,
+            )
+            or message.priority != int(message.message_id == NETWORK_INIT_REQUEST)
+        ):
+            msg = "invalid port, message, priority or source for a Normal announcement"
+            raise ValueError(msg)
+        key = bytes([port]) + message.message_id.to_bytes(2, "little") + message.payload
+        async with self._normal_events(
+            BridgeMethod.NORMAL_ANNOUNCE,
+            BridgeFeature.NORMAL_ANNOUNCE,
+            key,
+            timeout,
+            service=TrpcService.UPDATE,
+        ) as receive:
+            data = await receive()
+            if len(data) != _ANNOUNCEMENT_RESULT_BYTES or data[0] != port:
+                msg = "invalid Normal announcement result"
+                raise ProtocolError(msg)
+            return tx_outcome(port, data[1])
+
+    async def set_snowmelt_group(
+        self,
+        port: int,
+        target: NativeAddress,
+        operation: SnowmeltOperation,
+        *,
+        enabled: bool,
+        expected_group: int | None = None,
+        timeout: float = 15,
+        preview: bool = True,
+    ) -> SnowmeltGroupResult:
+        """Read the live binding and query that zone's state after an explicit send."""
+        async with self._block_editor(port, timeout) as editor:
+            return await apply_snowmelt_group(
+                editor,
+                lambda message: self._announce(port, message, timeout),
+                lambda query: self._read_status(port, query, target, timeout),
+                target,
+                operation,
+                enabled=enabled,
+                expected_group=expected_group,
+                preview=preview,
+            )
+
     @asynccontextmanager
-    async def _read_events(
+    async def _normal_events(
         self,
         method: BridgeMethod,
         feature: BridgeFeature,
@@ -500,7 +598,7 @@ class BridgeManagement(_Management):
         service: TrpcService = TrpcService.REQUEST,
     ) -> AsyncIterator[Callable[[], Awaitable[bytes]]]:
         if not isfinite(timeout) or timeout <= 0:
-            msg = "Normal read timeout must be finite and positive"
+            msg = "Normal operation timeout must be finite and positive"
             raise ValueError(msg)
         command = _ExtensionCommand(service, method, payload=key)
         session = self._session
@@ -509,8 +607,8 @@ class BridgeManagement(_Management):
                 include_matched=frozenset({command.method_id}),
                 only_method=command.method_id,
             ) as events:
-                # Drain abandoned admission replies, not outstanding native reads.
-                async with session.normal_read_admission:
+                # Fence abandoned admission replies without waiting on other ports.
+                async with session.normal_operation_admission:
                     caps = await self.capabilities()
                     if (
                         caps is None
@@ -521,7 +619,7 @@ class BridgeManagement(_Management):
                         raise ProtocolError(msg)
                     ack = await self._exchange(command)
                     if ack.method_id != command.method_id or ack.extra != key:
-                        msg = "gateway did not acknowledge this Normal read"
+                        msg = "gateway did not acknowledge this Normal operation"
                         raise ProtocolError(msg)
 
                 async def receive() -> bytes:
@@ -531,7 +629,7 @@ class BridgeManagement(_Management):
                             and packet.extra[:1] == key[:1]
                         ):
                             return packet.extra
-                    msg = "connection closed before the Normal read result"
+                    msg = "connection closed before the Normal operation result"
                     raise ConnectionClosedError(msg)
 
                 async with asyncio.timeout(timeout):
@@ -539,7 +637,7 @@ class BridgeManagement(_Management):
                         if packet is ack:
                             yield receive
                             return
-        msg = "connection closed before Normal read admission"
+        msg = "connection closed before Normal operation admission"
         raise ConnectionClosedError(msg)
 
     async def _trace_state(self) -> NormalTraceState:

@@ -11,6 +11,7 @@ from .native import NativeBlockQuery, require_enum
 from .native_line import BroadcastIssue, BroadcastResult, LineBroadcast
 
 if TYPE_CHECKING:
+    from .management import BridgeManagement
     from .native import NativeAddress, NativeFrame, NativeMessage
     from .native_write import NativeWriteResult
     from .raw import BridgeStream
@@ -42,7 +43,7 @@ class SceneSelection:
 
     async def send(
         self,
-        stream: BridgeStream,
+        stream: BridgeManagement | BridgeStream,
         *,
         timeout: float = 20,
     ) -> tuple[BroadcastResult, ...]:

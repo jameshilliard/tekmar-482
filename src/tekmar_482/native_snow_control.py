@@ -38,6 +38,7 @@ class SnowmeltOperation(Enum):
 class SnowmeltGroupStatus(StrEnum):
     PREVIEW = "preview"
     LINK_FAILED = "link_failed"
+    EXPIRED_NOT_SENT = "expired_not_sent"
     OUTCOME_UNKNOWN = "outcome_unknown"
     NO_STATE_REPORT = "no_state_report"
     STATE_REPORTED = "state_reported"
@@ -77,7 +78,7 @@ class SnowmeltGroupResult:
 
 async def apply_snowmelt_group(
     editor: NativeBlockEditor,
-    send: Callable[[NativeMessage], Awaitable[TxResult]],
+    send: Callable[[NativeMessage], Awaitable[TxResult | None]],
     read_status: Callable[[NativeStatusQuery], Awaitable[NativeStatusBatch]],
     target: NativeAddress,
     operation: SnowmeltOperation,
@@ -149,14 +150,13 @@ async def apply_snowmelt_group(
     )
     if preview:
         return result
-    deadline = asyncio.timeout(editor.timeout)
     try:
-        async with deadline:
+        async with asyncio.timeout(editor.timeout):
             tx = await send(message)
     except TimeoutError:
-        if not deadline.expired():
-            raise
         return replace(result, status=SnowmeltGroupStatus.OUTCOME_UNKNOWN)
+    if tx is None:
+        return replace(result, status=SnowmeltGroupStatus.EXPIRED_NOT_SENT)
     if not tx.may_have_reached_peer:
         return replace(result, status=SnowmeltGroupStatus.LINK_FAILED, tx_result=tx)
     query = NativeStatusQuery.snowmelt(

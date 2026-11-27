@@ -15,6 +15,7 @@ from .native_line import BroadcastIssue, DeviceGroupBinding, LineBroadcast
 if TYPE_CHECKING:
     from collections.abc import Callable
 
+    from .management import BridgeManagement
     from .raw import BridgeStream
 
 LINE_COMMANDS = {
@@ -44,6 +45,11 @@ def add_line_commands(
 ) -> None:
     for name, help_text in LINE_COMMANDS.items():
         cmd = subparsers.add_parser(name, parents=[parent], help=help_text)
+        cmd.add_argument(
+            "--raw",
+            action="store_true",
+            help="switch to Raw mode for this announcement",
+        )
         cmd.add_argument(
             "--ports",
             nargs="+",
@@ -138,7 +144,7 @@ def prepare_broadcast(
 
 
 async def send_broadcast(
-    stream: BridgeStream,
+    stream: BridgeManagement | BridgeStream,
     message: LineBroadcast,
     timeout: float,
     emit: Callable[[object], None],
@@ -159,7 +165,7 @@ async def send_broadcast(
 
 
 async def device_group(
-    stream: BridgeStream,
+    stream: BridgeManagement | BridgeStream,
     args: argparse.Namespace,
     address: NativeAddress,
     source: NativeAddress,

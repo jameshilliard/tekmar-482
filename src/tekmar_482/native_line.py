@@ -5,11 +5,13 @@ from __future__ import annotations
 import asyncio
 from dataclasses import dataclass
 from enum import Enum
+from math import isfinite
 from typing import TYPE_CHECKING, Self
 
 from ._native_payloads.line import NETWORK_INIT_REQUEST, SetpointAssignment
 from ._native_payloads.products import product_revision
 from .constants import TN4_PORTS
+from .management import BridgeManagement
 from .native import NativeAddress, NativeBlockQuery, NativeMessage
 from .raw import NativePortBusyError, TxResult, TxStatus
 
@@ -27,6 +29,7 @@ _SETPOINT_SETUP = 0x26
 class BroadcastIssue(Enum):
     PORT_BUSY = "port_busy"
     DEADLINE = "outcome_unknown"
+    EXPIRED_NOT_SENT = "expired_not_sent"
 
 
 @dataclass(frozen=True, slots=True)
@@ -129,25 +132,32 @@ class LineBroadcast:
 
     async def send(
         self,
-        stream: BridgeStream,
+        stream: BridgeManagement | BridgeStream,
         *,
         timeout: float = 20,
     ) -> tuple[BroadcastResult, ...]:
         """Send once per port. A timeout does not cancel an admitted transmission."""
-        if not timeout > 0:
-            msg = "broadcast send timeout must be positive"
+        if not isfinite(timeout) or timeout <= 0:
+            msg = "broadcast send timeout must be finite and positive"
             raise ValueError(msg)
 
         async def one(port: int) -> BroadcastResult:
-            deadline = asyncio.timeout(timeout)
             try:
-                async with deadline:
+                async with asyncio.timeout(timeout):
+                    if isinstance(stream, BridgeManagement):
+                        tx = await stream.send_announcement(
+                            port,
+                            self.message,
+                            timeout=timeout,
+                        )
+                        return BroadcastResult(
+                            port,
+                            tx if tx is not None else BroadcastIssue.EXPIRED_NOT_SENT,
+                        )
                     return BroadcastResult(port, await stream.send(port, self.message))
             except NativePortBusyError:
                 return BroadcastResult(port, BroadcastIssue.PORT_BUSY)
             except TimeoutError:
-                if not deadline.expired():
-                    raise
                 return BroadcastResult(port, BroadcastIssue.DEADLINE)
 
         results = await asyncio.gather(
@@ -171,7 +181,7 @@ class DeviceGroupBinding:
     @classmethod
     async def read(
         cls,
-        stream: BridgeStream,
+        stream: BridgeManagement | BridgeStream,
         port: int,
         address: NativeAddress,
         *,
@@ -179,11 +189,17 @@ class DeviceGroupBinding:
         timeout: float = 20,
     ) -> Self:
         """Resolve a 161/162's configured group from live identity and setup."""
+        if isinstance(stream, BridgeManagement) and source != _HOST:
+            msg = "Normal group lookup uses the gateway source address"
+            raise ValueError(msg)
 
         async def read(block: int) -> dict[str, str | int | float]:
+            query = NativeBlockQuery(address, block)
+            if isinstance(stream, BridgeManagement):
+                return (await stream.read_block(port, query, timeout=timeout)).decoded
             batch = await stream.read_block_group(
                 port,
-                NativeBlockQuery(address, block),
+                query,
                 source=source,
                 timeout=timeout,
             )

@@ -185,6 +185,7 @@ class NativeSceneTests(unittest.IsolatedAsyncioTestCase):
         args = [
             "select-scene",
             "8",
+            "--raw",
             "--ports",
             "2",
             "4",
@@ -213,7 +214,7 @@ class NativeSceneTests(unittest.IsolatedAsyncioTestCase):
             await SceneSelection(_TEMP, (1,), _HOST).send(self.stream, timeout=0)
         assert self.tx.empty()
 
-    async def test_confirmed_cli_broadcast_over_tcp_reports_each_link(self) -> None:
+    async def test_explicit_raw_cli_broadcast_over_tcp_reports_each_link(self) -> None:
         async def app(
             reader: asyncio.StreamReader,
             writer: asyncio.StreamWriter,
@@ -250,6 +251,7 @@ class NativeSceneTests(unittest.IsolatedAsyncioTestCase):
                 [
                     "select-scene",
                     "6",
+                    "--raw",
                     "--ports",
                     "1",
                     "3",

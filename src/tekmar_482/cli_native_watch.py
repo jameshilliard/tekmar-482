@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 from dataclasses import asdict
+from functools import partial
 from typing import TYPE_CHECKING
 
 from ._native_payloads.io import io_terminal
 from .cli_schedule import schedule_fields
 from .cli_status import climate_fields, plant_register_fields, water_fields
+from .management import BridgeManagement
 from .native import NativeAddress
 from .native_snow_control import SnowmeltGroupStatus, SnowmeltOperation
 from .native_state import NativePath
@@ -166,19 +168,23 @@ def snow_fields(device: NativeSnowmelt) -> dict[str, object]:
 
 
 async def snow_group_from_args(
-    stream: BridgeStream,
+    stream: BridgeManagement | BridgeStream,
     args: argparse.Namespace,
     address: NativeAddress,
     source: NativeAddress,
     emit: Callable[[object], None],
 ) -> int:
-    result = await stream.set_snowmelt_group(
+    set_group = (
+        stream.set_snowmelt_group
+        if isinstance(stream, BridgeManagement)
+        else partial(stream.set_snowmelt_group, source=source)
+    )
+    result = await set_group(
         args.port,
         address,
         SnowmeltOperation[args.operation.upper()],
         enabled=args.state == "on",
         expected_group=args.expect_group,
-        source=source,
         timeout=args.timeout,
         preview=not args.confirm,
     )

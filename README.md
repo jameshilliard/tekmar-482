@@ -800,9 +800,10 @@ The command reads the product, application, zone and **both** assignments
 from the controller. To broadcast, explicitly add `--expect-group N --confirm`.
 This can affect **every device using that group**, not just the selected
 zone. Missing, changed, ambiguous or sensor-only bindings cannot transmit.
-`await stream.set_snowmelt_group(port, address, SnowmeltOperation.MELT,
-enabled=True, source=source)` also defaults to preview. An intentional
-send requires `preview=False, expected_group=N`.
+`await BridgeManagement(client).set_snowmelt_group(port, address,
+SnowmeltOperation.MELT, enabled=True)` uses Normal mode and also defaults
+to preview. An intentional send requires `preview=False, expected_group=N`.
+The Raw stream offers the same operation with an explicit source address.
 
 After sending once, the client requests operating state from that zone.
 A link ACK, group report, or another sensor's report is not confirmation.
@@ -855,9 +856,13 @@ tekmar-482 set-zone-sync --cycle 0 --purge on --target outdoor-reset --ports 2 -
 
 `LineBroadcast.clock(...)`, `.group(...)`, `.zone_sync(...)` and `.scene(...)`
 provide the equivalent Python API. Inspect `announcement.message.to_bytes()`
-or call `await announcement.send(stream)`. Each selected port has its own
-link outcome. A timeout never causes an automatic retry; a link ACK does
-not mean every controller applied the announcement.
+or call `await announcement.send(BridgeManagement(client))` on an open Normal
+session. These commands default to Normal and do not interrupt inventory,
+tracing or stock clients. Use `--raw` (or pass an open Raw stream) when a
+custom source address is needed. No command silently falls back to Raw mode.
+Each selected port has its own outcome. A gateway expiry means it never
+started; a host timeout leaves the outcome unknown. Neither causes a retry.
+A link ACK does not mean every controller applied the announcement.
 
 `LineBroadcast.network_init((2,))` builds the stock 482's empty class-1
 `3DF` probe. Raw mode sends it only on request. There is no defined
@@ -870,7 +875,7 @@ reads the identity and setup. To transmit, add **both** `--expect-group N`
 and `--confirm`: if the freshly read group differs, no enable is sent.
 The command broadcasts to the group, not solely to the selected device.
 A DHW, pool or unassigned application has no remote-enable group. In
-Python use `await DeviceGroupBinding.read(stream, port, address)` and
+Python use `await DeviceGroupBinding.read(BridgeManagement(client), port, address)` and
 `binding.announcement(expected_group, enabled=True)`. Incoming
 `frame.group_report` exposes the source's requested and actual bits
 separately. An echoed command is not a group report.
@@ -888,13 +893,13 @@ tekmar-482 select-scene 6 --ports 0 2 --json
 To transmit, add an endpoint and `--confirm`. There is one attempt per
 selected port; the CLI reports each link's outcome and exits nonzero if any
 port was not link-acknowledged. An ACK does **not** mean every device on a
-line acted. The Python equivalent in an active Raw stream is:
+line acted. The Python equivalent in an active Normal session is:
 
 ```python
-from tekmar_482 import NativeAddress, NativeScene, SceneSelection
+from tekmar_482 import BridgeManagement, NativeAddress, NativeScene, SceneSelection
 
 selection = SceneSelection(NativeScene.TEMPORARY_OCCUPIED, (0, 2), NativeAddress(0, 0))
-results = await selection.send(stream)
+results = await selection.send(BridgeManagement(client))
 ```
 
 `monitor` decodes announcements. In Python, `NativeFrame.scene_report`

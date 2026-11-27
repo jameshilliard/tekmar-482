@@ -9,6 +9,7 @@ import sys
 from collections.abc import Callable, Sequence
 from dataclasses import asdict
 from functools import partial
+from math import isfinite
 from typing import TYPE_CHECKING, Any, TextIO
 
 from ._native_payloads.climate import REMOTE_MODES, ThermostatMode
@@ -498,6 +499,11 @@ def _add_device_groups(
     ):
         group = subparsers.add_parser(name, parents=[parent], help=detail)
         _add_native_target(group)
+        group.add_argument(
+            "--raw",
+            action="store_true",
+            help="use Raw mode for this group operation",
+        )
         if name == "set-snowmelt-group":
             group.add_argument(
                 "operation",
@@ -677,7 +683,11 @@ def _endpoint(args: argparse.Namespace) -> GatewayEndpoint:
 
 def _validate_native_args(args: argparse.Namespace) -> None:
     if (
-        (args.command in _BLOCK_EDITS or args.command in {"read-block", "read-status"})
+        (
+            args.command in _BLOCK_EDITS
+            or args.command
+            in {"read-block", "read-status", "set-device-group", "set-snowmelt-group"}
+        )
         and not args.raw
         and (args.ack or args.source_subnet or args.source_node)
     ):
@@ -834,8 +844,11 @@ async def _broadcast(
     emit: Callable[[object], None],
 ) -> int:
     announcement, description = prepare_broadcast(args)
-    if not args.timeout > 0:
-        msg = "broadcast send timeout must be positive"
+    if not args.raw and (args.source_subnet or args.source_node):
+        msg = f"custom source addresses require {args.command} --raw"
+        raise CliError(msg)
+    if not isfinite(args.timeout) or args.timeout <= 0:
+        msg = "broadcast send timeout must be finite and positive"
         raise CliError(msg)
     if not args.confirm:
         emit({"preview": description})
@@ -844,6 +857,14 @@ async def _broadcast(
         if not isinstance(bridge, BridgeClient):
             msg = "expected native firmware"
             raise CliError(msg)
+        if not args.raw:
+            async with bridge.normal(select_mode=False) as client:
+                return await send_broadcast(
+                    BridgeManagement(client),
+                    announcement,
+                    args.timeout,
+                    emit,
+                )
         async with bridge.stream(diagnostics=False) as stream:
             return await send_broadcast(stream, announcement, args.timeout, emit)
 
@@ -910,14 +931,28 @@ async def _native_addressed(
         emit(_frame_fields(report))
         return 0
     source = NativeAddress(args.source_subnet, args.source_node)
+    if args.command in {"set-device-group", "set-snowmelt-group"}:
+        run_group = (
+            device_group if args.command == "set-device-group" else snow_group_from_args
+        )
+        if not args.raw:
+            async with bridge.normal(select_mode=False) as client:
+                return await run_group(
+                    BridgeManagement(client),
+                    args,
+                    address,
+                    source,
+                    emit,
+                )
+        async with bridge.stream(
+            ack_ports=(args.port,) if args.ack else (),
+            diagnostics=False,
+        ) as stream:
+            return await run_group(stream, args, address, source, emit)
     async with bridge.stream(
         ack_ports=(args.port,) if args.ack else (),
         diagnostics=False,
     ) as stream:
-        if args.command == "set-device-group":
-            return await device_group(stream, args, address, source, emit)
-        if args.command == "set-snowmelt-group":
-            return await snow_group_from_args(stream, args, address, source, emit)
         if args.command == "read-device":
             snapshot = await read_native_snapshot(
                 stream,
