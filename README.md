@@ -1119,9 +1119,13 @@ with `read_snowmelt_status()` in Raw mode without changing them.
 the write. A timeout does not prove the command failed, and a matching report
 does not prove that a snowmelt slab is heating.
 
-`DiscoveredDevice.setback_events` is a daily event count (0, 2 or 4),
-or `None` if unknown. Raw tRPC packets keep the configuration code (0, 1
-or 2). A schedule-master report updates metadata without an inventory walk.
+`DiscoveredDevice.setback_events` decodes the tHA count (0, 2 or 4);
+reserved or unavailable codes map to `None`. Raw tRPC packets retain
+the original byte. The stock 482 starts an inventoried address at code 0
+and copies the two event bits from each native schedule announcement
+without checking the role. Zero does not prove the device lacks scheduling,
+and a positive count does not prove the device owns the schedule. Consult
+the native schedule role and setup to identify the owner.
 
 `await client.get_device_attributes(address)` reads that device's observed
 capability mask without requesting its identity or writing a setting. Zero
