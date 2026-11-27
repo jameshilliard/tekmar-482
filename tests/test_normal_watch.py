@@ -22,6 +22,7 @@ from tekmar_482 import (
     NormalPeerCapture,
     Packet,
     ProtocolError,
+    SnowmeltGroups,
     StatusRequest,
     Tekmar482Client,
     ThermostatMode,
@@ -73,6 +74,68 @@ def plant_report(wire: Wire, f: NativeFrame, *, traced: bool = True) -> None:
 
 
 class NormalWatchTests(unittest.IsolatedAsyncioTestCase):
+    async def test_snowmelt_pair_recovers_from_missed_timing_on_peer_report(
+        self,
+    ) -> None:
+        wire = Wire()
+        key = "030135077f0111022526"
+
+        async def paired_read() -> None:
+            await wire.expect(_CAP)
+            wire.feed(_SUPPORT)
+            await wire.expect("0110f04b54" + key)
+            wire.feed("0410f04b54" + key)
+
+        async def gateway() -> None:
+            await start(wire, "08")
+            await wire.expect(_CAP)
+            wire.feed(_SUPPORT)
+            await admit_read(wire, {(3, 0)})
+            for b, data in (
+                (0xD0, "0103"),  # Electric application and configured zone 3.
+                (0xC0, "0103"),
+                (0xC1, "0103"),
+                (0xC4, "00"),
+                (0x71, "030006"),
+                (0x72, "030000"),
+                (0x78, "030000"),
+            ):
+                wire.queue_packet(record(block(b, bytes.fromhex(data))))
+            wire.queue_packet(
+                record(
+                    frame(0x17E, bytes.fromhex("19051900002200001b0002230000290000")),
+                ),
+            )
+            plant_report(wire, identity(105801))
+            await paired_read()
+            wire.feed("0210f04b54 030405")  # Transmit fault: missed timing.
+            for b in (0xC2, 0xC3):
+                await admit_read(wire, {(3, b)})
+                wire.feed("020ff04b54 030305")
+            wire.queue_packet(record(frame(0x17E, bytes.fromhex("1a01190000"))))
+            await paired_read()
+            groups = frame(0x17E, bytes.fromhex("1902250400260600"))
+            wire.queue_packet(record(groups))
+            wire.feed("0210f04b54 030001000000 " + groups.body.hex())
+            wire.feed("0210f04b54 030100")
+            await restore(wire)
+
+        async with Tekmar482Client(wire) as client, asyncio.TaskGroup() as tasks:
+            tasks.create_task(gateway())
+            async with BridgeManagement(client).native_session([3]) as link:
+                result = await watch_native(
+                    link,
+                    [TEST_PATH],
+                    duration=0.2,
+                    schedules=False,
+                )
+        assert result.reads == 5 and wire.out.empty()
+        (device,) = result.state.snowmelt_devices
+        assert (
+            device.reported_groups == SnowmeltGroups(4, 6)
+            and device.setup.groups is None
+        )
+
     async def test_plant_probe_does_not_overtake_a_queued_mode_read(self) -> None:
         wire = Wire()
         plant = NativePath(3, 0x56, 0)

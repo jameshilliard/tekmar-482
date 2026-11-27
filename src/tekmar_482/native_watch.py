@@ -507,11 +507,16 @@ class _Watch:
         if record.message_id in (AIR_MEMBER, AIR_MASTER):
             self._retry_on_air(record)
         if self.snow is not None and record.port in self.queues:
+            idle_status = sender not in self.reading_status
+            groups = self.statuses.get((sender, SnowRead.GROUPS))
             self.snow.observe(
                 record,
                 self.latest,
-                attempted=sender not in self.reading_status
-                and (sender, SnowRead.MISSING) in self.statuses,
+                attempted=idle_status and (sender, SnowRead.MISSING) in self.statuses,
+                group_failed=idle_status
+                and groups is not None
+                and not groups.answered
+                and not groups.transmit_pending,
             )
 
     def _retry_on_air(self, frame: NativeFrame) -> None:

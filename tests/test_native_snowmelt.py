@@ -711,6 +711,44 @@ class SnowmeltWatchTests(unittest.IsolatedAsyncioTestCase):
         )
         assert result.reads == 3 and self.tx.empty()
 
+    async def test_group_watch_retries_once_on_new_telemetry_after_a_link_fault(
+        self,
+    ) -> None:
+        fault = Packet(
+            1,
+            bytes([2, SITE.port, TxStatus.FAILED, FailureReason.MISSED_TIMING]),
+        )
+        unrelated = NativePath(SITE.port, SITE.subnet, SITE.node ^ 1)
+        self.seed(include_groups=False)
+        self.rx(snow(ZONE, [(k, 0) for k in SnowmeltApplication.ELECTRIC.status_keys]))
+        task = asyncio.create_task(
+            watch_native(self.stream, [SITE], schedules=False, duration=0.26),
+        )
+        await self.boot()
+        await self.expect_group_query()
+        self.stream.feed(fault)
+        for b in (0xC2, 0xC3):
+            _, request = await self.next_send()
+            assert request.message_id == 0x2D7 and request.payload[:2] == bytes([b, 0])
+            self.stream.feed(fault)
+
+        self.rx(snow(ZONE, [(0x1B, 0x200)], unrelated))
+        await asyncio.sleep(0.02)
+        assert self.tx.empty()
+        self.rx(snow(SENSOR, [(0x19, 3)]))
+        await self.expect_group_query()
+        self.stream.feed(fault)
+        await asyncio.sleep(0.02)
+        self.rx(snow(ZONE, [(0x1B, 0x400)]))
+        self.rx(snow(SENSOR, [(0x19, 2)]))
+
+        result = await task
+        (device,) = result.state.snowmelt_devices
+        assert device.reported_groups is None and device.setup.groups is None
+        assert result.reads == 5 and self.tx.empty()
+        (batch,) = result.latest_statuses
+        assert batch.tx_result and batch.tx_result.reason is FailureReason.MISSED_TIMING
+
     async def test_inflight_status_does_not_cross_rebinding_or_block_another_port(
         self,
     ) -> None:

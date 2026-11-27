@@ -1022,7 +1022,10 @@ triggers an operating-state read, not an optimistic mode change.
 zone. It is separate from `device.setup.groups`, which reflects addressed
 registers. The watch asks for the pair once when the zone is established
 and the assignments are not already known. It uses the group registers if
-the pair is unavailable. Neither cached view authorizes a send.
+the pair is unavailable. After an incomplete exchange with a terminal link
+result, fresh valid telemetry from that controller can prompt one more
+paired read if assignments are still missing. There is no timer retry.
+Neither cached view authorizes a send.
 
 Use `device.setpoint(SnowmeltBlock.MELT_SETPOINT)` for the stored slab target,
 not the operating slab setpoint in a status report.

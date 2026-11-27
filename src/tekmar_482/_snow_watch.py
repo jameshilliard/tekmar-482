@@ -41,6 +41,7 @@ class SnowWatch:
         self._queue = queue
         self.current: dict[NativePath, NativeSnowmelt] = {}
         self._group_flags: dict[tuple[NativePath, int, int], int] = {}
+        self._group_retried: set[NativePath] = set()
         self._retry: dict[NativePath, tuple[bytes, int]] = {}
         self._setup_hints: set[tuple[NativePath, int, SnowmeltAddress]] = set()
         self.routes: dict[NativePath, int] = {}
@@ -48,6 +49,7 @@ class SnowWatch:
     def discard(self, path: NativePath) -> None:
         self.current.pop(path, None)
         self._retry.pop(path, None)
+        self._group_retried.discard(path)
         self.routes.pop(path, None)
         self._setup_hints = {h for h in self._setup_hints if h[0] != path}
         self._group_flags = {k: v for k, v in self._group_flags.items() if k[0] != path}
@@ -74,6 +76,7 @@ class SnowWatch:
             before.setup.primary,
         ) != (current.setup.application_raw, current.setup.primary):
             self._retry.pop(path, None)
+            self._group_retried.discard(path)
             self.routes[path] = self.routes.get(path, 0) + 1
             if self.query(path, SnowRead.GROUPS) is not None:
                 self._queue(path, SnowRead.GROUPS)
@@ -127,20 +130,26 @@ class SnowWatch:
         latest: Mapping[tuple[NativePath, int], NativeBlockBatch],
         *,
         attempted: bool,
+        group_failed: bool,
     ) -> None:
         path = NativePath.from_frame(frame)
         if frame.message_id == SNOW_REPORT:
             current = self.state.snowmelt(path)
             self._retry_setup(path, frame, current, latest)
-            if (
-                current is None
-                or not attempted
-                or not (missing := current.missing_keys)
-            ):
-                return
             # Either valid role proves the controller is transmitting, but the
             # request and its missing-key set still belong to the primary role.
-            if not any(channel.last_frame is frame for channel in current.channels):
+            if current is None or not any(
+                channel.last_frame is frame for channel in current.channels
+            ):
+                return
+            if (
+                group_failed
+                and path not in self._group_retried
+                and self.query(path, SnowRead.GROUPS) is not None
+            ):
+                self._group_retried.add(path)
+                self._queue(path, SnowRead.GROUPS)
+            if not attempted or not (missing := current.missing_keys):
                 return
             previous, remaining = self._retry.get(path, (b"", 0))
             if missing == previous and remaining > 1:
