@@ -283,8 +283,14 @@ commands have a backward-compatibility guarantee. Per-frame uptime and
 hardware timer readings are still 32-bit timestamps.
 
 Custom Normal mode obtains missing fields from the device on its own port.
-A changed demand, setback or active room target can trigger a targeted
-ModeSetting read; demand is not interpreted as configured mode. The gateway
+A tHA ModeSetting Request returns the thermostat's recent confirmed mode,
+even when another command is using its port. With a missing or invalidated
+sample, overlapping readers share a native heating-setup read. A change in
+heat/cool enablement, demand, setback or active target can trigger that read;
+none of these is itself a configured mode. Reporting publishes confirmed modes
+on enable and on change. A controller using `bridge.normal()` consumes these
+reports directly; the stock client retains targeted reads after related
+reports because stock firmware doesn't reliably push configured mode. The gateway
 does not poll the inventory on a quiet bus or pause all ports after
 `WaterCycleStart`. In Raw mode the frame is available as native plant
 telemetry. A passive Python watch (`source=None`) sends nothing.

@@ -1152,6 +1152,38 @@ class ControllerTest(unittest.IsolatedAsyncioTestCase):
         assert written_request_count(transport, TrpcMethod.MODE_SETTING) == 2
         transport.assert_complete()
 
+    async def test_custom_mode_push_does_not_trigger_an_additional_read(self) -> None:
+        transport = TraceReplayTransport(
+            [*start_steps(), update_step(TrpcMethod.REPORTING_STATE, state=0)],
+        )
+        controller = Tekmar482Controller(
+            Tekmar482Client(transport, reports_configured_mode=True),
+            mode_refresh_burst_window=0,
+        )
+        pushed = asyncio.Event()
+
+        def listener(data: AvailableInfo) -> None:
+            runtime = data.device_runtime(1201)
+            if runtime is not None and runtime.mode_setting == DeviceMode.OFF:
+                pushed.set()
+
+        controller.add_listener(listener)
+        await controller.start()
+        try:
+            with patch("tekmar_482.controller.ModeReads.trigger") as trigger:
+                transport.queue_message(
+                    report(TrpcMethod.ACTIVE_DEMAND, address=1201, demand=1),
+                )
+                transport.queue_message(
+                    report(TrpcMethod.MODE_SETTING, address=1201, mode=DeviceMode.OFF),
+                )
+                await asyncio.wait_for(pushed.wait(), timeout=1)
+                trigger.assert_not_called()
+        finally:
+            await controller.stop()
+        assert written_request_count(transport, TrpcMethod.MODE_SETTING) == 1
+        transport.assert_complete()
+
     async def test_controller_refreshes_mode_after_setpoint_report(self) -> None:
         transport = TraceReplayTransport(
             [

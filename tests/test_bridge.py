@@ -283,6 +283,7 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         async with listen(app) as endpoint, endpoint.connect() as wire:
             bridge = BridgeClient(wire)
             async with bridge.normal() as client:
+                assert client.reports_configured_mode
                 with self.assertRaises(ProtocolError):
                     await bridge.revision()
                 assert await client.get_inventory_addresses() == (23, 1102)

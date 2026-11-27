@@ -247,6 +247,7 @@ class BridgeClient:
             )
             async with Tekmar482Client(
                 transport,
+                reports_configured_mode=True,
                 readback_methods=frozenset(
                     {
                         TrpcMethod.MODE_SETTING,

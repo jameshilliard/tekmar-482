@@ -49,7 +49,7 @@ ErrorCallback = Callable[[BaseException], None]
 
 LOGGER = logging.getLogger(__name__)
 
-# 482 firmware updates cached thermostat mode from tN4 status frames but does not
+# Stock 482 firmware updates cached thermostat mode but does not
 # emit ModeSetting reports. A mode change can surface only as these adjacent
 # reports, so the controller performs one targeted ModeSetting read after them.
 MODE_REFRESH_TRIGGER_METHODS = {
@@ -572,6 +572,7 @@ class Tekmar482Controller:
                 self._mode_reads.confirmed(address)
             elif (
                 self._running
+                and not self.client.reports_configured_mode
                 and message.service is TrpcService.REPORT
                 and message.method in MODE_REFRESH_TRIGGER_METHODS
                 and (device := self.state.device(address)) is not None
