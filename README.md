@@ -633,6 +633,14 @@ setup fields (`02`, `24`, `25`) where the device supplies them. On a 402,
 not a measured energy reading. `energy_savings_hours` is time spent in the
 savings state. Missing or partial words are not substituted with zero.
 
+`state.peer_link_counters(path)` and `snapshot.peer_links` expose the peer's
+own bus error and event octets (`48`, `49`) and received-message word (`62`)
+when observed. The reported `port_id` is local to the peer; it isn't the
+gateway port in `path`. These aren't the gateway's 64-bit counters. An absent
+field is unknown, not zero. For automatic scans, the 483 provides a port
+selector only for reset controls on nonzero water buses. Other peers need
+an observed or explicit selector. No periodic counter reads are added.
+
 ### Stage commands
 
 Preview a staged heat demand request, start or end purge, or start or end

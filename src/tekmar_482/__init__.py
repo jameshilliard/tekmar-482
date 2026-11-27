@@ -218,6 +218,7 @@ from .native_line import (
     LineBroadcast,
 )
 from .native_monitor import NativeMonitor
+from .native_peer_link import PeerBusErrors, PeerBusEvents, PeerLinkCounters
 from .native_plant import PlantEquipment, WaterSample
 from .native_plant_registers import (
     EquipmentAvailability,
@@ -583,6 +584,9 @@ __all__ = [
     "Packet",
     "PacketTransport",
     "PanelState",
+    "PeerBusErrors",
+    "PeerBusEvents",
+    "PeerLinkCounters",
     "PlantEnable",
     "PlantEquipment",
     "PlantKind",

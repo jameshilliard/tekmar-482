@@ -3,7 +3,7 @@
 from collections.abc import Mapping
 from dataclasses import dataclass
 
-from .layouts import BLOCK_SELECTORS, MULTI_WEEK
+from .layouts import BLOCK_SELECTORS, MULTI_WEEK, LinkCounterBlock
 
 
 @dataclass(frozen=True, slots=True)
@@ -32,6 +32,10 @@ def block_selectors(block: int, product: NativeProduct | None, subnet: int,
     """Candidate wire arguments for one device. A live zero mask is not absent."""
     if block not in BLOCK_SELECTORS:
         return (None,)
+    if block in (LinkCounterBlock.BUS_ERRORS, LinkCounterBlock.BUS_EVENTS):
+        bus = subnet & 7
+        # SW 11's base Device lists no ports; only ResetControl supplies an index.
+        return (bus - 1,) if bus and product and product.family == "reset_control" else ()
     if product is not None:
         if product.model == "033" and block in MULTI_WEEK:
             return (0, 1, 2, 3)
@@ -43,8 +47,6 @@ def block_selectors(block: int, product: NativeProduct | None, subnet: int,
         if product.family == "reset_control":
             if block == 0x44:
                 return (0,) if product.model == "406" else (0, 1)
-            if block in (0x48, 0x49) and subnet & 7:
-                return ((subnet & 7) - 1,)
     if block in INSTANCE_AVAILABILITY and (mask := availability.get(INSTANCE_AVAILABILITY[block])) is not None:
         return tuple(i for i in range(8) if mask & (1 << i))
     return (0,)  # Reference probe, not evidence there are no other instances.

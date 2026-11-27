@@ -23,6 +23,7 @@ if TYPE_CHECKING:
     from ._observation import ObservationStream
     from .native_calendar import NativeCalendar
     from .native_io import IoDirectory
+    from .native_peer_link import PeerLinkCounters
     from .native_plant_registers import PlantRegisters
     from .native_routes import NativeDeviceRoutes
     from .native_setpoint import NativeSetpointControl
@@ -228,17 +229,29 @@ async def snow_group_from_args(
     )
 
 
-def _emit_fault(
-    path: NativePath,
-    fault: NativeFaultReport | None,
-    previous: dict[NativePath, NativeFaultReport],
-    emit: Callable[[object], None],
-) -> None:
-    if fault is not None and previous.get(path) != fault:
-        previous[path] = fault
-        emit({"network_fault": fault_fields(fault)})
-    elif fault is None and previous.pop(path, None) is not None:
-        emit({"network_fault_unknown": asdict(path)})
+class _PeerDiagnosticsChanges:
+    def __init__(self) -> None:
+        self.faults: dict[NativePath, NativeFaultReport] = {}
+        self.links: dict[NativePath, PeerLinkCounters] = {}
+
+    def emit(
+        self,
+        path: NativePath,
+        state: NativeState,
+        emit: Callable[[object], None],
+    ) -> None:
+        fault = state.fault_report(path)
+        if fault is not None and self.faults.get(path) != fault:
+            self.faults[path] = fault
+            emit({"network_fault": fault_fields(fault)})
+        elif fault is None and self.faults.pop(path, None) is not None:
+            emit({"network_fault_unknown": asdict(path)})
+        link = state.peer_link_counters(path)
+        if link is not None and self.links.get(path) != link:
+            self.links[path] = link
+            emit({"peer_link_counters": {**asdict(path), **asdict(link)}})
+        elif link is None and self.links.pop(path, None) is not None:
+            emit({"peer_link_counters_removed": asdict(path)})
 
 
 def _watch_selection(
@@ -261,12 +274,12 @@ async def watch_all_from_args(
     previous_plants: dict[NativePath, PlantRegisters] = {}
     previous_setpoints: dict[NativePath, NativeSetpointControl] = {}
     previous_io: dict[NativePath, tuple[str | None, tuple[IoDirectory, ...]]] = {}
-    previous_faults: dict[NativePath, NativeFaultReport] = {}
+    diagnostics = _PeerDiagnosticsChanges()
     network = _NetworkChanges((args.ports or ()) if args.shared_network else ())
 
     def changed(path: NativePath, state: NativeState) -> None:
         network.emit(path, state, emit)
-        _emit_fault(path, state.fault_report(path), previous_faults, emit)
+        diagnostics.emit(path, state, emit)
         identity = state.identity(path)
         model = identity.product.model if identity and identity.product else None
         if dirs := state.io_for(path):

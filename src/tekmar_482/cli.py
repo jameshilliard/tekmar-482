@@ -1034,6 +1034,7 @@ def _emit_derived(snapshot: NativeSnapshot, emit: Callable[[object], None]) -> N
         emit({"thermostat_sensors": sensor_fields(device)})
     state = snapshot.observed_state()
     _emit_io(state, emit)
+    _emit_peer_links(state, emit)
     for control in state.setpoint_controls:
         emit({"setpoint_control": setpoint_fields(control)})
     for path, plant in state.plant_configurations:
@@ -1055,6 +1056,11 @@ def _emit_io(
         model = identity.product.model if identity and identity.product else None
         key = "observed_io" if passive else "io_directory"
         emit({key: {**asdict(path), **io_fields(directory, model)}})
+
+
+def _emit_peer_links(state: NativeState, emit: Callable[[object], None]) -> None:
+    for path, link in state.peer_links:
+        emit({"peer_link_counters": {**asdict(path), **asdict(link)}})
 
 
 @asynccontextmanager
@@ -1478,6 +1484,7 @@ def _emit_capture_summary(
     if lines := observed.line_reports:
         emit({"line_reports": [line_fields(report) for report in lines]})
     _emit_io(observed, emit, passive=True)
+    _emit_peer_links(observed, emit)
     for control in observed.setpoint_controls:
         emit({"setpoint_control": setpoint_fields(control)})
     for path, plant in observed.plant_configurations:

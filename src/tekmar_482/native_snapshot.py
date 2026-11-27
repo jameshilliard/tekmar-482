@@ -27,6 +27,7 @@ if TYPE_CHECKING:
     from .native_discovery import NativeDevice
     from .native_identity import NativeIdentity
     from .native_io import IoDirectory, IoDirectoryRead
+    from .native_peer_link import PeerLinkCounters
     from .native_plant_registers import PlantRegisters
     from .native_sensors import SensorObservation
     from .native_setpoint import NativeSetpointControl
@@ -74,6 +75,10 @@ class NativeSnapshot:
     @property
     def io_directories(self) -> tuple[tuple[NativePath, IoDirectory], ...]:
         return self.observed_state().io_directories
+
+    @property
+    def peer_links(self) -> tuple[tuple[NativePath, PeerLinkCounters], ...]:
+        return self.observed_state().peer_links
 
     def observed_state(self) -> NativeState:
         """Project the reports from the scan without issuing further requests."""

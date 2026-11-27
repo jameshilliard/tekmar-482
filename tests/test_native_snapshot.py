@@ -102,6 +102,34 @@ class NativeSnapshotTests(unittest.IsolatedAsyncioTestCase):
         assert all(not batch.missing_nodes for batch in batches)
         assert len(batches) == len(set(self.requests))
 
+    async def test_counter_reads_use_model_or_observed_selectors_without_guessing(
+        self,
+    ) -> None:
+        self.identities = {
+            1: (102002, 1188),
+            2: (105801, 1226),
+            3: (102002, 1188),
+            4: (105801, 1226),
+        }
+        devices = (
+            NativeDevice(4, NativeAddress(0x21, 1)),
+            NativeDevice(4, NativeAddress(0x21, 2)),
+            NativeDevice(4, NativeAddress(0x20, 3)),
+            NativeDevice(
+                4,
+                NativeAddress(0x21, 4),
+                reported_blocks=frozenset({0x49}),
+                reported_selectors=frozenset({(0x49, 7)}),
+            ),
+        )
+        async with self.stream.receiving(self.rx.get), asyncio.timeout(2):
+            await read_native_devices(self.stream, devices)
+        assert [r for r in self.requests if r[2] in {0x48, 0x49, 0x62}] == [
+            (4, 0x21, 0x48, 0, 1),
+            (4, 0x21, 0x49, 0, 1),
+            (4, 0x21, 0x49, 7, 8),
+        ]
+
     async def test_unknown_model_and_reused_address_do_not_inherit_candidates(
         self,
     ) -> None:

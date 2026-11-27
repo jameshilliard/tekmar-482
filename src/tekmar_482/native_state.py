@@ -40,6 +40,7 @@ from .native_calendar import (
 )
 from .native_identity import NativeIdentity
 from .native_io import IoBook, IoDirectory, IoDirectoryRead
+from .native_peer_link import PeerLinkCounters
 from .native_plant_registers import (
     PLANT_REGISTERS,
     PlantRegisterBook,
@@ -318,6 +319,20 @@ class NativeState:
     def plant_configurations(self) -> tuple[tuple[NativePath, PlantRegisters], ...]:
         return tuple(
             (p, v) for p in self.paths if (v := self.plant_registers(p)) is not None
+        )
+
+    def peer_link_counters(self, path: NativePath) -> PeerLinkCounters | None:
+        """Project observed counter blocks without assuming peer support."""
+        if peer := self._peers.get(path):
+            return PeerLinkCounters.from_blocks(peer.blocks)
+        return None
+
+    @property
+    def peer_links(self) -> tuple[tuple[NativePath, PeerLinkCounters], ...]:
+        return tuple(
+            (p, counters)
+            for p in sorted(self._peers)
+            if (counters := self.peer_link_counters(p)) is not None
         )
 
     @property

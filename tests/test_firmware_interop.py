@@ -34,6 +34,9 @@ from tekmar_482 import (
     NativeState,
     NativeStatusQuery,
     NativeWriteStatus,
+    PeerBusErrors,
+    PeerBusEvents,
+    PeerLinkCounters,
     SceneResponse,
     SceneSetup,
     ScheduleBinding,
@@ -1061,6 +1064,35 @@ class FirmwareInteropTests(unittest.IsolatedAsyncioTestCase):
                 (0xE7, 0x1234),
             ]
             assert book.channels[0].frame.decoded["extension_hex"] == "e4"
+
+    async def test_peer_counters_use_the_device_local_selector(self) -> None:
+        script = (
+            _block(4, "2a 80000000", "0000", "6e72a209 00003f aa9601 b90402"),
+            _block(4, "2a 80000000", "4800", "6e72a206 480085 01fe07", "01"),
+            _block(4, "2a 80000000", "4900", "6e72a208 49001f 01 00 09 04 02", "01"),
+            _block(4, "2a 80000000", "6200", "6e72a207 62000f 34560080"),
+        )
+        async with _gateway(script) as manager:
+            identity = await manager.read_block_group(4, NativeBlockQuery(_PLANT, 0))
+            assert identity.require_report().decoded["model"] == "406"
+            reports = [
+                await manager.read_block_group(
+                    4,
+                    NativeBlockQuery(_PLANT, block, selector),
+                )
+                for block, selector in ((0x48, 1), (0x49, 1), (0x62, None))
+            ]
+            assert all(not report.missing_nodes for report in reports)
+            assert NativeSnapshot((identity, *reports), ()).peer_links == (
+                (
+                    NativePath(4, _PLANT.subnet, _PLANT.node),
+                    PeerLinkCounters(
+                        (PeerBusErrors(1, None, 254, None, None, None, None, 7),),
+                        (PeerBusEvents(1, 0, 9, 4, 2),),
+                        0x80005634,
+                    ),
+                ),
+            )
 
     async def test_setpoint_refuses_changed_application_and_checks_off_readback(
         self,

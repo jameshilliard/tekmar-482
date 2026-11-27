@@ -7,6 +7,12 @@ MULTI_WEEK = range(0x38, 0x3c)
 H_UNAVAILABLE = (0x4000, 0x8000, 0xc000, 0xffff)
 
 
+class LinkCounterBlock(IntEnum):
+    BUS_ERRORS = 0x48
+    BUS_EVENTS = 0x49
+    RECEIVED_MESSAGES = 0x62
+
+
 class SnowmeltBlock(IntEnum):
     """Addressed native blocks, not zone-status keys or tRPC methods."""
 
@@ -126,9 +132,10 @@ FIXED_BLOCKS: dict[int, FixedLayout] = {
     0x45: (("boiler_number", 1), ("minimum_output", 2), ("maximum_output", 2)),
     0x46: _octets("heating_source_id") + _PID,
     0x47: _octets("cooling_source_id") + _PID,
-    0x48: _octets("port_id", "stuffing_errors", "crc_failures", "missing_crc_delimiter", "missing_ack",
-                  "missing_ack_delimiter", "missing_eof", "dominant_bit_errors"),
-    0x49: _octets("port_id", "local_port_busy", "remote_device_busy", "arbitration_losses", "error_event_count"),
+    LinkCounterBlock.BUS_ERRORS: _octets("port_id", "stuffing_errors", "crc_failures", "missing_crc_delimiter",
+                                        "missing_ack", "missing_ack_delimiter", "missing_eof", "dominant_bit_errors"),
+    LinkCounterBlock.BUS_EVENTS: _octets("port_id", "local_port_busy", "remote_device_busy", "arbitration_losses",
+                                        "error_event_count"),
     0x4a: _octets("plant_mode_setting", "stage3_fire_delay", "staging_selection"),
     0x4b: (("energy_usage_raw", 2),),
     0x4c: (("energy_savings_time", 2),),
@@ -142,7 +149,7 @@ FIXED_BLOCKS: dict[int, FixedLayout] = {
     0x58: _octets("floor_cooling_enable"),
     0x5a: (("tank_id", 1), ("tank_pump_hours", 2)),
     0x5b: _octets("available_tank_pumps", "enabled_tank_pumps"),
-    0x62: (("received_message_count", 4),),
+    LinkCounterBlock.RECEIVED_MESSAGES: (("received_message_count", 4),),
     SnowmeltBlock.MELT_SETPOINT: (("melt_setpoint", 2),),
     SnowmeltBlock.IDLE_SETPOINT: (("idle_setpoint", 2),),
     SnowmeltBlock.WATER_SENSITIVITY: (("water_sensitivity", 1),),
