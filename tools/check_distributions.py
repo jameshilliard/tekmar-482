@@ -4,7 +4,7 @@ import argparse
 import tarfile
 from pathlib import Path, PurePosixPath
 
-from tools.bundle_firmware import SOURCE
+from tools.bundle_firmware import ROOT, SOURCE
 
 
 def check(paths: list[str], image: bytes) -> None:
@@ -38,6 +38,12 @@ def main() -> None:
         raise ValueError(msg)
     with tarfile.open(sdist) as source:
         paths = source.getnames()
+        name = f"{sdist.name.removesuffix('.tar.gz')}/LICENSE"
+        license_file = source.extractfile(name) if name in paths else None
+        expected_license = (ROOT / "LICENSE").read_bytes()
+        if license_file is None or license_file.read() != expected_license:
+            msg = "source distribution must include the repository LICENSE"
+            raise ValueError(msg)
         (binary,) = (p for p in paths if p.endswith("/tekmar_482/_images/bridge.bin"))
         stream = source.extractfile(binary)
         if stream is None:
