@@ -415,6 +415,62 @@ class FirmwareInteropTests(unittest.IsolatedAsyncioTestCase):
             report = await manager.read_block(port, NativeBlockQuery(moved, 0))
             assert report.message.source == moved
 
+    async def test_indexed_timer_edit_uses_its_resolved_owner(self) -> None:
+        local = NativePath(3, 0x45, 5)
+        mirror = NativePath(2, local.subnet, local.node)
+        ports = (local.port, mirror.port)
+        identify = "6e745149 00003f ef8a01 950402"  # 033 timer.
+        past = "6e74514b 3800ff 7a 0106090c0f1215"
+        before = "6e74514b 3800ff 7a 0306090c0f1215"
+        readback = "6e745145 380003 7a 30"
+
+        def read(port: int, block: str, answer: str, selector: str = "00") -> Exchange:
+            return _block(port, "45 10000000", block, answer, selector)
+
+        script = (
+            (3, "3f700000", ("7ff457c0",)),
+            (2, "3f700000", ("7ff677c0",)),
+            read(2, "0000", identify),
+            read(2, "3800", past, "02"),
+            read(3, "0000", identify),
+            read(3, "3800", before, "02"),
+            read(3, "0000", identify),
+            read(3, "3800", before, "02"),
+            read(3, "3800", before, "02"),
+            (3, "6df0000c 4505 3800 7a 3006090c0f1215", ()),
+            read(3, "3800", readback, "02"),
+        )
+        state = NativeState()
+        async with _gateway(script) as manager, manager.peer_capture(ports) as capture:
+            for port in ports:
+                present = await manager.read_status(
+                    port,
+                    NativeStatusQuery(StatusRequest.MASTER),
+                )
+                assert present.answered
+            query = NativeBlockQuery(local.address, 0x38, selector=2)
+            for path in (mirror, local):
+                await manager.read_block(path.port, NativeBlockQuery(path.address, 0))
+                await manager.read_block(path.port, query)
+            async with asyncio.timeout(5):
+                while any(state.block(p, 0x38, 2) is None for p in (local, mirror)):
+                    state.observe(await capture.read())
+            owner = state.system_schedule(3, ports=ports).owner
+            assert owner and owner.config.setup.body == bytes.fromhex(before)
+            assert owner.config.setup.port == local.port
+            expected = state.identity(local)
+            assert expected is not None
+            result = await manager.write_schedule_time(
+                owner.config.setup.port,
+                owner.config.target,
+                ScheduleChange(ScheduleEvent.OCCUPIED, Day.MONDAY, time(8)),
+                expected_identity=expected,
+                preview=False,
+            )
+            assert result.status is NativeWriteStatus.CONFIRMED
+            assert result.readback
+            assert result.readback.require_report().body == bytes.fromhex(readback)
+
     async def test_snowmelt_uses_configured_zone_and_separate_group(self) -> None:
         def read(block: str, reply: str) -> Exchange:
             return _block(2, "14 04000000", block, reply)

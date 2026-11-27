@@ -44,7 +44,7 @@ from .native_plant_registers import (
     has_plant_registers,
 )
 from .native_routes import device_routes
-from .native_schedule import ScheduleDirectory
+from .native_schedule import ScheduleDirectory, SystemSchedule
 from .native_setpoint import SETPOINT_BLOCKS, NativeSetpointControl, SetpointBook
 from .native_snowmelt import NativeSnowmelt, SnowmeltChannels, SnowmeltConfiguration
 from .native_targets import ADJUSTMENT_BLOCKS, AdjustmentState, ThermostatAdjustments
@@ -58,6 +58,7 @@ if TYPE_CHECKING:
     from ._native_payloads.line import LineValue
     from ._water_monitor import WaterSource
     from .native_routes import NativeDeviceRoutes
+    from .native_schedule import NativeWeeklySchedule
     from .native_snowmelt import SnowmeltChannel
     from .native_status import NativeStatusBatch
     from .raw import CaptureRecord
@@ -380,6 +381,29 @@ class NativeState:
                 for p in self.paths
                 if (calendar := self.schedule(p)) is not None
                 for w in calendar.schedules
+            ),
+        )
+
+    def system_schedule(self, number: int, *, ports: Iterable[int]) -> SystemSchedule:
+        """Resolve schedule ownership on identified paths in one known network."""
+        scope = frozenset(ports)
+        physical = self.schedule_directory.system(number, ports=scope)
+        preferred = {r.address: r.preferred for r in self.device_routes(ports=scope)}
+
+        def local(week: NativeWeeklySchedule) -> bool:
+            path = NativePath.from_frame(week.config.setup)
+            return path == preferred.get(path.address)
+
+        masters = tuple(w for w in physical.masters if local(w))
+        confirmed = {NativePath.from_frame(w.config.setup).address for w in masters}
+        return SystemSchedule(
+            number,
+            masters,
+            tuple(w for w in physical.members if local(w)),
+            tuple(
+                w
+                for w in physical.masters
+                if NativePath.from_frame(w.config.setup).address not in confirmed
             ),
         )
 

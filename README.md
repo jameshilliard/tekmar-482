@@ -961,10 +961,14 @@ a write.
 
 `state.schedule(path).signals` retains the reported current and next phases
 per advertised system. These are not proof that a device owns a table or that
-a member uses that phase locally. Use `state.schedule_directory.system(n,
-ports=(port,)).owner` to resolve a unique confirmed owner within a scope.
-Missing rows are unknown, not disabled. Passive rows expose their `report`
-without inventing a transmit result.
+a member uses that phase locally. Use `state.system_schedule(n, ports=(0, 3))`
+for ports known to share a network. It selects only the preferred path's
+schedule and keeps unverified master claims in `unresolved_masters`. An
+unverified distinct claim or multiple confirmed masters leaves `owner`
+unset. Use `state.schedule_directory.system(n, ports=(port,))` for physical
+observations without route selection. Calendar rows are never combined
+across ports. Missing rows are unknown, not disabled. Passive rows expose
+their `report` without inventing a transmit result.
 
 A single 654 can report a zone **and** a sensor. `device.channels` keeps
 their words separate, even if both use the same number. `device.primary`

@@ -3,6 +3,7 @@ import unittest
 
 from tekmar_482 import (
     CaptureGap,
+    GatewayTraceGap,
     NativeCalendar,
     NativeFrame,
     NativeMessage,
@@ -23,6 +24,7 @@ _WEEK = bytes(range(1, 8))
 _TIMER = 101103
 _THERMOSTAT = 105103
 _OTHER = NativePath(2, TEST_PATH.subnet, TEST_PATH.node)
+_MASTER = NativePath(TEST_PATH.port, TEST_PATH.subnet, 0)
 
 
 def setup(
@@ -77,6 +79,59 @@ def calendar(state: NativeState, path: NativePath = TEST_PATH) -> NativeCalendar
 
 
 class NativeCalendarTests(unittest.TestCase):
+    def test_shared_schedule_uses_only_the_preferred_paths_table(self) -> None:
+        state = NativeState()
+        scope = (_OTHER.port, TEST_PATH.port)
+        state.observe(frame(0x3FF, b"", _MASTER))
+        for path in (TEST_PATH, _OTHER):
+            state.observe(identity(_THERMOSTAT, z=14, path=path))
+        state.observe(setup(ScheduleBinding.MASTER_1, _OTHER))
+        state.observe(block(0x10, b"\x7f" + _WEEK, _OTHER))
+        forwarded = state.system_schedule(1, ports=scope)
+        assert forwarded.owner is None and len(forwarded.unresolved_masters) == 1
+
+        state.observe(setup(ScheduleBinding.MASTER_1))
+        both = state.system_schedule(1, ports=scope)
+        assert both.owner and not both.owner.rows
+        assert both.owner.config.setup.port == TEST_PATH.port
+        assert not both.unresolved_masters
+        assert state.schedule_directory.system(1, ports=scope).owner is None
+
+        days = bytes(range(12, 19))
+        state.observe(block(0x10, b"\x7f" + days))
+        owner = state.system_schedule(1, ports=scope).owner
+        assert owner and owner.rows[0].days == tuple(days)
+        assert owner.rows[0].report and owner.rows[0].report.port == TEST_PATH.port
+        state.observe(GatewayTraceGap(1, 1 << TEST_PATH.port))
+        lost = state.system_schedule(1, ports=scope)
+        assert lost.owner is None and len(lost.unresolved_masters) == 1
+
+    def test_shared_schedule_keeps_distinct_masters_and_resolves_members(self) -> None:
+        state = NativeState()
+        scope = (_OTHER.port, TEST_PATH.port)
+        distinct = NativePath(_OTHER.port, TEST_PATH.subnet ^ 0x20, TEST_PATH.node)
+        member = NativePath(TEST_PATH.port, TEST_PATH.subnet, TEST_PATH.node + 1)
+        copied = NativePath(_OTHER.port, member.subnet, member.node)
+        for path, binding in (
+            (TEST_PATH, ScheduleBinding.MASTER_1),
+            (distinct, ScheduleBinding.MASTER_1),
+            (member, ScheduleBinding.MEMBER_1),
+            (copied, ScheduleBinding.MEMBER_1),
+        ):
+            state.observe(identity(_THERMOSTAT, path=path))
+            state.observe(setup(binding, path))
+        state.observe(frame(0x3FF, b"", _MASTER))
+        ambiguous = state.system_schedule(1, ports=scope)
+        assert len(ambiguous.masters) == len(ambiguous.unresolved_masters) == 1
+        assert ambiguous.owner is None
+        (remote,) = ambiguous.members
+        assert NativePath.from_frame(remote.config.setup) == member
+
+        state.observe(frame(0x3FF, b"", NativePath(distinct.port, distinct.subnet, 0)))
+        confirmed = state.system_schedule(1, ports=scope)
+        assert len(confirmed.masters) == 2 and confirmed.owner is None
+        assert not confirmed.unresolved_masters
+
     def test_phases_do_not_change_ownership_or_prove_a_setback(self) -> None:
         state = NativeState()
         state.observe(identity(_THERMOSTAT, 13))

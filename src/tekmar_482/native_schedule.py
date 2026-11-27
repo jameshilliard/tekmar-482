@@ -247,11 +247,14 @@ class SystemSchedule:
     number: int
     masters: tuple[NativeWeeklySchedule, ...]
     members: tuple[NativeWeeklySchedule, ...]
+    unresolved_masters: tuple[NativeWeeklySchedule, ...] = ()
 
     @property
     def owner(self) -> NativeWeeklySchedule | None:
         """No owner is implied by silence, or by competing claims."""
-        return self.masters[0] if len(self.masters) == 1 else None
+        if len(self.masters) == 1 and not self.unresolved_masters:
+            return self.masters[0]
+        return None
 
 
 type ScheduleKey = tuple[int, int | None]
