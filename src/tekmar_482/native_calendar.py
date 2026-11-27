@@ -6,7 +6,12 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from ._native_payloads.layouts import MULTI_WEEK
-from ._native_payloads.schedules import SETUP_BLOCK, SINGLE_WEEK, ScheduleProfile
+from ._native_payloads.schedules import (
+    DAY_NAMES,
+    SETUP_BLOCK,
+    SINGLE_WEEK,
+    ScheduleProfile,
+)
 from .native_schedule import (
     dependent_rows,
     schedule_configurations,
@@ -20,8 +25,15 @@ if TYPE_CHECKING:
     from .native_identity import NativeIdentity
     from .native_schedule import NativeWeeklySchedule, ScheduleKey
 
-SCHEDULE_BLOCKS = frozenset((SETUP_BLOCK, *SINGLE_WEEK, *MULTI_WEEK))
+_WEEKLY_ROWS = frozenset((*SINGLE_WEEK, *MULTI_WEEK))
+SCHEDULE_BLOCKS = _WEEKLY_ROWS | {SETUP_BLOCK}
 _SLOTS = range(4)
+_DAY_FIELDS = tuple(name + "_raw" for name in DAY_NAMES)
+
+
+def _has_weekdays(frame: NativeFrame) -> bool:
+    fields = frame.decoded
+    return all(day in fields for day in _DAY_FIELDS)
 
 
 @dataclass(frozen=True, slots=True)
@@ -67,6 +79,14 @@ class ScheduleBook:
             return False
         for row in superseded_rows(key, old, frame):
             self.invalidate(row)
+        if (
+            key[0] in _WEEKLY_ROWS
+            and old is not None
+            and _has_weekdays(old)
+            and not _has_weekdays(frame)
+        ):
+            # A compact confirmation can replace a full row even without a seen write.
+            self.revisions[key] = self.revisions.get(key, 0) + 1
         self.blocks[key] = frame
         return True
 
@@ -123,14 +143,24 @@ class ScheduleBook:
             return ()
         needed: dict[ScheduleKey, None] = {}
         if product.model == "033":
-            needed.update(((MULTI_WEEK.start, s), None) for s in _SLOTS)
-        elif SETUP_BLOCK in product.candidate_blocks or self.signals:
+            needed.update(
+                ((MULTI_WEEK.start, s), None)
+                for s in _SLOTS
+                if (MULTI_WEEK.start, s) not in self.blocks
+            )
+        elif (SETUP_BLOCK in product.candidate_blocks or self.signals) and (
+            SETUP_BLOCK,
+            None,
+        ) not in self.blocks:
             needed[SETUP_BLOCK, None] = None
         for cfg in schedule_configurations(profile, self.blocks):
             for event in cfg.active_events:
                 q = cfg.target.query(event)
-                needed[q.block_id, q.selector] = None
-        return tuple(k for k in needed if k not in self.blocks)
+                key = q.block_id, q.selector
+                row = self.blocks.get(key)
+                if row is None or not _has_weekdays(row):
+                    needed[key] = None
+        return tuple(needed)
 
     def snapshot(
         self,

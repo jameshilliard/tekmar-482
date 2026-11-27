@@ -72,7 +72,7 @@ if TYPE_CHECKING:
     from .client import Tekmar482Client
     from .native import NativeBlockQuery, NativeFrame, NativeMessage
     from .native_identity import NativeIdentity
-    from .native_schedule import ScheduleChange, ScheduleTarget
+    from .native_schedule import ScheduleChange, ScheduleConfiguration, ScheduleTarget
     from .native_schedule_setup import ScheduleSetupChange, ScheduleSetupResult
     from .native_setpoint import SetpointTargetChange
     from .native_snow_control import SnowmeltGroupResult, SnowmeltOperation
@@ -733,6 +733,7 @@ class BridgeManagement(_Management):
         change: ScheduleSetupChange,
         *,
         expected_binding: ScheduleBinding | None = None,
+        expected_config: ScheduleConfiguration | None = None,
         expected_identity: NativeIdentity | None = None,
         timeout: float = DEFAULT_BLOCK_TIMEOUT,
         preview: bool = True,
@@ -748,6 +749,7 @@ class BridgeManagement(_Management):
                 target,
                 change,
                 expected_binding=expected_binding,
+                expected_config=expected_config,
                 preview=preview,
             )
 

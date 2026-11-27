@@ -196,6 +196,7 @@ class NativeCalendarTests(unittest.TestCase):
         state.observe(block(0x10, bytes.fromhex("01 90")))
         week = calendar(state).schedules[0]
         assert not week.table_complete and week.rows[0].days == (144,) + (None,) * 6
+        assert calendar(state).missing_blocks == ((0x10, None),)
         state.observe(block(15, bytes.fromhex("0f 02 06 03 02")))
         assert not calendar(state).schedules[0].rows
         assert len(calendar(state).missing_blocks) == 4
@@ -374,6 +375,9 @@ class LiveCalendarTests(unittest.IsolatedAsyncioTestCase):
             self.rx(block(b, b"\x7f" + _WEEK))
         dest = bytes([TEST_PATH.subnet, TEST_PATH.node, 0x13, 0])
         self.rx(frame(0x2DF, dest + bytes(7), NativePath(TEST_PATH.port, 0, 0)))
+        self.rx(
+            block(0x13, bytes.fromhex("01 90")),
+        )  # Compact readback before the monitor can refresh.
         await self.query(0x13)
         self.ack()
         self.rx(block(0x13, b"\x7f" + bytes([144] * 7)))
@@ -385,6 +389,38 @@ class LiveCalendarTests(unittest.IsolatedAsyncioTestCase):
             and view.schedules[0].config.binding is ScheduleBinding.ZONE
         )
         assert view.schedules[0].rows[-1].days == (144,) * 7
+
+    async def test_partial_weekday_reply_is_not_periodically_retried(self) -> None:
+        watch = asyncio.create_task(
+            watch_native(
+                self.stream,
+                [TEST_PATH],
+                duration=0.3,
+                timeout=0.12,
+                setpoint_settings=False,
+            ),
+        )
+        await self.query(0)
+        self.ack()
+        self.rx(identity(101102))
+        await self.query(0x0F)
+        self.ack()
+        self.rx(setup(ScheduleBinding.ZONE))
+        for b in (0x10, 0x13):
+            await self.query(b)
+            self.ack()
+            self.rx(block(b, b"\x7f" + _WEEK))
+
+        # An unobserved write left only a new Monday value in the capture.
+        self.rx(block(0x13, bytes.fromhex("01 90")))
+        await self.query(0x13)
+        self.ack()
+        self.rx(block(0x13, bytes.fromhex("03 90 02")))
+        done = await watch
+        assert self.tx.empty() and done.reads == 5
+        view = calendar(done.state)
+        assert view.missing_blocks == ((0x13, None),)
+        assert view.schedules[0].rows[-1].days == (144, 2, None, None, None, None, None)
 
     async def test_capture_gap_discards_query_and_reidentifies_replacement(
         self,

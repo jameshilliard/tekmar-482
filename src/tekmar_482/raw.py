@@ -35,7 +35,7 @@ if TYPE_CHECKING:
     from .management import ErrorReporting
     from .native import NativeAddress, NativeBlockQuery, NativeTargets
     from .native_identity import NativeIdentity
-    from .native_schedule import ScheduleChange, ScheduleTarget
+    from .native_schedule import ScheduleChange, ScheduleConfiguration, ScheduleTarget
     from .native_schedule_setup import ScheduleSetupChange, ScheduleSetupResult
     from .native_setpoint import SetpointTargetChange
     from .native_snow_control import SnowmeltGroupResult, SnowmeltOperation
@@ -437,6 +437,7 @@ class BridgeStream(NativeReader, Protocol):
         *,
         source: NativeAddress,
         expected_binding: ScheduleBinding | None = None,
+        expected_config: ScheduleConfiguration | None = None,
         expected_identity: NativeIdentity | None = None,
         timeout: float = 20,
         preview: bool = True,
@@ -766,6 +767,7 @@ class RawDispatcher:
         *,
         source: NativeAddress,
         expected_binding: ScheduleBinding | None = None,
+        expected_config: ScheduleConfiguration | None = None,
         expected_identity: NativeIdentity | None = None,
         timeout: float = 20,
         preview: bool = True,
@@ -783,6 +785,7 @@ class RawDispatcher:
                 target,
                 change,
                 expected_binding=expected_binding,
+                expected_config=expected_config,
                 preview=preview,
             )
 

@@ -383,11 +383,19 @@ async def edit_schedule_setup(
     change: ScheduleSetupChange,
     *,
     expected_binding: ScheduleBinding | None,
+    expected_config: ScheduleConfiguration | None,
     preview: bool,
 ) -> ScheduleSetupResult:
     if expected_binding is not None:
         require_enum(expected_binding, ScheduleBinding)
-    elif not preview:
+    if expected_config is not None:
+        if expected_config.target != target:
+            msg = "the expected schedule configuration belongs to a different target"
+            raise ValueError(msg)
+        if expected_binding is not None and expected_binding != expected_config.binding:
+            msg = "the expected assignment conflicts with the expected configuration"
+            raise ValueError(msg)
+    elif expected_binding is None and not preview:
         msg = "applying schedule setup requires the expected current assignment"
         raise ValueError(msg)
     identity = await editor.identification(target.address)
@@ -396,6 +404,12 @@ async def edit_schedule_setup(
         msg = "identify the device before changing schedule setup"
         raise ValueError(msg)
     config, setup = await read_schedule_configuration(editor.read, target, profile)
+    if expected_config is not None and (
+        config.profile != expected_config.profile
+        or config.setup.port != expected_config.setup.port
+        or config.setup.message.payload != expected_config.setup.message.payload
+    ):
+        return ScheduleSetupResult(NativeWriteStatus.BASELINE_CHANGED, config)
     current = config.binding
     if current is None:
         msg = "device did not provide a known schedule assignment"

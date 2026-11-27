@@ -694,7 +694,8 @@ preview = await stream.write_schedule_time(port, target, change, source=source, 
 ```
 
 Calendar rows retain raw ten-minute slots (144 = disabled), including unknown
-codes. Missing times and conflicting timer headers mark a table incomplete. `dump` and
+codes. `row.time_on(Day.MONDAY)` returns a time only for a known enabled slot.
+Missing times and conflicting timer headers mark a table incomplete. `dump` and
 `read-device` also assemble calendars from the block replies they already
 received. Given a native snapshot, `snapshot.schedule_directory.system(2,
 ports=(0, 1))` returns observed masters and members within those lines;
@@ -739,7 +740,9 @@ master bit. Remote enabling or disabling of timer slots is not established.
 In Python use `await manager.configure_schedule(port, target,
 ScheduleSetupChange(binding=ScheduleBinding.ZONE, times=(change,)))`.
 Preview is the default. Pass `preview=False` and `expected_binding` to
-apply; Raw additionally takes `source=`. The client rechecks its baseline,
+apply; Raw additionally takes `source=`. An interactive client can pass
+`expected_config=week.config` instead to reject a changed assignment, format
+or indexed timer setup before planning an edit. The client rechecks its baseline,
 and Normal firmware also guards each write. A fresh matching readback, not
 a link ACK, verifies a step. tN4 has no atomic multi-block update. A failure
 stops the plan and returns the completed or attempted steps and remaining

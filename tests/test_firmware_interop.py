@@ -579,6 +579,8 @@ class FirmwareInteropTests(unittest.IsolatedAsyncioTestCase):
         script = (
             identify,
             setup,
+            identify,
+            setup,
             wake,
             sleep,
             identify,
@@ -593,16 +595,23 @@ class FirmwareInteropTests(unittest.IsolatedAsyncioTestCase):
             read("0f00", "6e723148 0f001d 01ed030100"),
         )
         async with _gateway(script) as manager:
+            target = ScheduleTarget(_THERMOSTAT)
+            before = await read_weekly_schedule(
+                manager,
+                3,
+                target,
+                source=NativeAddress(0, 0),
+            )
             result = await manager.configure_schedule(
                 3,
-                ScheduleTarget(_THERMOSTAT),
+                target,
                 ScheduleSetupChange(
                     binding=ScheduleBinding.ZONE,
                     times=(
                         ScheduleChange(ScheduleEvent.OCCUPIED, Day.MONDAY, time(7, 30)),
                     ),
                 ),
-                expected_binding=ScheduleBinding.NONE,
+                expected_config=before.config,
                 expected_identity=NativeIdentity(105102, 1222, 2, None),
                 preview=False,
             )

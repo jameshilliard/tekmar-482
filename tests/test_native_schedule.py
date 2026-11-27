@@ -285,6 +285,9 @@ class NativeScheduleTests(unittest.IsolatedAsyncioTestCase):
         assert week.rows[1].days == (None,) * 7 and week.rows[1].report is None
         assert week.rows[1].batch is not None and not week.rows[1].batch.reports
         assert week.rows[2].days == (144,) * 7 and week.rows[2].complete
+        assert week.rows[1].time_on(Day.MONDAY) is None
+        assert week.rows[2].time_on(Day.MONDAY) is None
+        assert week.rows[-1].time_on(Day.MONDAY) == time(0, 30)
 
     async def test_schedule_setup_stages_rows_before_activating_a_zone(self) -> None:
         self.identity(105102, 3)  # 553 with the five-byte positional setup.
@@ -338,6 +341,44 @@ class NativeScheduleTests(unittest.IsolatedAsyncioTestCase):
             after.rows[0].days[Day.MONDAY] == 45
             and after.rows[-1].days[Day.SUNDAY] == 144
         )
+
+    async def test_expected_configuration_prevents_grouping_changed_before_read(
+        self,
+    ) -> None:
+        self.identity(105102, 3)
+        self.blocks[0xF, 0] = bytes.fromhex("1d 01ed030100")
+        for block in (0x10, 0x13):
+            self.blocks[block, 0] = b"\x7f" + b"\x90" * 7
+        before = await read_weekly_schedule(self.stream, 1, _TARGET, source=_HOST)
+        change = ScheduleSetupChange(
+            times=(ScheduleChange(ScheduleEvent.OCCUPIED, Day.WEDNESDAY, time(7, 30)),),
+        )
+
+        self.blocks[0xF, 0] = bytes.fromhex("1d 01ed000100")
+        self.requests.clear()
+        rejected = await self.stream.configure_schedule(
+            1,
+            _TARGET,
+            change,
+            source=_HOST,
+            expected_config=before.config,
+            preview=False,
+        )
+        assert rejected.status is NativeWriteStatus.BASELINE_CHANGED
+        assert rejected.before.cycle is ScheduleCycle.DAILY and not self.updates
+        assert self.requests == [(0, 0), (0xF, 0)]
+
+        self.blocks[0xF, 0] = bytes.fromhex("1d 01ed030100")
+        result = await self.stream.configure_schedule(
+            1,
+            _TARGET,
+            change,
+            source=_HOST,
+            expected_config=before.config,
+            preview=False,
+        )
+        assert result.status is NativeWriteStatus.CONFIRMED
+        assert [m.payload.hex() for m in self.updates] == ["2305100090902d90909090"]
 
     async def test_schedule_setup_refuses_ambiguous_days_and_stale_roles(self) -> None:
         self.identity(105102, 3)

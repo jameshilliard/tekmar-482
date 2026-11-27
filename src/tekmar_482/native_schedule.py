@@ -20,7 +20,7 @@ from ._native_payloads.schedules import (
 )
 from ._native_payloads.writes import BlockPatch, NativeField
 from .constants import DEFAULT_BLOCK_TIMEOUT, TN4_PORTS
-from .native import NativeBlockQuery, require_enum, schedule_slot
+from .native import NativeBlockQuery, require_enum, schedule_slot, schedule_time
 from .native_write import NativeWriteStatus
 
 if TYPE_CHECKING:
@@ -190,6 +190,14 @@ class ScheduleRow:
     batch: NativeBlockBatch | None
     days: tuple[int | None, ...]
     matching_header: bool
+
+    def time_on(self, day: Day) -> time | None:
+        """Return a known enabled time; use days to distinguish raw unknowns."""
+        require_enum(day, Day)
+        slot = self.days[day]
+        return (
+            schedule_time(slot) if slot is not None and slot <= _DISABLED_SLOT else None
+        )
 
     @property
     def complete(self) -> bool:
