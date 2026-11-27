@@ -4,7 +4,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from enum import IntEnum
 
-from .codec import Fields, Reader, temp
+from .codec import Fields, Reader, fahrenheit, temp
 from .layouts import SETPOINT_FIELDS
 
 FAN_STATUS = 0x25f
@@ -12,6 +12,11 @@ SLAB_STATUS = 0x26f
 HUMIDITY_STATUS = 0x323
 FAN_SETUP = 0x08
 HUMIDITY_SETUP = 0xa3
+_PERCENT_MAX = 100
+_DEGE_UNAVAILABLE = 0xff
+_TARGET_TEMP_STEP = 0.5
+_HUMIDITY_LIMITED_MODELS = frozenset({"553", "557"})
+_HUMIDITY_RANGE = range(20, 81)
 
 
 def _integer(fields: Mapping[str, object], name: str) -> int | None:
@@ -20,7 +25,7 @@ def _integer(fields: Mapping[str, object], name: str) -> int | None:
 
 
 def _percent(raw: int | None) -> int | None:
-    return raw if raw is not None and 0 <= raw <= 100 else None
+    return raw if raw is not None and 0 <= raw <= _PERCENT_MAX else None
 
 
 @dataclass(frozen=True, slots=True)
@@ -40,6 +45,14 @@ class FanDuctStatus:
     @property
     def fan2(self) -> int:
         return self.flags >> 2 & 3
+
+    @property
+    def duct_temperature_f(self) -> float | None:
+        return fahrenheit(self.duct_raw)
+
+    @property
+    def coil_temperature_f(self) -> float | None:
+        return fahrenheit(self.coil_raw)
 
     def fields(self) -> Fields:
         return {"fan1": self.fan1, "fan2": self.fan2, "optimum_start": self.flags >> 4 & 3,
@@ -61,6 +74,10 @@ class SlabStatus:
     def primary(self) -> bool:
         # J1196J at 0x6214 tests the entire byte, not just the low status bits.
         return self.flags < 2
+
+    @property
+    def temperature_f(self) -> float | None:
+        return fahrenheit(self.current_raw)
 
     def fields(self) -> Fields:
         return {"slab_status": self.flags & 7, "reserved": self.flags >> 3, "primary_target": self.primary} | (
@@ -122,11 +139,41 @@ class ThermostatTarget(IntEnum):
     def temperature(self) -> bool:
         return self in (self.HEAT, self.COOL, self.FLOOR)
 
+    def step(self, model: str) -> float:
+        """Smallest representable change in Celsius or physical percent."""
+        if self.temperature:
+            return _TARGET_TEMP_STEP
+        return fan_step(model) if self is self.FAN else 1
+
+    def bounds(self, model: str) -> tuple[float, float]:
+        """Outer bounds in physical units, before any device-reported limits."""
+        if self.temperature:
+            return _TARGET_TEMP_STEP, (_DEGE_UNAVAILABLE - 1) * _TARGET_TEMP_STEP
+        limited_rh = self is not self.FAN and model in _HUMIDITY_LIMITED_MODELS
+        return 0, _HUMIDITY_RANGE[-1] if limited_rh else _PERCENT_MAX
+
+    def encode_value(self, value: float, model: str) -> int:
+        """Encode a representable Celsius or physical percentage setting."""
+        low, high = self.bounds(model)
+        step = self.step(model)
+        if isinstance(value, bool) or not low <= value <= high or value % step:
+            if self.temperature:
+                raise ValueError("expected a representable positive half-degree Celsius target")
+            raise ValueError(f"expected a percentage in increments of {step:g} for {model}")
+        if (
+            self in (self.HUMIDIFY, self.DEHUMIDIFY)
+            and model in _HUMIDITY_LIMITED_MODELS
+            and value
+            and value not in _HUMIDITY_RANGE
+        ):
+            raise ValueError("expected Off (0) or a humidity target of 20 to 80 percent")
+        return int(value / step)
+
     def physical_value(self, raw: int | None, model: str) -> float | int | None:
         if raw is None:
             return None
         if self.temperature:
-            return raw / 2 if 0 < raw < 255 else None
+            return raw * _TARGET_TEMP_STEP if 0 < raw < _DEGE_UNAVAILABLE else None
         return _percent(raw * fan_step(model) if self is self.FAN else raw)
 
 

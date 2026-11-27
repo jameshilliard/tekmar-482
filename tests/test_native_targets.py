@@ -3,6 +3,7 @@ import unittest
 
 from tekmar_482 import (
     CaptureGap,
+    FanDuctStatus,
     NativeAddress,
     NativeBlockBatch,
     NativeBlockQuery,
@@ -14,6 +15,7 @@ from tekmar_482 import (
     NativeWriteStatus,
     Packet,
     RoomLimit,
+    SlabStatus,
     TargetSlot,
     ThermostatTarget,
     ThermostatTargetChange,
@@ -55,6 +57,13 @@ def _air(target: int, current: int = 0x600) -> NativeFrame:
 
 
 class AdjustmentTests(unittest.TestCase):
+    def test_native_temperature_status_withholds_reserved_values(self) -> None:
+        for word in (0, 0x4000, 0x8000, 0xC000, 0xFFFF):
+            fan = FanDuctStatus(0, word, 1530)
+            assert fan.duct_temperature_f is None and fan.coil_temperature_f == 68
+            assert SlabStatus(0, 42, word).temperature_f is None
+        assert SlabStatus(0, 42, 1530).temperature_f == 68
+
     def test_physical_slots_units_off_masks_and_limits(self) -> None:
         state = NativeState()
         state.observe(identity(_MODERN))
@@ -377,3 +386,16 @@ class TargetSessionTests(unittest.IsolatedAsyncioTestCase):
                 ThermostatTargetChange(t, _S.AWAY, v).wire_value(model)
         assert ThermostatTargetChange(_T.FAN, _S.SLEEP, 0).wire_value("544") == 0
         assert ThermostatTargetChange(_T.HUMIDIFY, _S.AWAY, 0).wire_value("553") == 0
+
+    def test_target_bounds_and_step_match_the_encoder(self) -> None:
+        for target, model, bounds, step in (
+            (_T.HEAT, "532", (0.5, 127), 0.5),
+            (_T.FAN, "544", (0, 100), 10),
+            (_T.FAN, "553", (0, 100), 1),
+            (_T.HUMIDIFY, "553", (0, 80), 1),
+        ):
+            self.assertEqual(target.bounds(model), bounds)
+            assert target.step(model) == step
+            for value in bounds:
+                wire = ThermostatTargetChange(target, _S.WAKE, value).wire_value(model)
+                assert target.physical_value(wire, model) == value

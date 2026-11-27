@@ -16,10 +16,8 @@ from ._native_payloads.thermostat import (
     TargetSlot,
     TargetTable,
     ThermostatTarget,
-    fan_step,
 )
 from ._native_payloads.writes import BlockPatch, NativeField
-from .constants import MAX_PERCENT
 from .native import NativeBlockQuery, require_enum
 from .native_identity import NativeIdentity
 from .native_targets import floor_configured
@@ -32,7 +30,6 @@ if TYPE_CHECKING:
     from .native_write import NativeBlockEditor, NativeWriteResult
 
 _UNAVAILABLE = 0xFF
-_HUMIDITY_RANGE = range(20, 81)
 
 
 @dataclass(frozen=True, slots=True)
@@ -51,25 +48,7 @@ class ThermostatTargetChange:
             raise ValueError(msg)
 
     def wire_value(self, model: str) -> int:
-        v = self.value
-        if self.target.temperature:
-            if not 0 < v * 2 < _UNAVAILABLE or v * 2 != int(v * 2):
-                msg = "expected a representable positive half-degree Celsius target"
-                raise ValueError(msg)
-            return int(v * 2)
-        step = fan_step(model) if self.target is ThermostatTarget.FAN else 1
-        if not 0 <= v <= MAX_PERCENT or v % step:
-            msg = f"expected a percentage in increments of {step} for {model}"
-            raise ValueError(msg)
-        if (
-            self.target is not ThermostatTarget.FAN
-            and model in {"553", "557"}
-            and v
-            and v not in _HUMIDITY_RANGE
-        ):
-            msg = "expected Off (0) or a humidity target of 20 to 80 percent"
-            raise ValueError(msg)
-        return int(v / step)
+        return self.target.encode_value(self.value, model)
 
 
 async def _eligible(
