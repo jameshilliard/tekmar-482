@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 from collections import OrderedDict
 from dataclasses import dataclass
+from enum import IntEnum
 from math import isfinite
 from typing import TYPE_CHECKING
 
@@ -126,10 +127,16 @@ class _SubnetProbe:
     subnet: int
 
 
+class _Priority(IntEnum):
+    URGENT = 0
+    LIVE = 1
+    BULK = 2
+
+
 class _PortQueue:
     def __init__(self, port: int) -> None:
         self.port = port
-        self.jobs: OrderedDict[_Job, None] = OrderedDict()
+        self.jobs: OrderedDict[_Job, _Priority] = OrderedDict()
         self.ready = asyncio.Event()
         self.master_probe: _MasterProbe | None = None
         self.master_answer: NativeStatusBatch | None = None
@@ -142,17 +149,20 @@ class _PortQueue:
         self,
         job: _Job,
         *,
-        urgent: bool,
+        priority: _Priority,
     ) -> None:
-        self.jobs[job] = None
-        if urgent:
+        self.jobs[job] = priority
+        if priority is _Priority.URGENT:
             self.jobs.move_to_end(job, last=False)
         self.ready.set()
 
     def request_master(self, *, urgent: bool = False) -> None:
         if self.master_probe is None and not self.has_master_map:
             self.master_probe = _MasterProbe(self.port)
-            self.add(self.master_probe, urgent=urgent)
+            self.add(
+                self.master_probe,
+                priority=_Priority.URGENT if urgent else _Priority.BULK,
+            )
 
     def reset_master(self) -> None:
         if self.master_probe is not None:
@@ -165,7 +175,7 @@ class _PortQueue:
     def request_subnet(self, subnet: int) -> None:
         if subnet not in self.subnet_jobs:
             job = self.subnet_jobs[subnet] = _SubnetProbe(self.port, subnet)
-            self.add(job, urgent=True)
+            self.add(job, priority=_Priority.URGENT)
 
     def reset_subnets(self) -> None:
         for job in self.subnet_jobs.values():
@@ -174,15 +184,20 @@ class _PortQueue:
         self.subnet_results.clear()
 
     def discard(self, path: NativePath) -> None:
-        self.jobs = OrderedDict.fromkeys(
-            job for job in self.jobs if not isinstance(job, tuple) or job[0] != path
+        self.jobs = OrderedDict(
+            (job, rank)
+            for job, rank in self.jobs.items()
+            if not isinstance(job, tuple) or job[0] != path
         )
 
     async def take(self) -> _Job:
         while not self.jobs:
             self.ready.clear()
             await self.ready.wait()
-        return self.jobs.popitem(last=False)[0]
+        # Equal-priority work retains queue order.
+        job = min(self.jobs, key=self.jobs.__getitem__)
+        del self.jobs[job]
+        return job
 
 
 class _Watch:
@@ -282,7 +297,15 @@ class _Watch:
                     and self.state.block_revision(path, block) > 0
                 )
             )
-            q.add((path, block), urgent=urgent)
+            if urgent:
+                priority = _Priority.URGENT
+            elif isinstance(block, IoEndpoint) or (
+                isinstance(block, int) and (not block or block in MODE_BLOCKS)
+            ):
+                priority = _Priority.LIVE
+            else:
+                priority = _Priority.BULK
+            q.add((path, block), priority=priority)
 
     def _invalidate(self, path: NativePath) -> None:
         self.identities.pop(path, None)
@@ -731,7 +754,12 @@ class _Watch:
             )
         except DeferredReadError:
             if queue.master_probe is job:
-                queue.add(job, urgent=self.check_port_subnets)
+                queue.add(
+                    job,
+                    priority=(
+                        _Priority.URGENT if self.check_port_subnets else _Priority.BULK
+                    ),
+                )
             return
         except ExpiredReadError:
             self.count += 1
@@ -771,7 +799,7 @@ class _Watch:
             )
         except DeferredReadError:
             if queue.subnet_jobs.get(job.subnet) is job:
-                queue.add(job, urgent=True)
+                queue.add(job, priority=_Priority.URGENT)
             return
         except ExpiredReadError:
             outcome = None

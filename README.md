@@ -897,6 +897,8 @@ Without explicit device paths it prefers the port claiming the full subnet;
 a sole observed path with no conflicting master announcement also works.
 An ambiguous route needs more evidence or an explicit path. Silence never
 creates channels or starts periodic discovery.
+On each port, identity, mode and I/O discovery run ahead of bulk
+configuration reads without interrupting a request already on the wire.
 For a partial directory, it can send one explicit read per missing ID from
 a previously complete directory on that route, or from a known model's
 local terminal layout when the advertised count and observed IDs agree.

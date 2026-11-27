@@ -329,6 +329,37 @@ class IoExchangeTests(unittest.IsolatedAsyncioTestCase):
         assert view and view.complete and view.channels[-1].sample.active is True
         assert len(result.latest_statuses) == 2 and result.reads == 6
 
+    async def test_initial_io_discovery_precedes_bulk_configuration(self) -> None:
+        task = asyncio.create_task(
+            watch_native(
+                self.stream,
+                [PATH],
+                duration=0.25,
+                timeout=0.08,
+            ),
+        )
+        await self._reply_with_553_configuration()
+        discovery = await self.send()
+        assert (discovery.message_id, discovery.payload) == (
+            0x1F6,
+            bytes((LOCAL.subnet, LOCAL.node)),
+        )
+        self.ack()
+        for ch in range(6):
+            self.rx(discover(ch, 6, endpoint=LOCAL))
+
+        configuration = await self.send()
+        assert configuration.message_id == 0x2D7
+        assert int.from_bytes(configuration.payload[:2], "little") not in (
+            0,
+            3,
+            4,
+            0x97,
+        )
+        result = await task
+        directory = result.state.io_directory(PATH, LOCAL)
+        assert directory and directory.complete
+
     async def test_watch_does_not_repair_a_moved_reporter(self) -> None:
         local = IoEndpoint(PATH.subnet, PATH.node)
         task = asyncio.create_task(
