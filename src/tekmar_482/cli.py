@@ -731,6 +731,9 @@ def _endpoint(args: argparse.Namespace) -> GatewayEndpoint:
 
 
 def _validate_native_args(args: argparse.Namespace) -> None:
+    if args.command == "watch-native" and args.shared_network and not args.ports:
+        msg = "--shared-network requires explicitly selected --port values"
+        raise CliError(msg)
     if _capture_normal(args) and getattr(args, "ack_port", False):
         msg = "link ACKs require an explicit --raw capture"
         raise CliError(msg)

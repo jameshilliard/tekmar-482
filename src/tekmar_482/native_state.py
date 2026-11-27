@@ -43,6 +43,7 @@ from .native_plant_registers import (
     PlantRegisters,
     has_plant_registers,
 )
+from .native_routes import device_routes
 from .native_schedule import ScheduleDirectory
 from .native_setpoint import SETPOINT_BLOCKS, NativeSetpointControl, SetpointBook
 from .native_snowmelt import NativeSnowmelt, SnowmeltChannels, SnowmeltConfiguration
@@ -56,6 +57,7 @@ if TYPE_CHECKING:
     from ._native_payloads.faults import NetworkFault
     from ._native_payloads.line import LineValue
     from ._water_monitor import WaterSource
+    from .native_routes import NativeDeviceRoutes
     from .native_snowmelt import SnowmeltChannel
     from .native_status import NativeStatusBatch
     from .raw import CaptureRecord
@@ -202,6 +204,21 @@ class NativeState:
     def has_master_announcement(self, port: int) -> bool:
         """Check for a MasterPresent map that includes the sender's full subnet."""
         return self._water.has_master_announcement(port)
+
+    def master_subnets(self, port: int) -> tuple[int, ...]:
+        """List distinct MasterPresent header subnets observed on a physical port."""
+        return self._water.master_subnets(port)
+
+    def device_routes(self, *, ports: Iterable[int]) -> tuple[NativeDeviceRoutes, ...]:
+        """Resolve identified addresses in a caller-confirmed network scope."""
+        scope = frozenset(ports)
+        if not scope or not scope.issubset(TN4_PORTS):
+            msg = "select at least one valid physical tN4 port"
+            raise ValueError(msg)
+        return device_routes(
+            ((path, self.identity(path)) for path in self.paths),
+            {port: self.master_subnets(port) for port in scope},
+        )
 
     def water_systems(self, *, ports: Iterable[int]) -> tuple[WaterSystem, ...]:
         """Resolve advertised loops within a known shared physical network."""

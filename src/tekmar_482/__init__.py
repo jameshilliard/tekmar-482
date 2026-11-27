@@ -223,6 +223,7 @@ from .native_plant_registers import (
     PlantRegisters,
     RuntimeRegister,
 )
+from .native_routes import NativeDeviceRoutes
 from .native_scene import (
     ScenePortResult,
     SceneSelection,
@@ -532,6 +533,7 @@ __all__ = [
     "NativeCalendar",
     "NativeClimate",
     "NativeDevice",
+    "NativeDeviceRoutes",
     "NativeDiscovery",
     "NativeFaultReport",
     "NativeField",

@@ -17,13 +17,14 @@ from .native_watch import watch_native
 
 if TYPE_CHECKING:
     import argparse
-    from collections.abc import Callable
+    from collections.abc import Callable, Iterable
 
     from ._native_payloads.line import LineReportKind
     from ._observation import ObservationStream
     from .native_calendar import NativeCalendar
     from .native_io import IoDirectory
     from .native_plant_registers import PlantRegisters
+    from .native_routes import NativeDeviceRoutes
     from .native_setpoint import NativeSetpointControl
     from .native_snowmelt import NativeSnowmelt, SnowmeltChannel
     from .native_state import NativeFaultReport, NativeLineReport, NativeState
@@ -80,8 +81,10 @@ def line_fields(report: NativeLineReport) -> dict[str, object]:
     }
 
 
-class _LineChanges:
-    def __init__(self) -> None:
+class _NetworkChanges:
+    def __init__(self, ports: Iterable[int]) -> None:
+        self._scope = tuple(sorted(set(ports)))
+        self._routes: tuple[NativeDeviceRoutes, ...] = ()
         self._previous: dict[
             NativePath,
             dict[tuple[LineReportKind, int | None], NativeLineReport],
@@ -93,6 +96,19 @@ class _LineChanges:
         state: NativeState,
         emit: Callable[[object], None],
     ) -> None:
+        if (
+            self._scope
+            and (routes := state.device_routes(ports=self._scope)) != self._routes
+        ):
+            self._routes = routes
+            emit(
+                {
+                    "device_routes": {
+                        "ports": self._scope,
+                        "routes": [asdict(r) for r in routes],
+                    },
+                },
+            )
         if not (reports := state.line_reports_for(path)):
             if self._previous.pop(path, None) is not None:
                 emit({"line_reports_unknown": asdict(path)})
@@ -233,10 +249,10 @@ async def watch_all_from_args(
     previous_setpoints: dict[NativePath, NativeSetpointControl] = {}
     previous_io: dict[NativePath, tuple[str | None, tuple[IoDirectory, ...]]] = {}
     previous_faults: dict[NativePath, NativeFaultReport] = {}
-    lines = _LineChanges()
+    network = _NetworkChanges((args.ports or ()) if args.shared_network else ())
 
     def changed(path: NativePath, state: NativeState) -> None:
-        lines.emit(path, state, emit)
+        network.emit(path, state, emit)
         _emit_fault(path, state.fault_report(path), previous_faults, emit)
         identity = state.identity(path)
         model = identity.product.model if identity and identity.product else None

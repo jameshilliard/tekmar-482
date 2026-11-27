@@ -657,3 +657,42 @@ class FirmwareInteropTests(unittest.IsolatedAsyncioTestCase):
             assert source and source.address == path.address
             assert source.master and source.master.value.supply_f == 113
             watch.cancel()
+
+    async def test_header_only_presence_selects_the_local_thermostat_read_route(
+        self,
+    ) -> None:
+        local = NativePath(3, 0x45, 5)
+        mirror = NativePath(2, 0x45, 5)
+        report = "6e745149 00003f 9d8f01 9c0402"  # 527 thermostat.
+        script = (
+            (3, "3f700000", ("7ff457c0",)),
+            (2, "3f700000", ("7ff677c0",)),
+            _block(2, "45 10000000", "0000", report),
+            _block(3, "45 10000000", "0000", report),
+            _block(3, "45 10000000", "0300", "6e745144 030001 01"),
+        )
+        state = NativeState()
+        async with _gateway(script) as manager, manager.peer_capture((2, 3)) as capture:
+            for port in (3, 2):
+                result = await manager.read_status(
+                    port,
+                    NativeStatusQuery(StatusRequest.MASTER),
+                )
+                assert result.answered and result.reports[0].message.payload == b""
+            for path in (mirror, local):
+                await manager.read_block(path.port, NativeBlockQuery(path.address, 0))
+
+            async with asyncio.timeout(5):
+                while any(state.identity(p) is None for p in (local, mirror)):
+                    state.observe(await capture.read())
+
+            (observed,) = state.device_routes(ports=(2, 3))
+            preferred = observed.preferred
+            assert preferred is not None and preferred == local
+            assert observed.paths == (mirror, local)
+            assert not state.has_master_announcement(preferred.port)  # No hydronic map.
+            sample = await manager.read_block(
+                preferred.port,
+                NativeBlockQuery(preferred.address, 3),
+            )
+            assert sample.port == local.port and sample.decoded["mode_setting"] == 1

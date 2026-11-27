@@ -56,6 +56,7 @@ class WaterSource:
     tanks: tuple[WaterSample[TankStatus], ...] = ()
     equipment: PlantEquipment = _NO_EQUIPMENT
     pending_setup: frozenset[int] = frozenset()
+    master_present: bool = False
 
     @property
     def assignment(self) -> LoopAssignment | None:
@@ -145,6 +146,17 @@ class WaterMonitor:
             s.port == port and s.announces_own_subnet for s in self._sources.values()
         )
 
+    def master_subnets(self, port: int) -> tuple[int, ...]:
+        return tuple(
+            sorted(
+                {
+                    s.address.subnet
+                    for s in self._sources.values()
+                    if s.port == port and s.master_present
+                },
+            ),
+        )
+
     def forget(self, port: int, address: NativeAddress) -> bool:
         """Discard measurements and identity for a single interrupted path."""
         return self._forget((port, NativeAddress(address.subnet, address.node & _NODE)))
@@ -202,6 +214,8 @@ class WaterMonitor:
     def _water(source: WaterSource, frame: NativeFrame) -> WaterSource | None:
         data = frame.message.payload
         if frame.message_id == MASTER_PRESENT:
+            if not source.master_present:
+                source = replace(source, master_present=True)
             if not data:
                 return source
             return source.with_topology(

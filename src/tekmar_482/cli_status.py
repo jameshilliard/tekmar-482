@@ -149,6 +149,7 @@ def water_fields(source: WaterSource) -> dict[str, object]:
         "identity": asdict(identity) if identity is not None else None,
         "model": identity.product.model if identity and identity.product else None,
         "topology": asdict(source.topology),
+        "master_present": source.master_present,
         "pending_setup": sorted(source.pending_setup),
         "assignment": {
             "from": "setup" if assignment.heat_source is not None else "master_present",
@@ -329,6 +330,11 @@ def _add_watch(
         help=description,
     )
     if name == "watch-native":
+        watch.add_argument(
+            "--shared-network",
+            action="store_true",
+            help="group routes on --port values known to share a network",
+        )
         watch.add_argument(
             "--stale-after",
             type=float,

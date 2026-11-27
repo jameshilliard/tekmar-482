@@ -936,6 +936,18 @@ useful even when the startup announcement was missed. Fixed-path watches
 do not broadcast this query. `--no-plant-settings` skips these discovery
 queries and addressed plant register reads without hiding observed reports.
 
+When several ports are known to belong to the same network,
+`state.device_routes(ports=(0, 3))` groups observations with the same full
+subnet and logical node. Use `watch-native --shared-network --port 0 --port 3`
+to emit these route changes alongside the physical trace-derived state.
+MasterPresent headers provide the local subnet even when their payload is
+empty. A unique matching port with a locally observed identity is preferred;
+competing claims or incompatible identities leave the route unresolved.
+Only a single-port scope can select an observed path without a master claim.
+Measurements and settings stay on their original paths. This view does not
+prove a unit's serial identity or replace fresh addressed validation before
+a write.
+
 `state.schedule(path).signals` retains the reported current and next phases
 per advertised system. These are not proof that a device owns a table or that
 a member uses that phase locally. Use `state.schedule_directory.system(n,
