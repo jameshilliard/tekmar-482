@@ -782,7 +782,10 @@ preview = await manager.write_setpoint_target(port, address, change)
 Pass `preview=False` to send and verify. The Raw stream takes the same
 change plus an explicit `source=`. Read `control.target(slot)` on a
 `NativeSetpointControl` for the stored word and its Celsius value, if
-known. `control.readings` remains separate live status.
+known. `control.writable_target(slot)` also checks model support and usable
+values. Its `bounds_celsius` includes a reported maximum if available.
+`control.readings` remains separate live status. When compact write readback
+omits known sibling fields, the live watch requests the full report once.
 
 ### Snowmelt
 

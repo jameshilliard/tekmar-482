@@ -119,8 +119,10 @@ class SnowmeltStateTests(unittest.TestCase):
         melt = control.setpoint(SnowmeltBlock.MELT_SETPOINT)
         idle = control.setpoint(SnowmeltBlock.IDLE_SETPOINT)
         assert melt and melt.raw == 0x5F0 and not melt.is_off
+        assert not melt.supports_off and melt.bounds_celsius == (0.0, 35.0)
         assert control.primary.raw(SnowmeltKey.SLAB_SETPOINT) == 0x600
         assert idle and idle.is_off and idle.celsius is None
+        assert idle.supports_off and idle.bounds_celsius == (-6.5, 35.0)
         assert idle.encode_celsius(None) == 0 and idle.encode_celsius(0) == 1170
 
         state.observe(block(0xD0, b"\x01\x04"))

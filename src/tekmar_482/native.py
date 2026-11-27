@@ -535,8 +535,17 @@ class SnowmeltSetpoint:
         )
 
     @property
+    def supports_off(self) -> bool:
+        return self.block != SnowmeltBlock.MELT_SETPOINT
+
+    @property
     def is_off(self) -> bool:
-        return self.raw == 0 and self.block != SnowmeltBlock.MELT_SETPOINT
+        return self.raw == 0 and self.supports_off
+
+    @property
+    def bounds_celsius(self) -> tuple[float, float]:
+        """Published Celsius menu range for the 654, 670 and 671 slab targets."""
+        return (-6.5 if self.supports_off else 0.0), 35.0
 
     @property
     def celsius(self) -> float | None:
@@ -547,7 +556,7 @@ class SnowmeltSetpoint:
     def encode_celsius(self, value: float | None) -> int:
         """Encode a temperature or explicit Off without building a frame."""
         if value is None:
-            if self.block == SnowmeltBlock.MELT_SETPOINT:
+            if not self.supports_off:
                 msg = "the melt slab target has no Off setting"
                 raise ValueError(msg)
             return 0

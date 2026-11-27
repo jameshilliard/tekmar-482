@@ -19,7 +19,12 @@ from ._native_payloads.setpoint import (
 from ._native_payloads.writes import BlockPatch, NativeField
 from .native import NativeBlockQuery, require_enum
 from .native_identity import NativeIdentity
-from .units import celsius_to_degh, fahrenheit_to_celsius, fahrenheit_to_degh
+from .units import (
+    celsius_to_degh,
+    degh_to_celsius,
+    fahrenheit_to_celsius,
+    fahrenheit_to_degh,
+)
 
 if TYPE_CHECKING:
     from ._native_payloads.products import NativeProduct
@@ -30,6 +35,16 @@ if TYPE_CHECKING:
 
 SETPOINT_BLOCKS = frozenset(
     (APPLICATION_SETUP, OPERATION_SETUP, OVERRIDE_TIME, *TARGET_BLOCKS),
+)
+_TARGET_WORDS = frozenset(
+    {
+        "wake_occupied_raw",
+        "unoccupied_sleep_raw",
+        "away_raw",
+        "maximum_raw",
+        "wake_raw",
+        "sleep_raw",
+    },
 )
 
 # The 161/162 manuals give the target minima and application maximum ranges
@@ -47,6 +62,16 @@ _TARGET_BOUNDS = {
 }
 # SW 11 SetpointControl.adjustment_for explicitly names this Off encoding.
 _HOT_TUB_OFF = 1240
+
+
+def _target_bounds(
+    application: SetpointApplication,
+    maximum: int | None,
+) -> tuple[int, int]:
+    low, high = _TARGET_BOUNDS[application]
+    if maximum is not None and fahrenheit(maximum) is not None:
+        high = min(high, maximum)
+    return low, high
 
 
 class SetpointSlot(Enum):
@@ -82,12 +107,15 @@ class StoredSetpointTarget:
 
     application: SetpointApplication
     raw: int
+    maximum_raw: int | None = None
+
+    @property
+    def supports_off(self) -> bool:
+        return self.application is SetpointApplication.HOT_TUB
 
     @property
     def is_off(self) -> bool:
-        return (
-            self.application is SetpointApplication.HOT_TUB and self.raw == _HOT_TUB_OFF
-        )
+        return self.supports_off and self.raw == _HOT_TUB_OFF
 
     @property
     def celsius(self) -> float | None:
@@ -95,6 +123,15 @@ class StoredSetpointTarget:
         if low <= self.raw <= high and (value := fahrenheit(self.raw)) is not None:
             return fahrenheit_to_celsius(value)
         return None
+
+    @property
+    def bounds_celsius(self) -> tuple[float, float] | None:
+        """Intersect the published application range and the reported maximum."""
+        low, high = _target_bounds(self.application, self.maximum_raw)
+        minimum, maximum = degh_to_celsius(low), degh_to_celsius(high)
+        if minimum is None or maximum is None or minimum > maximum:
+            return None
+        return minimum, maximum
 
 
 @dataclass(frozen=True, slots=True)
@@ -160,12 +197,7 @@ async def edit_setpoint_target(
     query = NativeBlockQuery(target, app.target_block)
     before = (await editor.read(query)).require_report()
     maximum = SetpointTargets.from_reports(before.decoded, {}).maximum_raw
-    if (
-        change.celsius is not None
-        and maximum is not None
-        and raw > maximum
-        and fahrenheit(maximum) is not None
-    ):
+    if change.celsius is not None and raw > _target_bounds(app, maximum)[1]:
         msg = "target exceeds the reported maximum"
         raise ValueError(msg)
     if change.slot.secondary:
@@ -199,14 +231,28 @@ class NativeSetpointControl:
         app, targets = self.assignment.application, self.targets
         if app is None or targets is None or (raw := slot.raw_value(targets)) is None:
             return None
-        return StoredSetpointTarget(app, raw)
+        return StoredSetpointTarget(app, raw, targets.maximum_raw)
+
+    def writable_target(self, slot: SetpointSlot) -> StoredSetpointTarget | None:
+        """Describe one supported, adjustable field without inventing other slots."""
+        product = self.identity.product if self.identity is not None else None
+        if (
+            product is None
+            or (target := self.target(slot)) is None
+            or target.application.target_block not in product.candidate_blocks
+            or (product.model == "161" and slot is not SetpointSlot.WAKE_OCCUPIED)
+            or target.bounds_celsius is None
+            or (target.celsius is None and not target.is_off)
+        ):
+            return None
+        return target
 
 
 @dataclass(slots=True)
 class SetpointBook:
     reports: dict[int, NativeFrame] = field(default_factory=dict)
     revisions: dict[int, int] = field(default_factory=dict)
-    confirmed_tables: set[int] = field(default_factory=set)
+    confirmed_fields: dict[int, set[str]] = field(default_factory=dict)
     status: SetpointStatus | None = None
     frame: NativeFrame | None = None
     sample_application: SetpointApplication | None = None
@@ -237,7 +283,7 @@ class SetpointBook:
 
     def _new_application(self) -> None:
         self.sample_application = None
-        self.confirmed_tables.clear()
+        self.confirmed_fields.clear()
         for block in TARGET_BLOCKS:
             self._discard(block)
 
@@ -252,15 +298,18 @@ class SetpointBook:
             )
         ):
             self._new_application()
-        if block in TARGET_BLOCKS and frame.decoded.keys() & {
-            "wake_occupied_raw",
-            "unoccupied_sleep_raw",
-            "away_raw",
-            "maximum_raw",
-            "wake_raw",
-            "sleep_raw",
-        }:
-            self.confirmed_tables.add(block)
+        if block in TARGET_BLOCKS:
+            fields = frame.decoded.keys() & _TARGET_WORDS
+            known = self.confirmed_fields.get(block, set())
+            if (
+                before is not None
+                and not known <= fields
+                and known <= before.decoded.keys()
+            ):
+                # A compact readback may arrive even if the write was not observed.
+                self.revisions[block] = self.revisions.get(block, 0) + 1
+            if fields:
+                self.confirmed_fields[block] = known | fields
         self.reports[block] = frame
         return before is None or before.message.payload != frame.message.payload
 
@@ -275,11 +324,16 @@ class SetpointBook:
         required = {APPLICATION_SETUP, OPERATION_SETUP, OVERRIDE_TIME}
         if (app := self.assignment.application) is not None:
             for block in (app.target_block, app.target_block + 1):
-                if block in product.candidate_blocks or block in self.confirmed_tables:
+                if block in product.candidate_blocks or block in self.confirmed_fields:
                     required.add(block)
         return {
             (b, None): self.revisions.get(b, 0)
-            for b in sorted(required - self.reports.keys())
+            for b in sorted(required)
+            if (report := self.reports.get(b)) is None
+            or (
+                (known := self.confirmed_fields.get(b)) is not None
+                and not known <= report.decoded.keys()
+            )
         }
 
     def snapshot(

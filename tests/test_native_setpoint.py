@@ -163,6 +163,9 @@ class SetpointStateTests(unittest.TestCase):
         assert off and off.raw == 1240 and off.is_off and off.celsius is None
         assert control.target(_SLOT.AWAY) is None
         assert control.target(_SLOT.SLEEP) is None
+        assert (adjustable := control.writable_target(_SLOT.WAKE_OCCUPIED)) == off
+        assert adjustable is not None and adjustable.bounds_celsius is not None
+        assert adjustable.supports_off and adjustable.bounds_celsius[1] == 40
 
         state.observe(block(0x26, bytes.fromhex("01 03")))
         assert _view(state).target(_SLOT.WAKE_OCCUPIED) is None
@@ -172,6 +175,52 @@ class SetpointStateTests(unittest.TestCase):
         invalid = control.target(_SLOT.UNOCCUPIED_SLEEP)
         assert zero and not zero.is_off and zero.celsius == 0
         assert invalid and invalid.raw == 0xFFFF and invalid.celsius is None
+        assert control.writable_target(_SLOT.UNOCCUPIED_SLEEP) is None
+
+    def test_reported_target_maximum_and_161_writability(self) -> None:
+        state = NativeState()
+        state.observe(identity(_161))
+        state.observe(block(0x26, bytes.fromhex("01 04")))
+        state.observe(block(0x2E, bytes.fromhex("cf fa05 4805 0000 d606")))
+        control = _view(state)
+        target = control.writable_target(_SLOT.WAKE_OCCUPIED)
+        assert target and target.celsius == 20
+        assert target.bounds_celsius is not None
+        assert (
+            target.bounds_celsius[1] == StoredSetpointTarget(_APP.FLOOR, 1750).celsius
+        )
+        assert control.target(_SLOT.UNOCCUPIED_SLEEP) is not None
+        assert control.writable_target(_SLOT.UNOCCUPIED_SLEEP) is None
+
+        dhw = StoredSetpointTarget(_APP.DHW, 0x0870, 0x0870)
+        assert dhw.bounds_celsius is not None and dhw.bounds_celsius[1] == 55
+        assert StoredSetpointTarget(_APP.DHW, 0x0870, 0x0430).bounds_celsius is None
+
+    def test_compact_confirmation_preserves_the_need_to_refresh_sibling_words(
+        self,
+    ) -> None:
+        state = NativeState()
+        state.observe(identity(_162))
+        state.observe(block(0x26, bytes.fromhex("01 01")))
+        complete = block(0x2A, bytes.fromhex("cf d804 b207 0000 6207"))
+        compact = block(0x2A, bytes.fromhex("03 fa05"))
+        key = 0x2A, None
+        state.observe(complete)
+        assert key not in state.missing_setpoint_reads(TEST_PATH)
+        state.observe(_update(0x2A, bytes(8)))
+        revision = state.missing_setpoint_reads(TEST_PATH)[key]
+        state.observe(compact)
+        assert state.missing_setpoint_reads(TEST_PATH)[key] == revision
+        assert _view(state).target(_SLOT.UNOCCUPIED_SLEEP) is None
+        state.observe(complete)
+        assert key not in state.missing_setpoint_reads(TEST_PATH)
+
+        state.observe(compact)  # Same loss when observing someone else's confirmation.
+        assert state.missing_setpoint_reads(TEST_PATH)[key] == revision + 1
+        state.observe(compact)
+        assert state.missing_setpoint_reads(TEST_PATH)[key] == revision + 1
+        state.observe(block(0x26, bytes.fromhex("01 04")))
+        assert key not in state.missing_setpoint_reads(TEST_PATH)
 
     def test_edit_range_and_off_follow_the_selected_application(self) -> None:
         assert SetpointTargetChange(_APP.DHW, _SLOT.AWAY, 55).wire_value() == 2160
