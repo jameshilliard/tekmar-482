@@ -348,7 +348,7 @@ def _add_watch(
         watch.add_argument(
             "--no-plant-settings",
             action="store_true",
-            help="skip addressed plant setup and runtime reads",
+            help="skip plant topology, setup and runtime reads",
         )
         watch.add_argument(
             "--no-thermostat-targets",

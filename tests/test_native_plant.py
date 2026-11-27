@@ -11,6 +11,7 @@ from tekmar_482 import (
     GatewayTraceGap,
     HeatPumpOutput,
     Modulation,
+    NativeAddress,
     NativeBlockQuery,
     NativeFrame,
     NativeMessage,
@@ -22,6 +23,7 @@ from tekmar_482 import (
     RuntimeRegister,
     StageBits,
     StageCounts,
+    StatusRequest,
     WaterMonitor,
     read_water,
     watch_native,
@@ -41,6 +43,7 @@ _MODULATING = bytes.fromhex("00 06 82 19 0a 64 56 67 e3")
 _OTHER = NativePath(2, TEST_PATH.subnet, TEST_PATH.node)
 _274 = 102002
 _402 = 104103
+_LOOP_STATUS = bytes.fromhex("bc07 00c0 9828 2211 fe")
 
 
 def _registers(state: NativeState, path: NativePath = TEST_PATH) -> PlantRegisters:
@@ -355,6 +358,78 @@ class PlantSessionTests(unittest.IsolatedAsyncioTestCase):
         assert other and (ordinary := other.equipment.cycle) and other.equipment.outputs
         assert ordinary.value.cycle_length == 127 and not ordinary.value.hold_override
         assert not result.reads and self.tx.empty()
+
+    async def test_water_discovery_is_not_repeated_for_empty_or_unanswered_reads(
+        self,
+    ) -> None:
+        path = NativePath(TEST_PATH.port, 0x5A, 0)
+        for reply in (False, True):
+            with self.subTest(reply=reply):
+                task = asyncio.create_task(
+                    watch_native(self.stream, duration=0.1, timeout=0.04),
+                )
+                self.rx(frame(0x3CF, _LOOP_STATUS, path))
+                assert (await self.sent()).message_id == 0x3F7
+                self.ack()
+                if reply:
+                    self.rx(frame(0x3FF, b"", path))
+                self.rx(frame(0x3CF, _LOOP_STATUS[:-1] + b"\x02", path))
+                self.rx(frame(0x3CE, _LOOP_STATUS, path))
+                result = await task
+                assert result.reads == 1 and self.tx.empty()
+                assert not result.state.has_master_announcement(path.port)
+                (exchange,) = result.latest_statuses
+                assert (
+                    exchange.query.kind is StatusRequest.MASTER
+                    and exchange.answered is reply
+                )
+
+    async def test_water_discovery_requires_valid_loop_evidence_and_discovery_scope(
+        self,
+    ) -> None:
+        path = NativePath(TEST_PATH.port, 0x5A, 0)
+        for opts in (
+            "malformed",
+            "known_map",
+            "passive",
+            "plant_disabled",
+            "fixed_path",
+        ):
+            with self.subTest(opts=opts):
+                if opts == "known_map":
+                    self.rx(frame(0x3FF, bytes([path.subnet]), path))
+                body = b"\x03" if opts == "malformed" else _LOOP_STATUS
+                self.rx(frame(0x3CF, body, path))
+                result = await watch_native(
+                    self.stream,
+                    (path,) if opts == "fixed_path" else None,
+                    duration=0.02,
+                    source=None if opts == "passive" else NativeAddress(0, 0),
+                    plant_settings=opts != "plant_disabled",
+                )
+                assert result.reads == 0 and self.tx.empty()
+                assert not result.latest_statuses
+
+    async def test_same_loop_report_can_rediscover_a_withdrawn_master_map(self) -> None:
+        owner = NativePath(TEST_PATH.port, 0x5A, 0)
+        sender = NativePath(TEST_PATH.port, 0x6B, 0)
+        telemetry = frame(0x3CF, _LOOP_STATUS, sender)
+        task = asyncio.create_task(
+            watch_native(self.stream, duration=0.1, timeout=0.04),
+        )
+        for report in (
+            frame(0x3FF, bytes([owner.subnet, sender.subnet]), owner),
+            telemetry,
+            frame(0x3FF, b"\0", owner),
+            telemetry,
+        ):
+            self.rx(report)
+        assert (await self.sent()).message_id == 0x3F7
+        self.ack()
+        self.rx(frame(0x3FF, bytes([sender.subnet]), sender))
+        result = await task
+        assert result.reads == 1 and self.tx.empty()
+        assert result.state.has_master_announcement(sender.port)
 
     async def serve_reconfiguration(self) -> set[tuple[int, int]]:
         assert await self.query() == (0, 0)

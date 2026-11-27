@@ -617,3 +617,43 @@ class FirmwareInteropTests(unittest.IsolatedAsyncioTestCase):
         reset = state.plant_registers(mix)
         assert dhw and dhw.report(0x24) and dhw.report(0x02) is None
         assert reset and reset.report(0x02) and reset.report(0x24) is None
+
+    async def test_plant_watch_reads_topology_when_it_attaches_after_startup(
+        self,
+    ) -> None:
+        path = NativePath(3, 0x45, 0)
+        script = (
+            (3, "32700000", ("72f45002 fa05", "7cf45009 bc07 00c0 9828 2211 fe")),
+            (3, "3f700000", ("7ff45001 45",)),
+        )
+        observed: asyncio.Future[NativeState] = (
+            asyncio.get_running_loop().create_future()
+        )
+
+        def change(peer: NativePath, state: NativeState) -> None:
+            if (
+                peer == path
+                and state.has_master_announcement(path.port)
+                and not observed.done()
+            ):
+                observed.set_result(state)
+
+        async with (
+            _gateway(script) as manager,
+            manager.native_session((3,)) as session,
+            asyncio.TaskGroup() as tasks,
+        ):
+            watch = tasks.create_task(watch_native(session, on_change=change))
+            # Seed unsolicited loop telemetry on the running Normal link.
+            outdoor = await manager.read_status(
+                3,
+                NativeStatusQuery(StatusRequest.OUTDOOR),
+            )
+            assert outdoor.answered
+            async with asyncio.timeout(5):
+                state = await observed
+            (plant,) = state.water_systems(ports=(3,))
+            source = plant.loops[0].source
+            assert source and source.address == path.address
+            assert source.master and source.master.value.supply_f == 113
+            watch.cancel()

@@ -73,6 +73,50 @@ def plant_report(wire: Wire, f: NativeFrame, *, traced: bool = True) -> None:
 
 
 class NormalWatchTests(unittest.IsolatedAsyncioTestCase):
+    async def test_plant_probe_does_not_overtake_a_queued_mode_read(self) -> None:
+        wire = Wire()
+        plant = NativePath(3, 0x56, 0)
+        mode = block(3, bytes.fromhex("0101"))
+
+        async def gateway() -> None:
+            await start(wire, "08")
+            await wire.expect(_CAP)
+            wire.feed(_SUPPORT)
+            wire.queue_packet(record(frame(0x3FF, b"")))
+            await admit_read(wire, {(3, 0)})
+            identify = identity(102301)  # 527 thermostat.
+            wire.queue_packet(record(identify))
+            wire.queue_packet(
+                record(frame(0x3CF, bytes.fromhex("bc07 00c0 9828 2211 fe"), plant)),
+            )
+            plant_report(wire, identify, traced=False)
+            await admit_read(wire, {(3, 3)})
+            plant_report(wire, mode)
+            await wire.expect(_CAP)
+            wire.feed(_SUPPORT)
+            await wire.expect("0110f04b54 03000000f703")
+            wire.feed("0410f04b54 03000000f703")
+            claim = frame(0x3FF, bytes([plant.subnet]), plant)
+            wire.queue_packet(record(claim))
+            wire.feed("0210f04b54 030001000000 " + claim.body.hex())
+            wire.feed("0210f04b54 030100")
+            await restore(wire)
+
+        async with Tekmar482Client(wire) as client, asyncio.TaskGroup() as tasks:
+            tasks.create_task(gateway())
+            async with BridgeManagement(client).native_session([3]) as link:
+                result = await watch_native(
+                    link,
+                    duration=0.1,
+                    schedules=False,
+                    thermostat_targets=False,
+                    thermostat_sensors=False,
+                )
+        assert result.state.has_master_announcement(3) and result.reads == 3
+        climate = result.state.climate(TEST_PATH)
+        assert climate and climate.setup.mode is ThermostatMode.HEAT
+        assert wire.out.empty()
+
     async def test_sensor_watch_drops_retired_sample_without_polling(self) -> None:
         wire = Wire()
         room_samples: set[int | None] = set()

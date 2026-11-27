@@ -926,8 +926,15 @@ obtain an immutable snapshot. `source=None` (CLI: `--passive`) sends no
 requests; link ACKs remain off unless explicitly enabled on a port. A
 finite active watch lists missing identities, modes, thermostat blocks, calendar
 data, plant registers and snowmelt keys and returns status 1 for incomplete
-coverage. `--no-plant-settings` skips active plant register reads without
-hiding any observed reports.
+coverage. In automatic discovery, the first valid MasterStatus or
+PlantLoopStatus on a port without its own MasterPresent map prompts one
+read-only MasterQuery. A missing or empty answer does not start a poll.
+Only a received peer frame provides the map. Reconnect, trace loss, or
+withdrawal of the last claim on a port allows the next loop report to
+trigger another query. This keeps existing connections to running gateways
+useful even when the startup announcement was missed. Fixed-path watches
+do not broadcast this query. `--no-plant-settings` skips these discovery
+queries and addressed plant register reads without hiding observed reports.
 
 `state.schedule(path).signals` retains the reported current and next phases
 per advertised system. These are not proof that a device owns a table or that

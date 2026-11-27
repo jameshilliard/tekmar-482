@@ -72,7 +72,7 @@ def water_systems(
             maps.add(subnets)
         assignment = source.assignment
         subnet = source.address.subnet
-        if subnet in subnets or (
+        if source.announces_own_subnet or (
             assignment is not None and assignment.subnet == subnet
         ):
             claims[subnet].append((subnets, source))

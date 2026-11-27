@@ -73,6 +73,13 @@ class WaterSource:
             or self.equipment != _NO_EQUIPMENT,
         )
 
+    @property
+    def announces_own_subnet(self) -> bool:
+        """A topology claim, not proof of a unique device or physical wiring."""
+        return (
+            self.address.subnet != 0 and self.address.subnet in self.topology.announced
+        )
+
     def with_topology(
         self,
         topology: LoopTopology,
@@ -131,6 +138,11 @@ class WaterMonitor:
     def source(self, port: int, address: NativeAddress) -> WaterSource | None:
         return self._sources.get(
             (port, NativeAddress(address.subnet, address.node & _NODE)),
+        )
+
+    def has_master_announcement(self, port: int) -> bool:
+        return any(
+            s.port == port and s.announces_own_subnet for s in self._sources.values()
         )
 
     def forget(self, port: int, address: NativeAddress) -> bool:

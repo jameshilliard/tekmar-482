@@ -24,6 +24,7 @@ _SUPPORT = "0401f04b54020005bf3e"
 _TRACE = "010bf04b54"
 _COUNTS = "00" * 40
 _ID = "03354000000000000000"
+_LOOP = bytes.fromhex("bc07 00c0 9828 2211 fe")
 
 
 class Gateway:
@@ -70,6 +71,17 @@ class Gateway:
         self.report(packet)
         self.send(f"020ff04b54{path.port:02x}000001000000" + packet.body.hex())
 
+    async def request_master(self, port: int) -> None:
+        key = f"{port:02x}000000f703"
+        await self.exchange(_CAP, _SUPPORT)
+        await self.exchange("0110f04b54" + key, "0410f04b54" + key)
+
+    def complete_master(self, packet: NativeFrame, *, traced: bool = True) -> None:
+        if traced:
+            self.report(packet)
+        self.send(f"0210f04b54{packet.port:02x}0001000000" + packet.body.hex())
+        self.send(f"0210f04b54{packet.port:02x}0100")
+
     async def start(self, product: int) -> None:
         await self.setup("08")
         self.report(frame(0x3FF, b""))
@@ -93,6 +105,12 @@ async def wait_for_product(
     while (reported := monitor.state.identity(path)) is None or (
         reported.product_number != product
     ):
+        revision = await monitor.wait_for_change(revision)
+
+
+async def wait_for_master(monitor: NativeMonitor, port: int) -> None:
+    revision = monitor.revision
+    while not monitor.state.has_master_announcement(port):
         revision = await monitor.wait_for_change(revision)
 
 
@@ -155,6 +173,63 @@ class NativeMonitorTests(unittest.IsolatedAsyncioTestCase):
                 await running
             assert await second.reader.read() == b""
             assert not monitor.state.paths and monitor.management is None
+
+    async def test_independent_plant_probes_require_trace_and_recover_after_loss(
+        self,
+    ) -> None:
+        boiler = NativePath(3, 0x53, 0)
+        mix = NativePath(2, 0x62, 0)
+        slots = bytes([boiler.subnet, mix.subnet])
+        monitor = NativeMonitor(self.endpoint, ports=[2, 3])
+        async with asyncio.TaskGroup() as tasks, asyncio.timeout(2):
+            running = tasks.create_task(monitor.run())
+            gateway = await self.accepted.get()
+            await gateway.setup("0c")
+            gateway.report(frame(0x3CF, _LOOP, boiler))
+            await gateway.request_master(3)
+            gateway.report(frame(0x3CF, _LOOP, mix))
+            await gateway.request_master(2)
+            gateway.complete_master(frame(0x3FF, slots, mix))
+            await wait_for_master(monitor, 2)
+            # A report in an operation result is not a trace observation.
+            gateway.complete_master(frame(0x3FF, slots, boiler), traced=False)
+            gateway.report(frame(0x3CE, _LOOP, boiler))
+            with self.assertRaises(TimeoutError):
+                async with asyncio.timeout(0.04):
+                    await gateway.reader.read(1)
+            assert not monitor.state.has_master_announcement(3)
+
+            gateway.send("05080100000000000000", packet_type=0xD0)
+            gateway.report(frame(0x3CE, _LOOP, boiler))
+            await gateway.request_master(3)
+            gateway.complete_master(frame(0x3FF, slots, boiler))
+            await wait_for_master(monitor, 3)
+            (system,) = monitor.state.water_systems(ports=(2, 3))
+            assert [s.source.port for s in system.loops if s.source] == [3, 2]
+            assert monitor.state.dropped == 1
+            running.cancel()
+            await gateway.restore()
+
+    async def test_plant_probe_restarts_from_new_evidence_after_reconnect(self) -> None:
+        path = NativePath(3, 0x53, 0)
+        monitor = NativeMonitor(self.endpoint, ports=[3], reconnect_interval=0.01)
+        loop = frame(0x3CF, _LOOP, path)
+        claim = frame(0x3FF, bytes([path.subnet]), path)
+        async with asyncio.TaskGroup() as tasks, asyncio.timeout(2):
+            running = tasks.create_task(monitor.run())
+            for first in (True, False):
+                gateway = await self.accepted.get()
+                await gateway.setup("08")
+                assert not monitor.state.has_master_announcement(3)
+                gateway.report(loop)
+                await gateway.request_master(3)
+                gateway.complete_master(claim)
+                await wait_for_master(monitor, 3)
+                if first:
+                    await gateway.close()
+                else:
+                    running.cancel()
+                    await gateway.restore()
 
     async def test_rejected_capture_features_are_not_retried(self) -> None:
         monitor = NativeMonitor(self.endpoint, reconnect_interval=0.01)

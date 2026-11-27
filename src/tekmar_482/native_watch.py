@@ -12,9 +12,10 @@ from ._configuration_watch import ConfigurationReader, ConfigurationWatch
 from ._native_payloads.climate import AIR_MASTER, AIR_MEMBER, HEATING_SETUP, MODE_BLOCKS
 from ._native_payloads.io import IoEndpoint
 from ._native_payloads.layouts import MULTI_WEEK
-from ._native_payloads.queries import NativeStatusQuery
+from ._native_payloads.queries import NativeStatusQuery, StatusRequest
 from ._native_payloads.schedules import SCHEDULE_STATUS, SETUP_BLOCK
 from ._native_payloads.sensors import SENSOR_BLOCKS
+from ._native_payloads.water import MASTER_PRESENT, MASTER_STATUS, PLANT_LOOP_STATUS
 from ._observation import (
     DeferredReadError,
     ExpiredReadError,
@@ -26,7 +27,13 @@ from .constants import TN4_PORTS
 from .native import NativeAddress, NativeFrame
 from .native_plant_registers import PLANT_REGISTERS
 from .native_setpoint import SETPOINT_BLOCKS
-from .native_state import BLOCK_UPDATE, TAKING_ADDRESS, NativePath, NativeState
+from .native_state import (
+    BLOCK_REPORT,
+    BLOCK_UPDATE,
+    TAKING_ADDRESS,
+    NativePath,
+    NativeState,
+)
 from .native_targets import ADJUSTMENT_BLOCKS
 from .normal_trace import NormalNativeSession, NormalPeerCapture
 from .raw import CaptureGap
@@ -44,9 +51,11 @@ if TYPE_CHECKING:
     from .raw import BridgeStream, CaptureRecord, NativeBlockBatch, TxResult
 
 _HOST = NativeAddress(0, 0)
+_MASTER_QUERY = NativeStatusQuery(StatusRequest.MASTER)
 _UPDATE_HEADER = 4
 type _Read = int | SnowRead | BlockKey | IoEndpoint
-type _Job = tuple[NativePath, _Read]
+type _DeviceJob = tuple[NativePath, _Read]
+type _Job = _DeviceJob | _MasterProbe
 type _ChannelHint = tuple[int, int] | None
 type _ModeHint = tuple[int, _ChannelHint, _ChannelHint]
 
@@ -102,25 +111,47 @@ class NativeWatchResult:
     latest_statuses: tuple[NativeStatusBatch, ...]
 
 
+@dataclass(frozen=True, eq=False, slots=True)
+class _MasterProbe:
+    port: int
+
+
 class _PortQueue:
-    def __init__(self) -> None:
+    def __init__(self, port: int) -> None:
+        self.port = port
         self.jobs: OrderedDict[_Job, None] = OrderedDict()
         self.ready = asyncio.Event()
+        self.master_probe: _MasterProbe | None = None
+        self.master_answer: NativeStatusBatch | None = None
+        self.has_master_map = False
 
     def add(
         self,
-        path: NativePath,
-        block: _Read,
+        job: _Job,
         *,
         urgent: bool,
     ) -> None:
-        self.jobs[path, block] = None
+        self.jobs[job] = None
         if urgent:
-            self.jobs.move_to_end((path, block), last=False)
+            self.jobs.move_to_end(job, last=False)
         self.ready.set()
 
+    def request_master(self) -> None:
+        if self.master_probe is None and not self.has_master_map:
+            self.master_probe = _MasterProbe(self.port)
+            self.add(self.master_probe, urgent=False)
+
+    def reset_master(self) -> None:
+        if self.master_probe is not None:
+            self.jobs.pop(self.master_probe, None)
+        self.master_probe = None
+        self.master_answer = None
+        self.has_master_map = False
+
     def discard(self, path: NativePath) -> None:
-        self.jobs = OrderedDict.fromkeys(job for job in self.jobs if job[0] != path)
+        self.jobs = OrderedDict.fromkeys(
+            job for job in self.jobs if isinstance(job, _MasterProbe) or job[0] != path
+        )
 
     async def take(self) -> _Job:
         while not self.jobs:
@@ -191,12 +222,13 @@ class _Watch:
         self.on_native = on_native
         self.count = 0
         self.epochs: dict[NativePath, int] = {}
-        self.retry_hints: dict[_Job, _ModeHint] = {}
+        self.retry_hints: dict[_DeviceJob, _ModeHint] = {}
         self.on_change = on_change
-        self.queues = {p: _PortQueue() for p in sorted(ports)} if active else {}
+        self.queues = {p: _PortQueue(p) for p in sorted(ports)} if active else {}
         self.paths = paths
         self.ports = ports
         self.discover = active and paths is None
+        self.discover_plant = self.discover and plant_settings
         self.enrolled: set[NativePath] = set()
         self.stale_after = stale_after
         self.deadlines: OrderedDict[NativePath, float] = OrderedDict()
@@ -223,7 +255,7 @@ class _Watch:
                     and self.state.block_revision(path, block) > 0
                 )
             )
-            q.add(path, block, urgent=urgent)
+            q.add((path, block), urgent=urgent)
 
     def _invalidate(self, path: NativePath) -> None:
         self.identities.pop(path, None)
@@ -258,7 +290,32 @@ class _Watch:
         while (deadline := self.next_expiration) is not None and deadline <= now:
             path = next(iter(self.deadlines))
             seen = self.state.forget(path)
+            self._update_master_map(path.port)
             self._retire(path, notify=seen)
+
+    def _update_master_map(self, port: int) -> None:
+        if self.discover_plant and (queue := self.queues.get(port)) is not None:
+            present = self.state.has_master_announcement(port)
+            if queue.has_master_map and not present:
+                queue.reset_master()
+            queue.has_master_map = present
+
+    def _observe_plant(self, frame: NativeFrame) -> None:
+        if not self.discover_plant:
+            return
+        if frame.message_id in (MASTER_PRESENT, TAKING_ADDRESS) or (
+            frame.message_id == BLOCK_REPORT
+            and frame.message.payload.startswith(b"\0\0")
+        ):
+            self._update_master_map(frame.port)
+        elif frame.message_id in (MASTER_STATUS, PLANT_LOOP_STATUS):
+            queue = self.queues[frame.port]
+            if (
+                queue.master_probe is None
+                and not queue.has_master_map
+                and "truncated" not in frame.decoded
+            ):
+                queue.request_master()
 
     def _fresh(self, path: NativePath, now: float) -> None:
         if self.stale_after is not None:
@@ -327,6 +384,9 @@ class _Watch:
     ) -> None:
         if self.snow is not None:
             self.snow.capture_gap(record)
+        for port, queue in self.queues.items():
+            if record.affects(port):
+                queue.reset_master()
         known = set(changed)
         for path in sorted(known | (self.paths or set()) | self.enrolled):
             if record.affects(path.port):
@@ -363,6 +423,7 @@ class _Watch:
         if not isinstance(record, NativeFrame):
             return
         sender = NativePath.from_frame(record)
+        self._observe_plant(record)
         if moved:
             for path in changed:
                 self._retire(path, reidentify=True, notify=path in prior_paths)
@@ -480,7 +541,11 @@ class _Watch:
             msg = "a passive watcher cannot probe a port"
             raise RuntimeError(msg)
         while True:
-            path, block = await queue.take()
+            job = await queue.take()
+            if isinstance(job, _MasterProbe):
+                await self._probe_master(stream, queue, job, source, timeout)
+                continue
+            path, block = job
             epoch = self.epochs.get(path, 0)
             try:
                 await self._probe_one(
@@ -499,6 +564,38 @@ class _Watch:
                 self.count += 1
                 if isinstance(block, IoEndpoint) and epoch == self.epochs.get(path, 0):
                     self.io_pending.discard((path, block))
+
+    async def _probe_master(
+        self,
+        stream: BridgeStream | OrderedNormalReads,
+        queue: _PortQueue,
+        job: _MasterProbe,
+        source: NativeAddress,
+        timeout: float,
+    ) -> None:
+        if queue.master_probe is not job or queue.has_master_map:
+            return
+        try:
+            answer = await stream.read_status(
+                job.port,
+                _MASTER_QUERY,
+                source=source,
+                timeout=timeout,
+                wait_for_edits=True,
+            )
+        except DeferredReadError:
+            if queue.master_probe is job:
+                queue.add(job, urgent=False)
+            return
+        except ExpiredReadError:
+            self.count += 1
+            return
+        self.count += 1
+        # Only the peer capture establishes the map. The batch is diagnostic.
+        if queue.master_probe is job:
+            queue.master_answer = answer
+        if answer.tx_result is None and not isinstance(stream, OrderedNormalReads):
+            await stream.wait_transmit_idle(job.port)
 
     async def _probe_one(
         self,
@@ -720,7 +817,14 @@ async def watch_native(
             *watch.latest.values(),
             *(watch.configuration.latest.values() if watch.configuration else ()),
         ),
-        tuple(watch.statuses.values()),
+        (
+            *watch.statuses.values(),
+            *(
+                q.master_answer
+                for q in watch.queues.values()
+                if q.master_answer is not None
+            ),
+        ),
     )
 
 

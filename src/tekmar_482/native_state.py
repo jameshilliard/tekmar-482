@@ -199,6 +199,10 @@ class NativeState:
     def water_source(self, path: NativePath) -> WaterSource | None:
         return self._water.source(path.port, path.address)
 
+    def has_master_announcement(self, port: int) -> bool:
+        """Check for a MasterPresent map that includes the sender's full subnet."""
+        return self._water.has_master_announcement(port)
+
     def water_systems(self, *, ports: Iterable[int]) -> tuple[WaterSystem, ...]:
         """Resolve advertised loops within a known shared physical network."""
         return water_systems(self.water_sources, ports=ports)
