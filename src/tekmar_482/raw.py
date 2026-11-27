@@ -15,7 +15,7 @@ from .constants import TN4_PORTS
 from .exceptions import ConnectionClosedError, ProtocolError, TekmarError
 from .native import NativeFrame, NativeMessage
 from .native_schedule import edit_schedule_time
-from .native_snow_control import apply_snowmelt_group
+from .native_snow_control import apply_snowmelt_group, edit_snowmelt_setpoint
 from .native_status import StatusCollector
 from .native_target_edit import edit_thermostat_target
 from .native_write import BlockDelivery, NativeBlockEditor
@@ -25,7 +25,9 @@ if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Awaitable, Callable, Iterator, Mapping
 
     from ._native_payloads.climate import ThermostatMode
+    from ._native_payloads.layouts import SnowmeltBlock
     from ._native_payloads.queries import NativeStatusQuery
+    from ._native_payloads.snowmelt import SnowmeltApplication
     from ._native_payloads.writes import NativeField
     from .management import ErrorReporting
     from .native import NativeAddress, NativeBlockQuery, NativeTargets
@@ -369,6 +371,18 @@ class BridgeStream(NativeReader, Protocol):
         timeout: float = 20,
         preview: bool = True,
     ) -> NativeWriteResult: ...
+    async def write_snowmelt_setpoint(
+        self,
+        port: int,
+        target: NativeAddress,
+        block: SnowmeltBlock,
+        celsius: float | None,
+        *,
+        source: NativeAddress,
+        expected_application: SnowmeltApplication | None = None,
+        timeout: float = 20,
+        preview: bool = True,
+    ) -> NativeWriteResult: ...
     async def set_snowmelt_group(
         self,
         port: int,
@@ -378,6 +392,7 @@ class BridgeStream(NativeReader, Protocol):
         enabled: bool,
         source: NativeAddress,
         expected_group: int | None = None,
+        expected_zone: int | None = None,
         timeout: float = 20,
         preview: bool = True,
     ) -> SnowmeltGroupResult: ...
@@ -575,6 +590,29 @@ class RawDispatcher:
         async with self._editor(port, target, source, timeout) as editor:
             return await edit_thermostat_target(editor, target, change, preview=preview)
 
+    async def write_snowmelt_setpoint(
+        self,
+        port: int,
+        target: NativeAddress,
+        block: SnowmeltBlock,
+        celsius: float | None,
+        *,
+        source: NativeAddress,
+        expected_application: SnowmeltApplication | None = None,
+        timeout: float = 20,
+        preview: bool = True,
+    ) -> NativeWriteResult:
+        """Preview or verify a stored slab target without enabling a group."""
+        async with self._editor(port, target, source, timeout) as editor:
+            return await edit_snowmelt_setpoint(
+                editor,
+                target,
+                block,
+                celsius,
+                expected_application=expected_application,
+                preview=preview,
+            )
+
     async def set_snowmelt_group(
         self,
         port: int,
@@ -584,6 +622,7 @@ class RawDispatcher:
         enabled: bool,
         source: NativeAddress,
         expected_group: int | None = None,
+        expected_zone: int | None = None,
         timeout: float = 20,
         preview: bool = True,
     ) -> SnowmeltGroupResult:
@@ -603,6 +642,7 @@ class RawDispatcher:
                 operation,
                 enabled=enabled,
                 expected_group=expected_group,
+                expected_zone=expected_zone,
                 preview=preview,
             )
 

@@ -544,25 +544,31 @@ class SnowmeltSetpoint:
             return None
         return degh_to_celsius(self.raw)
 
+    def encode_celsius(self, value: float | None) -> int:
+        """Encode a temperature or explicit Off without building a frame."""
+        if value is None:
+            if self.block == SnowmeltBlock.MELT_SETPOINT:
+                msg = "the melt slab target has no Off setting"
+                raise ValueError(msg)
+            return 0
+        if isinstance(value, bool):
+            msg = "expected a slab temperature in Celsius"
+            raise TypeError(msg)
+        raw = celsius_to_degh(value)
+        if not raw or raw in H_UNAVAILABLE:
+            msg = "temperature encodes a reserved wire value"
+            raise ValueError(msg)
+        return raw
+
     def update_celsius(
         self,
         value: float | None,
         *,
         source: NativeAddress,
     ) -> NativeMessage:
-        if value is None:
-            if self.block == SnowmeltBlock.MELT_SETPOINT:
-                msg = "the melt slab target has no Off setting"
-                raise ValueError(msg)
-            raw = 0
-        else:
-            raw = celsius_to_degh(value)
-            if not raw or raw in H_UNAVAILABLE:
-                msg = "temperature encodes a reserved wire value"
-                raise ValueError(msg)
         return NativeMessage.update_block(
             self.block,
-            raw.to_bytes(2, "little"),
+            self.encode_celsius(value).to_bytes(2, "little"),
             source=source,
             target=self.target,
         )

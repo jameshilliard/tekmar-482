@@ -250,6 +250,7 @@ from .native_sensors import (
 from .native_setpoint import NativeSetpointControl
 from .native_snapshot import NativeSnapshot, read_native_devices, read_native_snapshot
 from .native_snow_control import (
+    SnowmeltGroupBinding,
     SnowmeltGroupResult,
     SnowmeltGroupStatus,
     SnowmeltOperation,
@@ -631,6 +632,7 @@ __all__ = [
     "SnowmeltChannel",
     "SnowmeltConfiguration",
     "SnowmeltData",
+    "SnowmeltGroupBinding",
     "SnowmeltGroupResult",
     "SnowmeltGroupStatus",
     "SnowmeltKey",

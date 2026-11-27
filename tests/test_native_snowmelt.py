@@ -17,6 +17,7 @@ from tekmar_482 import (
     Packet,
     SnowmeltAddress,
     SnowmeltApplication,
+    SnowmeltBlock,
     SnowmeltGroupResult,
     SnowmeltKey,
     SnowmeltOperatingState,
@@ -79,6 +80,24 @@ def setup_frames(path: NativePath = SITE) -> list[NativeFrame]:
 
 
 class SnowmeltStateTests(unittest.TestCase):
+    def test_stored_slab_target_is_distinct_from_operating_target_and_off(self) -> None:
+        state = NativeState()
+        for item in setup_frames():
+            state.observe(item)
+        state.observe(snow(ZONE, [(0x23, 0x600)]))
+        control = state.snowmelt(SITE)
+        assert control and control.primary
+        melt = control.setpoint(SnowmeltBlock.MELT_SETPOINT)
+        idle = control.setpoint(SnowmeltBlock.IDLE_SETPOINT)
+        assert melt and melt.raw == 0x5F0 and not melt.is_off
+        assert control.primary.raw(SnowmeltKey.SLAB_SETPOINT) == 0x600
+        assert idle and idle.is_off and idle.celsius is None
+        assert idle.encode_celsius(None) == 0 and idle.encode_celsius(0) == 1170
+
+        state.observe(block(0xD0, b"\x01\x04"))
+        control = state.snowmelt(SITE)
+        assert control and control.setpoint(SnowmeltBlock.IDLE_SETPOINT) is None
+
     def test_source_role_and_number_remain_independent(self) -> None:
         state = NativeState()
         other = NativePath(1, SITE.subnet, SITE.node)
@@ -269,6 +288,7 @@ class SnowmeltWatchTests(unittest.IsolatedAsyncioTestCase):
         op: Operation,
         *,
         expected: int | None,
+        expected_zone: int | None = None,
         preview: bool = False,
         enabled: bool = True,
         timeout: float = 1,
@@ -280,6 +300,7 @@ class SnowmeltWatchTests(unittest.IsolatedAsyncioTestCase):
                 op,
                 enabled=enabled,
                 expected_group=expected,
+                expected_zone=expected_zone,
                 preview=preview,
                 timeout=timeout,
                 source=NativeAddress(0, 0),
@@ -316,6 +337,33 @@ class SnowmeltWatchTests(unittest.IsolatedAsyncioTestCase):
             task = self.command(Operation.MELT, expected=expected)
             await self.assignments(setup)
             with self.assertRaisesRegex(ValueError, error):
+                await task
+            assert self.tx.empty()
+
+        task = self.command(Operation.MELT, expected=4, expected_zone=2)
+        await self.assignments()
+        with self.assertRaisesRegex(ValueError, "differs from expected zone"):
+            await task
+        assert self.tx.empty()
+
+    async def test_target_edit_checks_application_before_transmitting(self) -> None:
+        for app in (SnowmeltApplication.MIXING, SnowmeltApplication.SENSOR_ONLY):
+            task = asyncio.create_task(
+                self.stream.write_snowmelt_setpoint(
+                    SITE.port,
+                    SITE.address,
+                    SnowmeltBlock.IDLE_SETPOINT,
+                    None,
+                    source=NativeAddress(0, 0),
+                    expected_application=SnowmeltApplication.ELECTRIC,
+                    preview=False,
+                ),
+            )
+            await self.boot()
+            assert (await self.next_send())[1].payload[:2] == b"\xd0\0"
+            self.ack()
+            self.rx(block(0xD0, bytes([1, app])))
+            with self.assertRaisesRegex(ValueError, "application"):
                 await task
             assert self.tx.empty()
 

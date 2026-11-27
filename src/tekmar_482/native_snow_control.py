@@ -7,17 +7,20 @@ from dataclasses import dataclass, replace
 from enum import Enum, StrEnum
 from typing import TYPE_CHECKING
 
+from ._native_payloads.layouts import SNOW_SLAB_TARGETS
 from ._native_payloads.layouts import SnowmeltBlock as Block
 from ._native_payloads.line import GROUP_IDS
 from ._native_payloads.queries import NativeStatusQuery
 from ._native_payloads.snowmelt import (
-    SnowmeltKey as Key,
-)
-from ._native_payloads.snowmelt import (
+    SnowmeltApplication,
     SnowmeltOperatingState,
     SnowmeltRole,
 )
-from .native import NativeBlockQuery, NativeMessage, require_enum
+from ._native_payloads.snowmelt import (
+    SnowmeltKey as Key,
+)
+from ._native_payloads.writes import BlockPatch, NativeField
+from .native import NativeBlockQuery, NativeMessage, SnowmeltSetpoint, require_enum
 from .native_identity import NativeIdentity
 from .native_snowmelt import SnowmeltConfiguration
 
@@ -26,13 +29,42 @@ if TYPE_CHECKING:
 
     from .native import NativeAddress, NativeFrame
     from .native_status import NativeStatusBatch
-    from .native_write import NativeBlockEditor
+    from .native_write import NativeBlockEditor, NativeWriteResult
     from .raw import TxResult
 
 
 class SnowmeltOperation(Enum):
     MELT = Block.MELT_GROUP
     STORM = Block.STORM_GROUP
+
+
+@dataclass(frozen=True, slots=True)
+class SnowmeltGroupBinding:
+    zone: int
+    group: int
+
+    @classmethod
+    def from_setup(
+        cls,
+        setup: SnowmeltConfiguration,
+        operation: SnowmeltOperation,
+    ) -> SnowmeltGroupBinding | None:
+        """Resolve an unambiguous group from a configured controller zone."""
+        require_enum(operation, SnowmeltOperation)
+        address = setup.primary
+        if address is None or address.role is not SnowmeltRole.ZONE:
+            return None
+        group, other = setup.melt_group, setup.storm_group
+        if operation is SnowmeltOperation.STORM:
+            group, other = other, group
+        if (
+            group is None
+            or group not in GROUP_IDS
+            or other not in GROUP_IDS
+            or group == other
+        ):
+            return None
+        return cls(address.number, group)
 
 
 class SnowmeltGroupStatus(StrEnum):
@@ -76,6 +108,30 @@ class SnowmeltGroupResult:
         return (state is operation) == self.enabled
 
 
+async def _reported_application(
+    editor: NativeBlockEditor,
+    target: NativeAddress,
+) -> tuple[NativeFrame, SnowmeltApplication]:
+    identity = NativeIdentity.from_report(
+        (await editor.read(NativeBlockQuery(target, 0))).require_report().decoded,
+    )
+    if (
+        identity is None
+        or not identity.product
+        or identity.product.family != "snowmelt_control"
+    ):
+        msg = "operation requires an identified snowmelt control"
+        raise ValueError(msg)
+    frame = (
+        await editor.read(NativeBlockQuery(target, Block.APPLICATION_MODE))
+    ).require_report()
+    setup = SnowmeltConfiguration.from_blocks({(Block.APPLICATION_MODE, None): frame})
+    if (app := setup.application) is None or app.role is not SnowmeltRole.ZONE:
+        msg = "operation requires a reported control application"
+        raise ValueError(msg)
+    return frame, app
+
+
 async def apply_snowmelt_group(
     editor: NativeBlockEditor,
     send: Callable[[NativeMessage], Awaitable[TxResult | None]],
@@ -85,31 +141,27 @@ async def apply_snowmelt_group(
     *,
     enabled: bool,
     expected_group: int | None,
+    expected_zone: int | None,
     preview: bool,
 ) -> SnowmeltGroupResult:
     require_enum(operation, SnowmeltOperation)
     if (not preview or expected_group is not None) and expected_group not in GROUP_IDS:
         msg = "a snowmelt broadcast needs an explicit expected group 1..12"
         raise ValueError(msg)
+    if (
+        expected_zone is not None
+        and not 1 <= expected_zone <= SnowmeltRole.ZONE.maximum
+    ):
+        msg = "invalid expected snowmelt zone"
+        raise ValueError(msg)
 
     async def read(block: int) -> NativeFrame:
         return (await editor.read(NativeBlockQuery(target, block))).require_report()
 
-    identity = NativeIdentity.from_report((await read(0)).decoded)
-    if (
-        not identity
-        or not identity.product
-        or identity.product.family != "snowmelt_control"
-    ):
-        msg = "snowmelt group selection requires an identified snowmelt control"
-        raise ValueError(msg)
+    application, _ = await _reported_application(editor, target)
     blocks: dict[tuple[int, int | None], NativeFrame] = {
-        (Block.APPLICATION_MODE, None): await read(Block.APPLICATION_MODE),
+        (Block.APPLICATION_MODE, None): application,
     }
-    app = SnowmeltConfiguration.from_blocks(blocks).application
-    if app is None or app.role is not SnowmeltRole.ZONE:
-        msg = "remote melt/storm requires a reported control application"
-        raise ValueError(msg)
     for block in (Block.ZONE_ID, Block.MELT_GROUP, Block.STORM_GROUP):
         blocks[block, None] = await read(block)
     setup = SnowmeltConfiguration.from_blocks(blocks)
@@ -117,21 +169,20 @@ async def apply_snowmelt_group(
     if address is None:
         msg = "missing or invalid configured snowmelt zone"
         raise ValueError(msg)
-    group, other = setup.melt_group, setup.storm_group
-    if operation is SnowmeltOperation.STORM:
-        group, other = other, group
-    if (
-        group is None
-        or group not in GROUP_IDS
-        or other not in GROUP_IDS
-        or group == other
-    ):
+    binding = SnowmeltGroupBinding.from_setup(setup, operation)
+    if binding is None:
         msg = "missing, invalid or ambiguous melt/storm group assignment"
         raise ValueError(msg)
+    group = binding.group
     if expected_group is not None and group != expected_group:
         msg = (
             f"configured {operation.name.lower()} group {group} "
             f"differs from expected group {expected_group}"
+        )
+        raise ValueError(msg)
+    if expected_zone is not None and binding.zone != expected_zone:
+        msg = (
+            f"configured zone {binding.zone} differs from expected zone {expected_zone}"
         )
         raise ValueError(msg)
     message = NativeMessage.setpoint_group(
@@ -171,3 +222,32 @@ async def apply_snowmelt_group(
         else SnowmeltGroupStatus.NO_STATE_REPORT
     )
     return replace(result, status=status, tx_result=tx, readback=batch)
+
+
+async def edit_snowmelt_setpoint(
+    editor: NativeBlockEditor,
+    target: NativeAddress,
+    block: Block,
+    celsius: float | None,
+    *,
+    expected_application: SnowmeltApplication | None,
+    preview: bool,
+) -> NativeWriteResult:
+    """Check the peer and application before editing a stored slab target."""
+    require_enum(block, Block)
+    if block not in SNOW_SLAB_TARGETS:
+        msg = "expected a melt, idle or storm target"
+        raise ValueError(msg)
+    if expected_application is not None:
+        require_enum(expected_application, SnowmeltApplication)
+
+    _, app = await _reported_application(editor, target)
+    if expected_application is not None and app is not expected_application:
+        msg = "configured snowmelt application changed"
+        raise ValueError(msg)
+
+    query = NativeBlockQuery(target, block)
+    before = (await editor.read(query)).require_report()
+    raw = SnowmeltSetpoint.from_frame(before).encode_celsius(celsius)
+    patch = BlockPatch.from_fields(block, {NativeField.SLAB_TARGET: raw})
+    return await editor.write(query, patch, before=before, preview=preview)

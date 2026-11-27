@@ -33,7 +33,7 @@ from .error_reports import ALL_SOURCES, ErrorReports, GatewayErrorCounter, sourc
 from .exceptions import ConnectionClosedError, ProtocolError, TekmarError
 from .native import NativeAddress, NativeTargets
 from .native_schedule import edit_schedule_time
-from .native_snow_control import apply_snowmelt_group
+from .native_snow_control import apply_snowmelt_group, edit_snowmelt_setpoint
 from .native_status import StatusCollector, snowmelt_status_query
 from .native_target_edit import edit_thermostat_target
 from .native_write import NativeBlockEditor
@@ -53,7 +53,9 @@ if TYPE_CHECKING:
 
     from ._bridge_diagnostics import ErrorReason, ErrorSource
     from ._native_payloads.climate import ThermostatMode
+    from ._native_payloads.layouts import SnowmeltBlock
     from ._native_payloads.queries import NativeStatusQuery
+    from ._native_payloads.snowmelt import SnowmeltApplication
     from ._native_payloads.writes import NativeField
     from .client import Tekmar482Client
     from .native import NativeBlockQuery, NativeFrame, NativeMessage
@@ -553,6 +555,28 @@ class BridgeManagement(_Management):
         async with self._block_editor(port, timeout) as editor:
             return await edit_thermostat_target(editor, target, change, preview=preview)
 
+    async def write_snowmelt_setpoint(
+        self,
+        port: int,
+        target: NativeAddress,
+        block: SnowmeltBlock,
+        celsius: float | None,
+        *,
+        expected_application: SnowmeltApplication | None = None,
+        timeout: float = DEFAULT_BLOCK_TIMEOUT,
+        preview: bool = True,
+    ) -> NativeWriteResult:
+        """Preview or verify a stored slab target without enabling a group."""
+        async with self._block_editor(port, timeout) as editor:
+            return await edit_snowmelt_setpoint(
+                editor,
+                target,
+                block,
+                celsius,
+                expected_application=expected_application,
+                preview=preview,
+            )
+
     async def write_schedule_time(
         self,
         port: int,
@@ -719,6 +743,7 @@ class BridgeManagement(_Management):
         *,
         enabled: bool,
         expected_group: int | None = None,
+        expected_zone: int | None = None,
         timeout: float = DEFAULT_BLOCK_TIMEOUT,
         preview: bool = True,
     ) -> SnowmeltGroupResult:
@@ -732,6 +757,7 @@ class BridgeManagement(_Management):
                 operation,
                 enabled=enabled,
                 expected_group=expected_group,
+                expected_zone=expected_zone,
                 preview=preview,
             )
 

@@ -30,6 +30,8 @@ from tekmar_482 import (
     ScheduleChange,
     ScheduleEvent,
     ScheduleTarget,
+    SnowmeltApplication,
+    SnowmeltBlock,
     SnowmeltGroupStatus,
     SnowmeltKey,
     SnowmeltOperatingState,
@@ -406,6 +408,7 @@ class FirmwareInteropTests(unittest.IsolatedAsyncioTestCase):
                 SnowmeltOperation.MELT,
                 enabled=True,
                 expected_group=4,
+                expected_zone=3,
                 preview=False,
             )
             assert (result.group, result.zone) == (4, 3)
@@ -418,6 +421,32 @@ class FirmwareInteropTests(unittest.IsolatedAsyncioTestCase):
             slab = reading.snowmelt_pair(SnowmeltKey.SLAB_TEMPERATURE)
             assert water and water.water_detection is WaterDetection.DRY
             assert slab and slab.raw == 0x600
+
+    async def test_snowmelt_idle_target_off_does_not_enable_a_group(self) -> None:
+        def read(block: str, reply: str) -> Exchange:
+            return _block(2, "14 04000000", block, reply)
+
+        baseline = read("7200", "6e7140c5 720003 b004")
+        script = (
+            read("0000", "6e7140c9 00003f 499d01 ca0402"),
+            read("d000", "6e7140c5 d00003 0302"),
+            baseline,
+            baseline,
+            (2, "6df00006 1403 7200 0000", ()),
+            read("7200", "6e7140c5 720003 0000"),
+        )
+        async with _gateway(script) as manager:
+            result = await manager.write_snowmelt_setpoint(
+                2,
+                _SNOW,
+                SnowmeltBlock.IDLE_SETPOINT,
+                None,
+                expected_application=SnowmeltApplication.ELECTRIC,
+                preview=False,
+            )
+            assert result.status is NativeWriteStatus.CONFIRMED
+            assert result.readback is not None
+            assert result.readback.require_report().decoded["idle_setpoint_raw"] == 0
 
     async def test_indexed_plant_io_and_setpoint_use_independent_ports(self) -> None:
         old = _block(1, "31 40000000", "2c00", "6e7311cb 2c00ff 2006 1006 0000 0007")

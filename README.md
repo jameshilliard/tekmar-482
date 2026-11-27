@@ -910,6 +910,7 @@ zone. Missing, changed, ambiguous or sensor-only bindings cannot transmit.
 `await BridgeManagement(client).set_snowmelt_group(port, address,
 SnowmeltOperation.MELT, enabled=True)` uses Normal mode and also defaults
 to preview. An intentional send requires `preview=False, expected_group=N`.
+Pass `expected_zone` to pin a previously displayed zone as well as the group.
 The Raw stream offers the same operation with an explicit source address.
 
 After sending once, the client requests operating state from that zone.
@@ -920,6 +921,15 @@ zone melting after a group is disabled. The CLI exits nonzero if the
 observed operation does not match, and never retries the broadcast. During
 a watch, a change in the configured group's enable on the observed port
 triggers an operating-state read, not an optimistic mode change.
+
+Use `device.setpoint(SnowmeltBlock.MELT_SETPOINT)` for the stored slab target,
+not the operating slab setpoint in a status report.
+`await manager.write_snowmelt_setpoint(port, address, block, celsius)` reads
+the controller's application and previews the edit. Pass `preview=False`
+to compare the baseline, write and read the stored block back. Pin the
+observed application with `expected_application` when editing from a UI.
+Use `None` for Off on Idle or Storm. Zero Celsius is a temperature, not Off;
+Melt does not support Off. This operation never issues a group request.
 
 ### Line announcements
 

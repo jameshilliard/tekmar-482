@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Self
 
+from ._native_payloads.layouts import SNOW_SLAB_TARGETS
 from ._native_payloads.layouts import SnowmeltBlock as Block
 from ._native_payloads.queries import NativeStatusQuery
 from ._native_payloads.snowmelt import (
@@ -14,6 +15,7 @@ from ._native_payloads.snowmelt import (
     SnowmeltReport,
     SnowmeltRole,
 )
+from .native import SnowmeltSetpoint, require_enum
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -188,6 +190,24 @@ class NativeSnowmelt:
     def primary(self) -> SnowmeltChannel | None:
         address = self.setup.primary
         return next((c for c in self.channels if c.address == address), None)
+
+    def setpoint(self, block: Block) -> SnowmeltSetpoint | None:
+        """Return a supported stored slab target, not an operating sample."""
+        require_enum(block, Block)
+        if block not in SNOW_SLAB_TARGETS:
+            msg = "expected a melt, idle or storm target"
+            raise ValueError(msg)
+        app = self.setup.application
+        if app is None or app.role is not SnowmeltRole.ZONE or not self.path.node:
+            return None
+        raw = {
+            Block.MELT_SETPOINT: self.setup.melt_setpoint_raw,
+            Block.IDLE_SETPOINT: self.setup.idle_setpoint_raw,
+            Block.STORM_SETPOINT: self.setup.storm_setpoint_raw,
+        }[block]
+        if raw is None:
+            return None
+        return SnowmeltSetpoint(self.path.port, self.path.address, block, raw)
 
     @property
     def missing_keys(self) -> bytes | None:
