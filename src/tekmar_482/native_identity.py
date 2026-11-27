@@ -36,6 +36,9 @@ class NativeIdentity:
         previous: NativeIdentity | None = None,
     ) -> NativeIdentity | None:
         """Merge fields; a changed revision alone cannot identify a replacement."""
+        j_number = _number(fields, "j_number")
+        if j_number == 0:
+            return previous  # A corrupt block cannot establish or replace identity.
         number = _number(fields, "product_number")
         if number is None:
             if previous is None:
@@ -45,7 +48,7 @@ class NativeIdentity:
             product_number = number
         current = cls(
             product_number,
-            _number(fields, "j_number"),
+            j_number,
             _number(fields, "z_number"),
             _number(fields, "max_tn4_version"),
         )

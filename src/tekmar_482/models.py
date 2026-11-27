@@ -168,16 +168,21 @@ class DiscoveredDevice:
 
     @property
     def feature(self) -> DeviceFeature | None:
-        if self.type_code is None:
+        j_number = self.version // 100 if self.version is not None else None
+        if self.type_code is None or j_number == 0:
             return None
         if (feature := DEVICE_FEATURES.get(self.type_code)) is not None:
             return feature
         # Older aliases can overlap. tHA DeviceVersion is J * 100 + Z.
-        product = identify_product(
-            self.type_code,
-            self.version // 100 if self.version is not None else None,
-        )
-        return _MODEL_FEATURES.get(product.model) if product else None
+        product = identify_product(self.type_code, j_number)
+        if product is None:
+            return None
+        if (feature := _MODEL_FEATURES.get(product.model)) is not None:
+            return feature
+        # Knowing a timer or plant controller's identity does not grant tHA controls.
+        if product.family in DeviceKind:
+            return DeviceFeature(product.model, DeviceKind(product.family))
+        return None
 
     @property
     def kind(self) -> DeviceKind | None:

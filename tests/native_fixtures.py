@@ -26,4 +26,4 @@ def identity(
     z: int = 1,
     path: NativePath = TEST_PATH,
 ) -> NativeFrame:
-    return block(0, b"\x3f" + number.to_bytes(3, "little") + bytes([0, 0, z]), path)
+    return block(0, b"\x27" + number.to_bytes(3, "little") + bytes([z]), path)

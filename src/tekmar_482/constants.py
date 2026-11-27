@@ -45,6 +45,13 @@ class DeviceKind(StrEnum):
     THERMOSTAT = "thermostat"
     SETPOINT = "setpoint"
     SNOWMELT = "snowmelt"
+    RESET_CONTROL = "reset_control"
+    MIXING_MODULE = "mixing_module"
+    TIMER = "timer"
+    USER_SWITCH = "user_switch"
+    POWER_MANAGER = "power_manager"
+    ZONE_MANAGER = "zone_manager"
+    ZONE_EXPANSION_MODULE = "zone_expansion_module"
 
 
 class DeviceAttributeBit(IntFlag):

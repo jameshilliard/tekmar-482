@@ -76,6 +76,15 @@ identity. The node lock bit does not create a second device on a path.
 Each result distinguishes the catalog's candidate blocks from those
 actually reported with supported bytes during the scan.
 
+Early 541, 542, 161 and 162 devices can report byte-swapped J numbers.
+The native decoder recognizes the documented product/J pairs; the 537
+also has a known zero-product/J1161 pair. Raw identification fields
+remain available in captures. A supported J of zero is a corrupt
+identification, not a missing field or evidence of a replacement.
+Normal inventory can also label identified reset controls, mixing
+modules, timers, zone modules, power managers and switches. Recognizing
+the model does not create tHA temperature, mode or fan controls.
+
 ```bash
 tekmar-482 discover --tcp 192.0.2.10:3001 --duration 45 --json
 ```

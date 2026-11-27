@@ -52,7 +52,7 @@ class NativeScheduleTests(unittest.IsolatedAsyncioTestCase):
         await self.enterAsyncContext(self.stream.receiving(idle.get))
 
     def identity(self, product: int, z: int) -> None:
-        self.blocks[0, 0] = b"\x3f" + product.to_bytes(3, "little") + bytes([0, 0, z])
+        self.blocks[0, 0] = b"\x27" + product.to_bytes(3, "little") + bytes([z])
 
     async def receive_host(self, send: bytes) -> None:
         assert send[:2] == b"\x01\x01"

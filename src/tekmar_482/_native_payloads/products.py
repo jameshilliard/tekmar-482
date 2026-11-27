@@ -111,10 +111,26 @@ for _model, _family, _numbers, _versions in _MODELS:
         _INDEX.setdefault(_number, []).append((_product, _versions))
 
 
+_SWAPPED_J = {24068: 1118, 23556: 1116, 29956: 1141, 30212: 1142}
+
+
+def corrected_identification(product_number: int, j_number: int | None) -> tuple[int, int | None]:
+    """SW 11 Block.fixup_device_identification, without guessing from a J number alone."""
+    if product_number == 0 and j_number == 1161:
+        return 100102, j_number
+    if j_number is not None and (corrected := _SWAPPED_J.get(j_number)) is not None:
+        if any(corrected in versions for _, versions in _INDEX.get(product_number, ())):
+            return product_number, corrected
+    return product_number, j_number
+
+
 def identify_product(product_number: int, j_number: int | None = None) -> NativeProduct | None:
     """Resolve one catalog match; keep missing or contradictory identities unknown."""
+    if j_number == 0:  # Explicit zero is a corrupt report; an unsupported field is different.
+        return None
+    product_number, j_number = corrected_identification(product_number, j_number)
     candidates = [p for p, versions in _INDEX.get(product_number, ())
-                  if not j_number or not versions or j_number in versions]
+                  if j_number is None or not versions or j_number in versions]
     return candidates[0] if len(candidates) == 1 else None
 
 

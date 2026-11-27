@@ -2,6 +2,7 @@ import asyncio
 import unittest
 
 from tekmar_482 import (
+    DeviceKind,
     DiscoveredDevice,
     NativeAddress,
     NativeFrame,
@@ -26,6 +27,52 @@ def identity(number: int, j: int) -> bytes:
 
 
 class NativeInventoryTests(unittest.TestCase):
+    def test_legacy_identity_is_corrected_without_rewriting_bus_observations(
+        self,
+    ) -> None:
+        inventory = NativeInventory()
+        for number, raw_j, model in (
+            (10599181, 24068, "541"),
+            (10599181, 23556, "542"),
+            (3006346, 29956, "161"),
+            (3071882, 30212, "162"),
+            (0, 1161, "537"),
+        ):
+            raw = frame(2, 4, identity(number, raw_j))
+            before = raw.body
+            found = inventory.observe(raw)
+            assert found and found.identity and found.identity.product
+            assert found.identity.product.model == model
+            assert (found.identity.product_number, found.identity.j_number) == (
+                number,
+                raw_j,
+            )
+            assert raw.body == before
+            assert DiscoveredDevice(4, number, raw_j * 100 + 1).model == model
+            corrupt = inventory.observe(frame(2, 4, identity(105801, 0)))
+            assert corrupt and corrupt.identity == found.identity
+        unknown = inventory.observe(frame(2, 5, identity(101103, 0)))
+        assert unknown and unknown.identity is None
+        assert not DiscoveredDevice(5, 105801, 7).is_known_type
+
+    def test_normal_inventory_knows_non_climate_models_without_inventing_controls(
+        self,
+    ) -> None:
+        for number, j, model, family in (
+            (103301, 1191, "402", DeviceKind.RESET_CONTROL),
+            (101103, 1173, "033", DeviceKind.TIMER),
+            (101901, 1159, "346", DeviceKind.POWER_MANAGER),
+            (101901, 1145, "481", DeviceKind.USER_SWITCH),
+            (100001, 1125, "440", DeviceKind.MIXING_MODULE),
+            (99602, None, "337", DeviceKind.ZONE_MANAGER),
+            (99801, None, "325", DeviceKind.ZONE_EXPANSION_MODULE),
+        ):
+            found = DiscoveredDevice(4, number, j * 100 if j is not None else None)
+            assert found.is_known_type and found.model == model and found.kind is family
+            assert not found.supports_mode_setting and not found.supports_heat_setpoint
+            assert not found.supports_fan_percent and not found.supports_cool_setpoint
+        assert not DiscoveredDevice(4, 101901).is_known_type
+
     def test_identity_and_supported_blocks_are_path_specific(self) -> None:
         inventory = NativeInventory()
         # The two ambiguous legacy product codes are not serial numbers.

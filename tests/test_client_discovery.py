@@ -518,7 +518,7 @@ class ClientDiscoveryTest(unittest.IsolatedAsyncioTestCase):
                             response=response(
                                 "DeviceVersion",
                                 address=address,
-                                j_number=1,
+                                j_number=122201,  # J1222, revision B.
                             ),
                         ),
                         request_step(

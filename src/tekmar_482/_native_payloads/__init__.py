@@ -18,7 +18,7 @@ from .layouts import (
 )
 from .line import GROUP_UPDATE, LINE_MESSAGES, NETWORK_INIT_REQUEST, LineValue
 from .plant import MIXING_PRESENT, MIXING_REPORT, MIXING_UPDATE, PLANT_OUTPUT, MixingPresent, MixingReport, MixingUpdate, PlantOutput
-from .products import identify_product
+from .products import corrected_identification, identify_product
 from .scenes import SCENE_RESPONSE_FIELDS, SceneResponse
 from .schedules import DAY_NAMES, SCHEDULE_STATUS, SINGLE_WEEK, DailyEvents, ScheduleBinding, ScheduleCycle, ScheduleEvent, ScheduleStatus
 from .setpoint import SETPOINT_STATUS, SetpointStatus
@@ -202,9 +202,15 @@ def block_report(r: Reader) -> Fields:
             slots = range(start, start + size)
             if all(i in values for i in slots):
                 fields[name] = int.from_bytes(bytes(values[i] for i in slots), "little")
-        number, j_number = fields.get("product_number"), fields.get("j_number")
+        number, raw_j = fields.get("product_number"), fields.get("j_number")
         if isinstance(number, int):
-            product = identify_product(number, j_number if isinstance(j_number, int) else None)
+            j = raw_j if isinstance(raw_j, int) else None
+            effective_number, effective_j = corrected_identification(number, j)
+            if effective_number != number:
+                fields["corrected_product_number"] = effective_number
+            if effective_j is not None and effective_j != j:
+                fields["corrected_j_number"] = effective_j
+            product = identify_product(effective_number, effective_j)
             if product is not None:
                 fields.update(model=product.model, family=product.family)
     for i, name in enumerate(control_words(block)):
