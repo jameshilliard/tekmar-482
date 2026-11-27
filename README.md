@@ -934,8 +934,10 @@ lists the endpoint as incomplete; it does not create empty channels or
 poll. A capture gap or move invalidates the previous evidence. This option
 is only for active watches with I/O discovery enabled.
 
-`frame.io_report` provides the typed value, raw type ID and discovery
-label bytes. `IoDirectory.from_batch(answer)` describes one discovery
+`frame.io_report` provides the typed value, raw type ID and all six
+discovery label bytes. `label_text` removes NUL bytes and exposes a
+nonempty printable ASCII label when present; it is not the model's
+terminal name. `IoDirectory.from_batch(answer)` describes one discovery
 exchange. `state.io_directory(path, endpoint)` combines live observations;
 a complete, source-matched discovery can retire missing channels, but a
 partial scan or silence cannot. A newer change seen during a scan wins.
@@ -962,8 +964,11 @@ For a partial directory, it can send one explicit read per missing ID from
 a previously complete directory on that route, or from a known model's
 local terminal layout when the advertised count and observed IDs agree.
 Each missing ID must reply on the same port, reporter and payload endpoint.
-The host does not infer IDs from a count alone, reissue the directory, or
-drop old channels based on a supplemented result. `--no-io-discovery`
+A completed send without a reply leaves that channel unknown but does not
+hide later channels. An incomplete frame or a missing transmit result stops
+the follow-up reads. The host does not infer IDs from a count alone,
+reissue the directory, or drop old channels based on a supplemented result.
+`--no-io-discovery`
 keeps I/O observation passive while other requested reads continue.
 
 `read_native_snapshot` applies the same recovery after a matching identity

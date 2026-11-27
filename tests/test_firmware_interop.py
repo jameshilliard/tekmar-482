@@ -314,6 +314,38 @@ class FirmwareInteropTests(unittest.IsolatedAsyncioTestCase):
             assert read.directory.complete
             assert read.directory.channels[-1].sample.label is None
 
+    async def test_io_recovery_continues_after_a_completed_unanswered_channel(
+        self,
+    ) -> None:
+        script = (
+            (
+                3,
+                "1f600002 2305",
+                tuple(
+                    f"1f52314d 2305 {ch:02x}06 410042000000 01 0100" for ch in range(4)
+                ),
+            ),
+            (3, "1f400003 230504", ()),
+            (3, "1f400003 230505", ("1f323146 2305 05 00 0000",)),
+        )
+        async with _gateway(script) as manager:
+            read = await read_io_directory(
+                manager,
+                3,
+                IoEndpoint(0x23, 5),
+                peer=_THERMOSTAT,
+                identity=NativeIdentity(105102, 1222, 1, 1),
+            )
+            missed, later = read.supplemental
+            assert missed.tx_result and missed.tx_result.status is TxStatus.ACK
+            assert not missed.answered and not missed.reports
+            assert later.answered and later.covered == {5}
+            directory = read.directory
+            assert not directory.complete
+            assert [c.sample.channel for c in directory.channels] == [0, 1, 2, 3, 5]
+            assert directory.channels[0].sample.label_text == "AB"
+            assert directory.channels[-1].sample.label is None
+
     async def test_io_discovery_collects_a_reply_train_longer_than_ten_seconds(
         self,
     ) -> None:

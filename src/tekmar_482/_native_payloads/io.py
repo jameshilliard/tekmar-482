@@ -77,6 +77,17 @@ class IoReport:
             return None
 
     @property
+    def label_text(self) -> str | None:
+        """Printable wire label, distinct from the model's terminal name."""
+        if self.label is None:
+            return None
+        try:
+            text = self.label.replace(b"\0", b"").decode("ascii")
+        except UnicodeDecodeError:
+            return None
+        return text if text and text.isprintable() else None
+
+    @property
     def active(self) -> bool | None:
         if self.kind in (IoType.RELAY, IoType.DEMAND) and self.value in (0, 1):
             return bool(self.value)
@@ -93,6 +104,8 @@ class IoReport:
                           "channel_id": self.channel, "type_id": self.type_id, "io_value": self.value}
         if self.count is not None and self.label is not None:
             fields.update(channel_count=self.count, label_hex=self.label.hex())
+            if (label := self.label_text) is not None:
+                fields["label_text"] = label
         if self.kind is not None:
             fields["io_type"] = self.kind.name.lower()
         if self.active is not None:

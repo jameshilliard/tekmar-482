@@ -93,6 +93,24 @@ def locked_identity() -> NativeFrame:
 
 
 class IoDirectoryTests(unittest.TestCase):
+    def test_text_labels_do_not_replace_the_six_wire_bytes(self) -> None:
+        for label, text in (
+            (b"R\0m\0\0\0", "Rm"),
+            (b"Rm A\0\0", "Rm A"),
+            (b"R\x1fm\0\0\0", None),
+            (bytes(6), None),
+            (LABEL, None),
+        ):
+            with self.subTest(label=label):
+                payload = bytes((END.subnet, END.node, 7, 1)) + label + b"\x01\x01\x00"
+                report = frame(0x1F5, payload)
+                sample = report.io_report
+                assert sample and sample.label == label and sample.label_text == text
+                assert report.decoded["label_hex"] == label.hex()
+                assert report.decoded.get("label_text") == text
+        sample = value(7, 0, mid=0x1F3).io_report
+        assert sample and sample.label is None and sample.label_text is None
+
     def test_supplemental_reply_keeps_metadata_unknown_and_one_source(self) -> None:
         primary = batch(discover(7, 2))
         answer = channel_reply(250)
@@ -106,6 +124,7 @@ class IoDirectoryTests(unittest.TestCase):
         assert snap.io_directories == ((PATH, directory),)
         for rejected in (
             replace(answer, port=PATH.port + 1),
+            replace(answer, tx_result=TxResult(PATH.port + 1, TxStatus.ACK)),
             replace(answer, reports=(value(250, 1, mid=0x1F3, path=NEIGHBOR),)),
             replace(answer, reports=(value(250, 1, mid=0x1F3, endpoint=OTHER),)),
             replace(
@@ -611,6 +630,66 @@ class IoExchangeTests(unittest.IsolatedAsyncioTestCase):
         read = await task
         assert read.directory.complete and not read.discovery.answered
         assert len(read.supplemental) == 1 and self.tx.empty()
+
+    async def test_unanswered_channel_does_not_hide_later_known_samples(self) -> None:
+        previous = IoDirectory.from_batch(
+            batch(discover(7, 3), discover(8, 3), discover(250, 3)),
+        )
+        async with asyncio.TaskGroup() as tasks:
+            pending = tasks.create_task(
+                read_io_directory(
+                    self.stream,
+                    PATH.port,
+                    END,
+                    peer=PATH.address,
+                    before=previous,
+                    timeout=0.08,
+                ),
+            )
+            assert (await self.send()).message_id == 0x1F6
+            self.ack()
+            self.rx(discover(7, 3))
+
+            request = await self.send()
+            assert (request.message_id, request.payload[-1]) == (0x1F4, 8)
+            self.ack()  # The request finished, but this channel has no matching reply.
+
+            request = await self.send()
+            assert (request.message_id, request.payload[-1]) == (0x1F4, 250)
+            self.ack()
+            self.rx(value(250, 1, mid=0x1F3))
+            result = await pending
+
+        missed, later = result.supplemental
+        assert missed.tx_result == ACK and not missed.answered
+        assert later.answered and later.covered == {250}
+        assert not result.directory.complete
+        assert [c.sample.channel for c in result.directory.channels] == [7, 250]
+        assert self.tx.empty()
+
+    async def test_unknown_transmit_outcome_stops_followup_reads(self) -> None:
+        previous = IoDirectory.from_batch(
+            batch(discover(7, 3), discover(8, 3), discover(250, 3)),
+        )
+        pending = asyncio.create_task(
+            read_io_directory(
+                self.stream,
+                PATH.port,
+                END,
+                peer=PATH.address,
+                before=previous,
+                timeout=0.08,
+            ),
+        )
+        assert (await self.send()).message_id == 0x1F6
+        self.ack()
+        self.rx(discover(7, 3))
+        request = await self.send()
+        assert (request.message_id, request.payload[-1]) == (0x1F4, 8)
+        result = await pending  # No ACK or failure record from the gateway.
+        (unknown,) = result.supplemental
+        assert unknown.transmit_pending
+        assert not result.directory.complete and self.tx.empty()
 
     async def test_no_repair_when_count_or_model_does_not_establish_candidates(
         self,

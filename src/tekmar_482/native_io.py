@@ -135,22 +135,26 @@ def _consistent(
     )
 
 
+def _completed_channel_read(
+    answer: NativeStatusBatch,
+    port: int,
+    query: NativeStatusQuery,
+) -> bool:
+    return (
+        answer.port == port
+        and answer.query == query
+        and answer.tx_result is not None
+        and answer.tx_result.port == port
+        and answer.tx_result.completed_frame
+    )
+
+
 def _direct_sample(
     answer: NativeStatusBatch,
     read: IoDirectoryRead,
     channel: int,
 ) -> IoChannel | None:
-    if (
-        not answer.answered
-        or answer.port != read.discovery.port
-        or answer.query
-        != NativeStatusQuery.io(
-            read.endpoint.subnet,
-            read.endpoint.node,
-            channel,
-        )
-        or answer.covered != {channel}
-    ):
+    if not answer.answered or answer.covered != {channel}:
         return None
     samples = _samples(answer, read, IO_REPLY)
     return samples[channel] if samples.keys() == {channel} else None
@@ -208,7 +212,8 @@ async def recover_io_directory(
         if answer is None:
             break
         attempts.append(answer)
-        if _direct_sample(answer, read, channel) is None:
+        # A completed send with no reply says nothing about another known channel.
+        if not _completed_channel_read(answer, discovery.port, query):
             break
     return IoDirectoryRead(discovery, tuple(attempts))
 
@@ -283,10 +288,19 @@ class IoBook:
                 if answer.query.kind is not StatusRequest.IO_CHANNEL:
                     break
                 channel = answer.query.payload[2]
-                sample = _direct_sample(answer, read, channel)
-                if channel in seen or sample is None:
+                query = NativeStatusQuery.io(
+                    self.endpoint.subnet,
+                    self.endpoint.node,
+                    channel,
+                )
+                if channel in seen or not _completed_channel_read(
+                    answer,
+                    batch.port,
+                    query,
+                ):
                     break
-                seen[channel] = sample
+                if (sample := _direct_sample(answer, read, channel)) is not None:
+                    seen[channel] = sample
         # The capture consumer and the request waiter see the same reports.
         # Never replace or prune a channel observed since this exchange began.
         prior = {c.sample.channel: c for c in before.channels} if before else {}
