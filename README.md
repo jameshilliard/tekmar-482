@@ -540,6 +540,14 @@ updates, pass every record from `stream.read()` to a
 source's identity. A capture gap clears its observations; an address move
 invalidates the affected paths. Start a new monitor on reconnect.
 
+An active `watch-native` or `NativeMonitor` also reads the identified
+thermostat's cataloged room statistics and input blocks. A reported role
+change discards the affected input samples and room statistics and queues
+fresh reads. Values are the last device samples, not continuous polling;
+the separate air-group and slab reports remain the live operating readings.
+Use `--no-thermostat-sensors` to skip the extra reads without hiding passive
+observations or setup needed by other features.
+
 ### Boiler, mixing and tank status
 
 ```bash

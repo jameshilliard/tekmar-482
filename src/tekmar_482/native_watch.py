@@ -14,6 +14,7 @@ from ._native_payloads.io import IoEndpoint
 from ._native_payloads.layouts import MULTI_WEEK
 from ._native_payloads.queries import NativeStatusQuery
 from ._native_payloads.schedules import SCHEDULE_STATUS, SETUP_BLOCK
+from ._native_payloads.sensors import SENSOR_BLOCKS
 from ._observation import (
     DeferredReadError,
     ExpiredReadError,
@@ -140,6 +141,7 @@ class _Watch:
         include_snow: bool = False,
         schedules: bool = False,
         thermostat_targets: bool = False,
+        thermostat_sensors: bool = False,
         plant_settings: bool = False,
         setpoint_settings: bool = False,
         io_discovery: bool = False,
@@ -165,10 +167,17 @@ class _Watch:
                 self._queue,
                 schedules=schedules,
                 targets=thermostat_targets,
+                sensors=thermostat_sensors,
                 plants=plant_settings,
                 setpoints=setpoint_settings,
             )
-            if (schedules or thermostat_targets or plant_settings or setpoint_settings)
+            if (
+                schedules
+                or thermostat_targets
+                or thermostat_sensors
+                or plant_settings
+                or setpoint_settings
+            )
             and active
             else None
         )
@@ -199,15 +208,20 @@ class _Watch:
         if not path.node and not isinstance(block, IoEndpoint):
             return
         if (q := self.queues.get(path.port)) is not None:
-            urgent = isinstance(block, SnowRead) or (
-                isinstance(block, tuple)
-                and (
-                    block[0] in (SETUP_BLOCK, MULTI_WEEK.start)
-                    or block[0] in ADJUSTMENT_BLOCKS
-                    or block[0] in PLANT_REGISTERS
-                    or block[0] in SETPOINT_BLOCKS
+            urgent = (
+                block == HEATING_SETUP
+                or isinstance(block, SnowRead)
+                or (
+                    isinstance(block, tuple)
+                    and (
+                        block[0] in (SETUP_BLOCK, MULTI_WEEK.start)
+                        or block[0] in ADJUSTMENT_BLOCKS
+                        or block[0] in SENSOR_BLOCKS
+                        or block[0] in PLANT_REGISTERS
+                        or block[0] in SETPOINT_BLOCKS
+                    )
+                    and self.state.block_revision(path, block) > 0
                 )
-                and self.state.block_revision(path, block) > 0
             )
             q.add(path, block, urgent=urgent)
 
@@ -651,6 +665,7 @@ async def watch_native(
     stale_after: float | None = None,
     schedules: bool = True,
     thermostat_targets: bool = True,
+    thermostat_sensors: bool = True,
     plant_settings: bool = True,
     setpoint_settings: bool = True,
     io_discovery: bool = True,
@@ -684,6 +699,7 @@ async def watch_native(
         include_snow=True,
         schedules=schedules,
         thermostat_targets=thermostat_targets,
+        thermostat_sensors=thermostat_sensors,
         plant_settings=plant_settings,
         setpoint_settings=setpoint_settings,
         io_discovery=io_discovery,

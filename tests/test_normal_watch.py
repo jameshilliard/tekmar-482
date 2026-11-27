@@ -52,7 +52,7 @@ def end(wire: Wire, peer: NativeFrame) -> None:
     wire.feed("020ff04b54 030000 01000000 " + peer.body.hex())
 
 
-async def admit_read(wire: Wire, keys: set[tuple[int, int]]) -> None:
+async def admit_read(wire: Wire, keys: set[tuple[int, int]]) -> tuple[int, int]:
     await wire.expect(_CAP)
     wire.feed(_SUPPORT)
     async with asyncio.timeout(1):
@@ -63,6 +63,7 @@ async def admit_read(wire: Wire, keys: set[tuple[int, int]]) -> None:
     keys.remove((port, block_id))
     assert request[6:].hex() == f"3540000000{block_id:02x}000000"
     wire.feed("040ff04b54" + request[5:].hex())
+    return port, block_id
 
 
 def plant_report(wire: Wire, f: NativeFrame, *, traced: bool = True) -> None:
@@ -72,6 +73,56 @@ def plant_report(wire: Wire, f: NativeFrame, *, traced: bool = True) -> None:
 
 
 class NormalWatchTests(unittest.IsolatedAsyncioTestCase):
+    async def test_sensor_watch_drops_retired_sample_without_polling(self) -> None:
+        wire = Wire()
+        room_samples: set[int | None] = set()
+
+        def observe(path: NativePath, state: NativeState) -> None:
+            climate = state.climate(path)
+            if climate is not None and climate.sensors.room is not None:
+                room_samples.add(climate.sensors.room.average_raw)
+
+        async def gateway() -> None:
+            await start(wire, "08")
+            await wire.expect(_CAP)
+            wire.feed(_SUPPORT)
+            for b, value in (
+                (0, identity(107201)),  # 532: room statistics and two external inputs.
+                (3, block(3, bytes.fromhex("0101"))),
+                (0x0D, block(0x0D, bytes.fromhex("030102"))),
+            ):
+                await admit_read(wire, {(3, b)})
+                plant_report(wire, value)
+            await admit_read(wire, {(3, 0x15)})
+            wire.queue_packet(record(block(0x0D, bytes.fromhex("030103"))))
+            wire.queue_packet(record(frame(0x36F, bytes.fromhex("01012a0006000000"))))
+            plant_report(wire, block(0x15, bytes.fromhex("030006")))
+            await admit_read(wire, {(3, 3)})  # Mode refresh takes the next turn.
+            plant_report(wire, block(3, bytes.fromhex("0101")))
+            remaining = {(3, b) for b in (0x15, 0x17, 0x18)}
+            payloads = {0x15: "030106", 0x17: "0703aa05", 0x18: "00"}
+            while remaining:
+                _, b = await admit_read(wire, remaining)
+                plant_report(wire, block(b, bytes.fromhex(payloads[b])))
+            # Normal sensor traffic must not schedule a new read.
+            wire.queue_packet(record(block(0x17, bytes.fromhex("0703ab05"))))
+            await restore(wire)
+
+        async with Tekmar482Client(wire) as client, asyncio.TaskGroup() as tasks:
+            tasks.create_task(gateway())
+            async with BridgeManagement(client).native_session([3]) as link:
+                answer = await watch_native(
+                    link,
+                    [TEST_PATH],
+                    duration=0.2,
+                    schedules=False,
+                    thermostat_targets=False,
+                    on_change=observe,
+                )
+        assert answer.reads == 8 and room_samples == {0x601}
+        assert not answer.state.missing_sensor_reads(TEST_PATH)
+        assert wire.out.empty()
+
     async def test_automatic_watch_follows_only_observed_ports_and_retires_a_move(
         self,
     ) -> None:

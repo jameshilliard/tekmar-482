@@ -119,6 +119,7 @@ class ConfigurationWatch:
         *,
         schedules: bool,
         targets: bool,
+        sensors: bool,
         plants: bool,
         setpoints: bool,
     ) -> None:
@@ -126,6 +127,7 @@ class ConfigurationWatch:
         self.queue = queue
         self.schedules = schedules
         self.targets = targets
+        self.sensors = sensors
         self.plants = plants
         self.setpoints = setpoints
         self.wanted: dict[NativePath, dict[BlockKey, int]] = {}
@@ -150,6 +152,8 @@ class ConfigurationWatch:
         if self.targets and path.node and climate is not None:
             for b in climate.adjustments.missing_blocks:
                 missing[b, None] = self.state.block_revision(path, (b, None))
+        if self.sensors:
+            missing.update(self.state.missing_sensor_reads(path))
         self.wanted[path] = missing
         for key, revision in missing.items():
             job = path, key

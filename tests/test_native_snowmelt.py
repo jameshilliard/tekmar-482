@@ -556,6 +556,7 @@ class SnowmeltWatchTests(unittest.IsolatedAsyncioTestCase):
                 [SITE, stat],
                 schedules=False,
                 thermostat_targets=False,
+                thermostat_sensors=False,
                 duration=0.20,
                 timeout=0.025,
             ),

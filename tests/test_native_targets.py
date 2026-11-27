@@ -246,7 +246,13 @@ class TargetSessionTests(unittest.IsolatedAsyncioTestCase):
         self,
     ) -> None:
         watch = asyncio.create_task(
-            watch_native(self.stream, [TEST_PATH], schedules=False, duration=0.3),
+            watch_native(
+                self.stream,
+                [TEST_PATH],
+                schedules=False,
+                thermostat_sensors=False,
+                duration=0.3,
+            ),
         )
         await self.query(0)
         self.rx(identity(_HEAT_ONLY))

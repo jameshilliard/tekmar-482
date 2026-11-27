@@ -6,9 +6,12 @@ from tekmar_482 import (
     NativeAddress,
     NativeFrame,
     NativeMessage,
+    NativePath,
     NativeSnapshot,
+    NativeState,
     Packet,
     SensorRole,
+    SensorSlot,
     ThermostatSensorMonitor,
     read_thermostat_sensors,
 )
@@ -119,6 +122,38 @@ class SensorMonitorTests(unittest.TestCase):
         assert cache.observe(CaptureGap(2))
         assert not cache.observe(CaptureGap(1))
         assert not cache.devices
+
+
+class WatchedSensorStateTests(unittest.TestCase):
+    def test_setup_change_retires_only_affected_input_samples_on_its_port(self) -> None:
+        state = NativeState()
+        paths = tuple(NativePath(p, _PEER.subnet, _PEER.node) for p in (1, 2))
+        for path in paths:
+            state.observe(_block(0, _product(105102, 1222, 3), port=path.port))
+            for b, data in (
+                (0x0D, "07 01 02 04"),
+                (0x15, "03 0006"),
+                (0x16, "00"),  # The device replied without a supported value.
+                (0x17, "07 02 f305"),
+                (0x18, "07 04 c905"),
+            ):
+                state.observe(_block(b, bytes.fromhex(data), port=path.port))
+            assert not state.missing_sensor_reads(path)
+
+        first, second = paths
+        assert state.observe(_block(0x0D, bytes.fromhex("07 01 05 04"))) == (first,)
+        assert state.missing_sensor_reads(first) == {(0x15, None): 1, (0x17, None): 1}
+        assert not state.missing_sensor_reads(second)
+        before = state.climate(second)
+        view = state.climate(first)
+        assert before and before.sensors.room and view and view.sensors.room is None
+        inputs = {s.slot: s for s in view.sensors.inputs}
+        assert inputs[SensorSlot.EXTERNAL_1].current_raw is None
+        assert inputs[SensorSlot.EXTERNAL_2].current_raw == 0x5C9
+        state.observe(_block(0x17, bytes.fromhex("07 05 ca05")))
+        updated = state.climate(first)
+        assert updated and updated.sensors.inputs[1].display_role is SensorRole.COIL
+        assert state.climate(second) == before
 
 
 class SensorReadTests(unittest.IsolatedAsyncioTestCase):

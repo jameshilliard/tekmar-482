@@ -287,6 +287,20 @@ class NativeState:
     def climate(self, path: NativePath) -> NativeClimate | None:
         return peer.climate(path) if (peer := self._peers.get(path)) else None
 
+    def missing_sensor_reads(self, path: NativePath) -> dict[BlockKey, int]:
+        """Cataloged thermostat input blocks not yet observed for this assignment."""
+        peer = self._peers.get(path)
+        if not path.node or not peer or not peer.identity:
+            return {}
+        product = peer.identity.product
+        if product is None or product.family != "thermostat":
+            return {}
+        return {
+            (block, None): peer.outputs.revisions.get(block, 0)
+            for block in SENSOR_BLOCKS
+            if block in product.candidate_blocks and (block, None) not in peer.blocks
+        }
+
     def setpoint_control(self, path: NativePath) -> NativeSetpointControl | None:
         peer = self._peers.get(path)
         return peer.setpoint.snapshot(path, peer.identity) if peer else None
@@ -357,7 +371,7 @@ class NativeState:
             return 0
         if key[0] in SETPOINT_BLOCKS:
             return peer.setpoint.revisions.get(key[0], 0)
-        if key[0] in ADJUSTMENT_BLOCKS:
+        if key[0] in ADJUSTMENT_BLOCKS or key[0] in SENSOR_BLOCKS:
             return peer.outputs.revisions.get(key[0], 0)
         if key[0] in PLANT_REGISTERS:
             return peer.plant.revisions.get(key, 0)

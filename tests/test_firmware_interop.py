@@ -167,6 +167,48 @@ _SETPOINT = NativeAddress(0x31, 7)
 
 @unittest.skipUnless(_IMAGE, "set TEKMAR_TEST_FLASH_IMAGE to run the ARM interop suite")
 class FirmwareInteropTests(unittest.IsolatedAsyncioTestCase):
+    async def test_watch_reads_cataloged_thermostat_input_samples(self) -> None:
+        script = tuple(
+            _block(3, "23 10000000", block, report)
+            for block, report in (
+                ("0000", "6e723149 00003f c1a201 d20405"),  # 532
+                ("0300", "6e723146 030007 010409"),
+                ("0d00", "6e723145 0d0003 0102"),
+                ("1500", "6e723149 15003f 0006 e405 1006"),
+                ("1700", "6e72314a 17007f 02 f505 e405 0806"),
+                ("1800", "6e723143 180000"),
+            )
+        )
+        path = NativePath(3, _THERMOSTAT.subnet, _THERMOSTAT.node)
+        complete = asyncio.Event()
+
+        def observe(updated: NativePath, state: NativeState) -> None:
+            assert updated == path
+            climate = state.climate(path)
+            if climate is not None and not state.missing_sensor_reads(path):
+                room = climate.sensors.room
+                assert room is not None and room.average_raw == 0x600
+                assert climate.sensors.average_floor_f == 67.5
+                assert climate.sensors.inputs[-1].current_raw is None
+                complete.set()
+
+        async with (
+            _gateway(script) as manager,
+            manager.native_session([3]) as capture,
+            asyncio.TaskGroup() as tasks,
+        ):
+            watch = tasks.create_task(
+                watch_native(
+                    capture,
+                    [path],
+                    thermostat_targets=False,
+                    schedules=False,
+                    on_change=observe,
+                ),
+            )
+            await complete.wait()
+            watch.cancel()
+
     async def test_watch_resumes_busy_wire_after_an_abandoned_firmware_read(
         self,
     ) -> None:

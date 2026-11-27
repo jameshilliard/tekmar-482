@@ -304,6 +304,7 @@ async def watch_all_from_args(
         stale_after=args.stale_after,
         schedules=not args.no_schedules,
         thermostat_targets=not args.no_thermostat_targets,
+        thermostat_sensors=not args.no_thermostat_sensors,
         plant_settings=not args.no_plant_settings,
         setpoint_settings=not args.no_setpoint_settings,
         io_discovery=not args.no_io_discovery,
@@ -331,6 +332,12 @@ def _watch_summary(
             if t.adjustments.missing_blocks
         ]
     )
+    no_sensors = [
+        {**asdict(t.path), "missing_blocks": [b for b, _ in missing]}
+        for t in state.thermostats
+        if not args.no_thermostat_sensors
+        and (missing := state.missing_sensor_reads(t.path))
+    ]
     no_snow = [
         {
             **asdict(d.path),
@@ -381,6 +388,7 @@ def _watch_summary(
             "missing_identities": unidentified,
             "missing_mode_reports": no_mode,
             "incomplete_thermostat_targets": no_targets,
+            "incomplete_thermostat_sensors": no_sensors,
             "incomplete_plant_settings": no_plants,
             "incomplete_setpoint_settings": no_setpoints,
             "incomplete_snowmelt": no_snow,
@@ -424,6 +432,7 @@ def _watch_summary(
                 unidentified
                 or no_mode
                 or no_targets
+                or no_sensors
                 or no_snow
                 or no_schedule
                 or no_plants

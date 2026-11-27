@@ -7,8 +7,13 @@ from enum import IntEnum
 from typing import TYPE_CHECKING
 
 from ._native_payloads.layouts import SETPOINT_FIELDS
+from ._native_payloads.sensors import (
+    ROOM_STATS,
+    SensorRole,
+    SensorSlot,
+    ThermostatSensors,
+)
 from ._native_payloads.sensors import SETUP as SENSOR_SETUP
-from ._native_payloads.sensors import SensorRole, SensorSlot, ThermostatSensors
 from ._native_payloads.thermostat import (
     FAN_SETUP,
     HUMIDITY_SETUP,
@@ -24,7 +29,7 @@ from ._native_payloads.thermostat import (
 from .native import require_enum
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping
+    from collections.abc import Iterable, Mapping
 
     from ._native_payloads.climate import AirTarget
     from ._native_payloads.products import NativeProduct
@@ -120,6 +125,12 @@ class AdjustmentState:
         self.revisions[block] = self.revisions.get(block, 0) + 1
         blocks.pop((block, None), None)
 
+    def _expire_inputs(self, slots: Iterable[SensorSlot], blocks: _Blocks) -> None:
+        for slot in slots:
+            self._expire(slot.block, blocks)
+        self._expire(ROOM_STATS, blocks)
+        self._expire(ThermostatTarget.FLOOR, blocks)
+
     def update(self, block: int, blocks: _Blocks) -> None:
         self._expire(block, blocks)
         if block == HUMIDITY_SETUP:
@@ -127,7 +138,9 @@ class AdjustmentState:
                 self._expire(target, blocks)
         elif block == FAN_SETUP:
             self._expire(ThermostatTarget.FAN, blocks)
-        elif block in (SENSOR_SETUP, _INPUT_ONE):
+        elif block == SENSOR_SETUP:
+            self._expire_inputs(SensorSlot, blocks)
+        elif block == _INPUT_ONE:
             self._expire(ThermostatTarget.FLOOR, blocks)
 
     def reconfigured(
@@ -149,8 +162,11 @@ class AdjustmentState:
                 self._expire(ThermostatTarget.FAN, blocks)
         elif block == SENSOR_SETUP:
             a, b = old.decoded, new.decoded
-            if any(a.get(s.setup_field) != b.get(s.setup_field) for s in SensorSlot):
-                self._expire(ThermostatTarget.FLOOR, blocks)
+            slots = tuple(
+                s for s in SensorSlot if a.get(s.setup_field) != b.get(s.setup_field)
+            )
+            if slots:
+                self._expire_inputs(slots, blocks)
         elif block == _INPUT_ONE and product and product.model in _LEGACY_FLOOR:
             setup = blocks.get((SENSOR_SETUP, None))
             roles = tuple(

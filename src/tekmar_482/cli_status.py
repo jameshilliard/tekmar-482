@@ -19,6 +19,7 @@ if TYPE_CHECKING:
     import argparse
     from collections.abc import Callable
 
+    from ._native_payloads.sensors import ThermostatSensors
     from ._observation import ObservationStream
     from .native_plant import PlantEquipment, WaterSample, WaterValue
     from .native_plant_registers import PlantRegisters
@@ -33,13 +34,19 @@ if TYPE_CHECKING:
 
 def sensor_fields(device: SensorObservation) -> dict[str, object]:
     sensors = device.sensors
-    room = sensors.room
     return {
         "port": device.port,
         "subnet": device.address.subnet,
         "node": device.address.node,
         "model": sensors.product.model,
         "z_number": sensors.z_number,
+        **_sensor_values(sensors),
+    }
+
+
+def _sensor_values(sensors: ThermostatSensors) -> dict[str, object]:
+    room = sensors.room
+    return {
         "room": None
         if room is None
         else {
@@ -187,6 +194,7 @@ def climate_fields(device: NativeClimate) -> dict[str, object]:
         if target is not None
         else None,
         "adjustments": adjustment_fields(device.adjustments),
+        "sensors": _sensor_values(device.sensors),
     }
 
 
@@ -318,6 +326,11 @@ def _add_watch(
             "--no-thermostat-targets",
             action="store_true",
             help="skip additional thermostat adjustment reads",
+        )
+        watch.add_argument(
+            "--no-thermostat-sensors",
+            action="store_true",
+            help="skip additional thermostat input and room statistics reads",
         )
         watch.add_argument(
             "--no-schedules",
