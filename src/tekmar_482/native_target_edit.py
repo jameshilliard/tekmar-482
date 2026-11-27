@@ -95,8 +95,7 @@ async def edit_thermostat_target(
     *,
     preview: bool,
 ) -> NativeWriteResult:
-    report = (await editor.read(NativeBlockQuery(address, 0))).require_report()
-    identity = NativeIdentity.from_report(report.decoded)
+    identity = NativeIdentity.from_report(await editor.identification(address))
     if (
         identity is None
         or not (product := identity.product)

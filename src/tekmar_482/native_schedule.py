@@ -129,9 +129,8 @@ class ScheduleConfiguration:
 async def _configuration(
     read: _Read,
     target: ScheduleTarget,
+    profile: ScheduleProfile,
 ) -> tuple[ScheduleConfiguration, NativeBlockBatch]:
-    identity = (await read(NativeBlockQuery(target.address, 0))).require_report()
-    profile = ScheduleProfile.from_identification(identity.decoded)
     timer = profile.product is not None and profile.product.model == "033"
     if timer != (target.system is not None):
         msg = "specify system 1..4 for an identified 033 timer only"
@@ -441,7 +440,9 @@ async def read_weekly_schedule(
             timeout=timeout,
         )
 
-    config, setup = await _configuration(read, target)
+    identity = (await read(NativeBlockQuery(target.address, 0))).require_report()
+    profile = ScheduleProfile.from_identification(identity.decoded)
+    config, setup = await _configuration(read, target, profile)
     rows = []
     for event in config.active_events:
         query = target.query(event)
@@ -464,7 +465,9 @@ async def edit_schedule_time(
     *,
     preview: bool,
 ) -> NativeWriteResult:
-    config, setup = await _configuration(editor.read, target)
+    fields = await editor.identification(target.address)
+    profile = ScheduleProfile.from_identification(fields)
+    config, setup = await _configuration(editor.read, target, profile)
     count, cycle = config.daily_events, config.cycle
     if config.binding is None or not config.binding.owns_table:
         msg = "this device is not an identified owner of the requested schedule"

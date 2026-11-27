@@ -205,7 +205,7 @@ from .native_discovery import (
     NativeProbe,
     discover_native,
 )
-from .native_identity import NativeIdentity
+from .native_identity import NativeIdentity, NativeIdentityMismatchError
 from .native_io import IoChannel, IoDirectory
 from .native_line import (
     BroadcastIssue,
@@ -539,6 +539,7 @@ __all__ = [
     "NativeField",
     "NativeFrame",
     "NativeIdentity",
+    "NativeIdentityMismatchError",
     "NativeInventory",
     "NativeLineReport",
     "NativeMessage",

@@ -125,6 +125,8 @@ class NormalEditTests(unittest.IsolatedAsyncioTestCase):
     async def test_known_non_delivery_does_not_retry_or_read_back(self) -> None:
         for code, expected, attempted in (
             ("0100ff", NativeWriteStatus.BASELINE_CHANGED, None),
+            ("0500ff", NativeWriteStatus.TARGET_MOVED, None),
+            ("05ffff", NativeWriteStatus.TARGET_MOVED, None),
             ("0201ff", NativeWriteStatus.NOT_SENT, None),
             ("02ffff", NativeWriteStatus.NOT_SENT, None),
             ("03feff", NativeWriteStatus.NOT_SENT, None),
@@ -169,6 +171,8 @@ class NormalEditTests(unittest.IsolatedAsyncioTestCase):
             "00ff00",
             "040002",
             "020200",
+            "050000",
+            "0503ff",
         ):
             script = Script(_CAP, peer(_OLD), _CAP, edit(invalid))
             async with Tekmar482Client(script) as client:

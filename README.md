@@ -388,12 +388,23 @@ readback. A timeout after sending leaves the outcome unknown and does not
 retry. The client serializes edits on the same port, but tN4 does not
 lock out another device or a manual change.
 
+When editing a device selected from a monitor snapshot, pass its
+`NativeIdentity` as `expected_identity` to the edit method. For example,
+look up `state.identity(route.preferred)` after confirming that the route
+has a preferred path. The edit reads block zero from that same physical
+port. Missing or conflicting identity fields raise
+`NativeIdentityMismatchError` before any update. This verifies observed
+identity fields; it does not distinguish two units with identical product
+and revision numbers.
+
 The CLI previews the complete proposed frame by default. Block, thermostat,
 scene-response and schedule edits use Normal mode without changing trace,
 reporting or link-ACK settings. Add `--confirm` to apply an edit. The
 gateway first rereads the full baseline from the same device. If a sibling
 or the support mask changed, the result is `baseline_changed`: **nothing
-was written**. Only a separate readback can produce `confirmed`. A link
+was written**. If the gateway sees the target address taken or vacated
+before transmission, it returns `target_moved`, also without writing.
+Only a separate readback can produce `confirmed`. A link
 ACK alone cannot. Use `--raw` explicitly for a Raw edit without this
 gateway-side comparison. Neither path automatically repeats the update.
 

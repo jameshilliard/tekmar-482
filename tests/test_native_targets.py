@@ -8,6 +8,8 @@ from tekmar_482 import (
     NativeBlockBatch,
     NativeBlockQuery,
     NativeFrame,
+    NativeIdentity,
+    NativeIdentityMismatchError,
     NativeMessage,
     NativePath,
     NativeSnapshot,
@@ -316,6 +318,7 @@ class TargetSessionTests(unittest.IsolatedAsyncioTestCase):
                     TEST_PATH.address,
                     change,
                     source=_HOST,
+                    expected_identity=NativeIdentity(_LEGACY_FAN, None, 1, None),
                     preview=preview,
                 ),
             )
@@ -337,6 +340,29 @@ class TargetSessionTests(unittest.IsolatedAsyncioTestCase):
                 NativeWriteStatus.PREVIEW if preview else NativeWriteStatus.CONFIRMED
             )
             assert result.proposed.payload[4:] == expected and self.tx.empty()
+
+    async def test_route_edit_requires_fresh_identity_fields(self) -> None:
+        expected = NativeIdentity(_MODERN, 1222, 1, None)
+        for ident in (
+            identity(_MODERN),  # No J number.
+            _report(0, "3f 8e9a01 0000 01"),  # Explicit corrupt J number.
+            _report(0, "3f 8e9a01 c604 02"),  # Different revision.
+        ):
+            task = asyncio.create_task(
+                self.stream.write_thermostat_target(
+                    TEST_PATH.port,
+                    TEST_PATH.address,
+                    ThermostatTargetChange(_T.HEAT, _S.WAKE, 21),
+                    source=_HOST,
+                    expected_identity=expected,
+                    preview=False,
+                ),
+            )
+            await self.query(0)
+            self.rx(ident)
+            with self.assertRaises(NativeIdentityMismatchError):
+                await task
+            assert self.tx.empty()
 
     async def test_unknown_or_disabled_actor_and_absent_slot_reject_before_send(
         self,

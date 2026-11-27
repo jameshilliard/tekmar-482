@@ -135,8 +135,7 @@ async def edit_setpoint_target(
     preview: bool,
 ) -> NativeWriteResult:
     raw = change.wire_value()
-    identity = (await editor.read(NativeBlockQuery(target, 0))).require_report()
-    device = NativeIdentity.from_report(identity.decoded)
+    device = NativeIdentity.from_report(await editor.identification(target))
     if (
         device is None
         or not (product := device.product)

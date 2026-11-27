@@ -21,6 +21,9 @@ from tekmar_482 import (
     IoDirectory,
     NativeAddress,
     NativeBlockQuery,
+    NativeField,
+    NativeIdentity,
+    NativeIdentityMismatchError,
     NativePath,
     NativeSnapshot,
     NativeState,
@@ -344,10 +347,12 @@ class FirmwareInteropTests(unittest.IsolatedAsyncioTestCase):
             read("1300", "6e72314a 13007f 0306090c0f3030"),
         )
         async with _gateway(script) as manager:
+            expected = NativeIdentity(105102, 1222, 2, None)
             mode = await manager.write_thermostat_mode(
                 3,
                 _THERMOSTAT,
                 ThermostatMode.HEAT,
+                expected_identity=expected,
                 preview=False,
             )
             assert mode.status is NativeWriteStatus.CONFIRMED
@@ -357,6 +362,7 @@ class FirmwareInteropTests(unittest.IsolatedAsyncioTestCase):
                 3,
                 _THERMOSTAT,
                 ThermostatTargetChange(ThermostatTarget.HEAT, TargetSlot.WAKE, 23),
+                expected_identity=expected,
                 preview=False,
             )
             assert value.tx_result and value.tx_result.status is TxStatus.ACK
@@ -367,6 +373,7 @@ class FirmwareInteropTests(unittest.IsolatedAsyncioTestCase):
                 3,
                 ScheduleTarget(_THERMOSTAT),
                 ScheduleChange(ScheduleEvent.UNOCCUPIED, Day.SUNDAY, time(8)),
+                expected_identity=expected,
                 preview=False,
             )
             assert row.status is NativeWriteStatus.CONFIRMED
@@ -381,6 +388,32 @@ class FirmwareInteropTests(unittest.IsolatedAsyncioTestCase):
             assert occupied.display_event is ScheduleEvent.OCCUPIED
             assert unoccupied.display_event is ScheduleEvent.UNOCCUPIED
             assert unoccupied.days == (3, 6, 9, 12, 15, 48, 48)
+
+    async def test_peer_address_move_aborts_an_admitted_edit(self) -> None:
+        port = 3
+        initial = _block(port, "23 10000000", "0500", "6e723148 05001f 2a212a211e")
+        guard: Exchange = (port, initial[1], ("7e736182 2305",))
+        # A subsequent read of the new address can use the released port.
+        moved = NativeAddress(0x36, 6)
+        script = (
+            _block(port, "23 10000000", "0000", "6e723149 00003f 8e9a01 c60402"),
+            initial,
+            guard,
+            _block(port, "36 20000000", "0000", "6e736189 00003f 8e9a01 c60402"),
+        )
+        async with _gateway(script) as manager:
+            result = await manager.write_block(
+                port,
+                NativeBlockQuery(_THERMOSTAT, 5),
+                {NativeField.WAKE: 46},
+                expected_identity=NativeIdentity(105102, 1222, 2, None),
+                preview=False,
+            )
+            assert result.status is NativeWriteStatus.TARGET_MOVED
+            assert result.guard_result and result.guard_result.completed_frame
+            assert result.tx_result is None and result.readback is None
+            report = await manager.read_block(port, NativeBlockQuery(moved, 0))
+            assert report.message.source == moved
 
     async def test_snowmelt_uses_configured_zone_and_separate_group(self) -> None:
         def read(block: str, reply: str) -> Exchange:
@@ -664,12 +697,16 @@ class FirmwareInteropTests(unittest.IsolatedAsyncioTestCase):
         local = NativePath(3, 0x45, 5)
         mirror = NativePath(2, 0x45, 5)
         report = "6e745149 00003f 9d8f01 9c0402"  # 527 thermostat.
+        partial = "6e745148 00001f 9d8f01 9c04"  # Z missing.
+        different = "6e745149 00003f 8e9a01 c60402"  # 553 thermostat.
         script = (
             (3, "3f700000", ("7ff457c0",)),
             (2, "3f700000", ("7ff677c0",)),
             _block(2, "45 10000000", "0000", report),
             _block(3, "45 10000000", "0000", report),
             _block(3, "45 10000000", "0300", "6e745144 030001 01"),
+            _block(3, "45 10000000", "0000", partial),
+            _block(3, "45 10000000", "0000", different),
         )
         state = NativeState()
         async with _gateway(script) as manager, manager.peer_capture((2, 3)) as capture:
@@ -696,3 +733,23 @@ class FirmwareInteropTests(unittest.IsolatedAsyncioTestCase):
                 NativeBlockQuery(preferred.address, 3),
             )
             assert sample.port == local.port and sample.decoded["mode_setting"] == 1
+            expected = state.identity(preferred)
+            assert expected is not None
+            for seen in (
+                NativeIdentity(102301, 1180, None, None),
+                NativeIdentity(105102, 1222, 2, None),
+            ):
+                with self.assertRaises(NativeIdentityMismatchError) as raised:
+                    await manager.write_thermostat_target(
+                        preferred.port,
+                        preferred.address,
+                        ThermostatTargetChange(
+                            ThermostatTarget.HEAT,
+                            TargetSlot.WAKE,
+                            23,
+                        ),
+                        expected_identity=expected,
+                        preview=False,
+                    )
+                assert raised.exception.expected == expected
+                assert raised.exception.observed == seen

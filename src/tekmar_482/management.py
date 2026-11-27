@@ -60,6 +60,7 @@ if TYPE_CHECKING:
     from ._native_payloads.writes import NativeField
     from .client import Tekmar482Client
     from .native import NativeBlockQuery, NativeFrame, NativeMessage
+    from .native_identity import NativeIdentity
     from .native_schedule import ScheduleChange, ScheduleTarget
     from .native_setpoint import SetpointTargetChange
     from .native_snow_control import SnowmeltGroupResult, SnowmeltOperation
@@ -491,6 +492,8 @@ class BridgeManagement(_Management):
         self,
         port: int,
         timeout: float,
+        *,
+        expected_identity: NativeIdentity | None,
     ) -> AsyncIterator[NativeBlockEditor]:
         if port not in TN4_PORTS or not isfinite(timeout) or timeout <= 0:
             msg = "expected a physical port and a finite positive edit timeout"
@@ -517,6 +520,7 @@ class BridgeManagement(_Management):
                     lambda query: self._read_block(port, query, timeout),
                     update,
                     timeout,
+                    expected_identity,
                 )
 
     async def write_block(
@@ -525,12 +529,20 @@ class BridgeManagement(_Management):
         query: NativeBlockQuery,
         changes: Mapping[NativeField, int],
         *,
+        expected_identity: NativeIdentity | None = None,
         timeout: float = DEFAULT_BLOCK_TIMEOUT,
         preview: bool = True,
     ) -> NativeWriteResult:
         """Preview or conditionally edit known fields, then read back from the peer."""
+        if query.target.request_mask().bit_count() != 1:
+            msg = "block edits require one target node"
+            raise ValueError(msg)
         patch = BlockPatch.from_fields(query.block_id, changes)
-        async with self._block_editor(port, timeout) as editor:
+        async with self._block_editor(
+            port,
+            timeout,
+            expected_identity=expected_identity,
+        ) as editor:
             return await editor.write(query, patch, preview=preview)
 
     async def write_thermostat_mode(
@@ -539,10 +551,15 @@ class BridgeManagement(_Management):
         target: NativeAddress,
         mode: ThermostatMode,
         *,
+        expected_identity: NativeIdentity | None = None,
         timeout: float = DEFAULT_BLOCK_TIMEOUT,
         preview: bool = True,
     ) -> NativeWriteResult:
-        async with self._block_editor(port, timeout) as editor:
+        async with self._block_editor(
+            port,
+            timeout,
+            expected_identity=expected_identity,
+        ) as editor:
             return await editor.write_mode(target, mode, preview=preview)
 
     async def write_thermostat_target(
@@ -551,10 +568,15 @@ class BridgeManagement(_Management):
         target: NativeAddress,
         change: ThermostatTargetChange,
         *,
+        expected_identity: NativeIdentity | None = None,
         timeout: float = DEFAULT_BLOCK_TIMEOUT,
         preview: bool = True,
     ) -> NativeWriteResult:
-        async with self._block_editor(port, timeout) as editor:
+        async with self._block_editor(
+            port,
+            timeout,
+            expected_identity=expected_identity,
+        ) as editor:
             return await edit_thermostat_target(editor, target, change, preview=preview)
 
     async def write_snowmelt_setpoint(
@@ -564,12 +586,17 @@ class BridgeManagement(_Management):
         block: SnowmeltBlock,
         celsius: float | None,
         *,
+        expected_identity: NativeIdentity | None = None,
         expected_application: SnowmeltApplication | None = None,
         timeout: float = DEFAULT_BLOCK_TIMEOUT,
         preview: bool = True,
     ) -> NativeWriteResult:
         """Preview or verify a stored slab target without enabling a group."""
-        async with self._block_editor(port, timeout) as editor:
+        async with self._block_editor(
+            port,
+            timeout,
+            expected_identity=expected_identity,
+        ) as editor:
             return await edit_snowmelt_setpoint(
                 editor,
                 target,
@@ -585,11 +612,16 @@ class BridgeManagement(_Management):
         target: NativeAddress,
         change: SetpointTargetChange,
         *,
+        expected_identity: NativeIdentity | None = None,
         timeout: float = DEFAULT_BLOCK_TIMEOUT,
         preview: bool = True,
     ) -> NativeWriteResult:
         """Preview or verify one stored target on the specified 161/162 application."""
-        async with self._block_editor(port, timeout) as editor:
+        async with self._block_editor(
+            port,
+            timeout,
+            expected_identity=expected_identity,
+        ) as editor:
             return await edit_setpoint_target(editor, target, change, preview=preview)
 
     async def write_schedule_time(
@@ -598,10 +630,15 @@ class BridgeManagement(_Management):
         target: ScheduleTarget,
         change: ScheduleChange,
         *,
+        expected_identity: NativeIdentity | None = None,
         timeout: float = DEFAULT_BLOCK_TIMEOUT,
         preview: bool = True,
     ) -> NativeWriteResult:
-        async with self._block_editor(port, timeout) as editor:
+        async with self._block_editor(
+            port,
+            timeout,
+            expected_identity=expected_identity,
+        ) as editor:
             return await edit_schedule_time(editor, target, change, preview=preview)
 
     async def read_status(
@@ -757,13 +794,18 @@ class BridgeManagement(_Management):
         operation: SnowmeltOperation,
         *,
         enabled: bool,
+        expected_identity: NativeIdentity | None = None,
         expected_group: int | None = None,
         expected_zone: int | None = None,
         timeout: float = DEFAULT_BLOCK_TIMEOUT,
         preview: bool = True,
     ) -> SnowmeltGroupResult:
         """Read the live binding and query that zone's state after an explicit send."""
-        async with self._block_editor(port, timeout) as editor:
+        async with self._block_editor(
+            port,
+            timeout,
+            expected_identity=expected_identity,
+        ) as editor:
             return await apply_snowmelt_group(
                 editor,
                 lambda message: self._announce(port, message, timeout),

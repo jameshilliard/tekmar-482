@@ -80,3 +80,30 @@ class NativeIdentity:
             if self.max_tn4_version is None
             else self.max_tn4_version,
         )
+
+
+class NativeIdentityMismatchError(ValueError):
+    """A fresh identity did not confirm the device selected for an edit."""
+
+    def __init__(
+        self,
+        expected: NativeIdentity,
+        observed: NativeIdentity | None,
+    ) -> None:
+        super().__init__("fresh tN4 identity does not confirm the selected device")
+        self.expected = expected
+        self.observed = observed
+
+
+def check_identity(
+    expected: object,
+    fields: Mapping[str, object],
+) -> None:
+    if expected is None:
+        return
+    if not isinstance(expected, NativeIdentity):
+        msg = "expected a NativeIdentity from the selected device"
+        raise TypeError(msg)
+    observed = NativeIdentity.from_report(fields)
+    if observed is None or observed.merge(expected) != observed:
+        raise NativeIdentityMismatchError(expected, observed)

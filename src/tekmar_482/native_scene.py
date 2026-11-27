@@ -13,6 +13,7 @@ from .native_line import BroadcastIssue, BroadcastResult, LineBroadcast
 if TYPE_CHECKING:
     from .management import BridgeManagement
     from .native import NativeAddress, NativeFrame, NativeMessage
+    from .native_identity import NativeIdentity
     from .native_write import NativeWriteResult
     from .raw import BridgeStream
 
@@ -105,6 +106,7 @@ async def write_scene_response(
     response: SceneResponse,
     *,
     source: NativeAddress,
+    expected_identity: NativeIdentity | None = None,
     timeout: float = 20,
     preview: bool = False,
 ) -> NativeWriteResult:
@@ -114,6 +116,7 @@ async def write_scene_response(
         NativeBlockQuery(target, WritableBlock.SCENE_SETUP),
         scene_response_fields(scene, response),
         source=source,
+        expected_identity=expected_identity,
         timeout=timeout,
         preview=preview,
     )

@@ -32,6 +32,7 @@ if TYPE_CHECKING:
     from ._native_payloads.writes import NativeField
     from .management import ErrorReporting
     from .native import NativeAddress, NativeBlockQuery, NativeTargets
+    from .native_identity import NativeIdentity
     from .native_schedule import ScheduleChange, ScheduleTarget
     from .native_setpoint import SetpointTargetChange
     from .native_snow_control import SnowmeltGroupResult, SnowmeltOperation
@@ -349,6 +350,7 @@ class BridgeStream(NativeReader, Protocol):
         changes: Mapping[NativeField, int],
         *,
         source: NativeAddress,
+        expected_identity: NativeIdentity | None = None,
         timeout: float = 20,
         preview: bool = False,
     ) -> NativeWriteResult: ...
@@ -360,6 +362,7 @@ class BridgeStream(NativeReader, Protocol):
         mode: ThermostatMode,
         *,
         source: NativeAddress,
+        expected_identity: NativeIdentity | None = None,
         timeout: float = 20,
         preview: bool = False,
     ) -> NativeWriteResult: ...
@@ -370,6 +373,7 @@ class BridgeStream(NativeReader, Protocol):
         change: ThermostatTargetChange,
         *,
         source: NativeAddress,
+        expected_identity: NativeIdentity | None = None,
         timeout: float = 20,
         preview: bool = True,
     ) -> NativeWriteResult: ...
@@ -381,6 +385,7 @@ class BridgeStream(NativeReader, Protocol):
         celsius: float | None,
         *,
         source: NativeAddress,
+        expected_identity: NativeIdentity | None = None,
         expected_application: SnowmeltApplication | None = None,
         timeout: float = 20,
         preview: bool = True,
@@ -392,6 +397,7 @@ class BridgeStream(NativeReader, Protocol):
         change: SetpointTargetChange,
         *,
         source: NativeAddress,
+        expected_identity: NativeIdentity | None = None,
         timeout: float = 20,
         preview: bool = True,
     ) -> NativeWriteResult: ...
@@ -403,6 +409,7 @@ class BridgeStream(NativeReader, Protocol):
         *,
         enabled: bool,
         source: NativeAddress,
+        expected_identity: NativeIdentity | None = None,
         expected_group: int | None = None,
         expected_zone: int | None = None,
         timeout: float = 20,
@@ -415,6 +422,7 @@ class BridgeStream(NativeReader, Protocol):
         change: ScheduleChange,
         *,
         source: NativeAddress,
+        expected_identity: NativeIdentity | None = None,
         timeout: float = 20,
         preview: bool = False,
     ) -> NativeWriteResult: ...
@@ -568,12 +576,19 @@ class RawDispatcher:
         changes: Mapping[NativeField, int],
         *,
         source: NativeAddress,
+        expected_identity: NativeIdentity | None = None,
         timeout: float = 20,
         preview: bool = False,
     ) -> NativeWriteResult:
         """Read, optionally update once, then verify. The timeout is per exchange."""
         patch = BlockPatch.from_fields(query.block_id, changes)
-        async with self._editor(port, query.target, source, timeout) as editor:
+        async with self._editor(
+            port,
+            query.target,
+            source,
+            timeout,
+            expected_identity=expected_identity,
+        ) as editor:
             return await editor.write(query, patch, preview=preview)
 
     async def write_thermostat_mode(
@@ -583,10 +598,17 @@ class RawDispatcher:
         mode: ThermostatMode,
         *,
         source: NativeAddress,
+        expected_identity: NativeIdentity | None = None,
         timeout: float = 20,
         preview: bool = False,
     ) -> NativeWriteResult:
-        async with self._editor(port, target, source, timeout) as editor:
+        async with self._editor(
+            port,
+            target,
+            source,
+            timeout,
+            expected_identity=expected_identity,
+        ) as editor:
             return await editor.write_mode(target, mode, preview=preview)
 
     async def write_thermostat_target(
@@ -596,10 +618,17 @@ class RawDispatcher:
         change: ThermostatTargetChange,
         *,
         source: NativeAddress,
+        expected_identity: NativeIdentity | None = None,
         timeout: float = 20,
         preview: bool = True,
     ) -> NativeWriteResult:
-        async with self._editor(port, target, source, timeout) as editor:
+        async with self._editor(
+            port,
+            target,
+            source,
+            timeout,
+            expected_identity=expected_identity,
+        ) as editor:
             return await edit_thermostat_target(editor, target, change, preview=preview)
 
     async def write_snowmelt_setpoint(
@@ -610,12 +639,19 @@ class RawDispatcher:
         celsius: float | None,
         *,
         source: NativeAddress,
+        expected_identity: NativeIdentity | None = None,
         expected_application: SnowmeltApplication | None = None,
         timeout: float = 20,
         preview: bool = True,
     ) -> NativeWriteResult:
         """Preview or verify a stored slab target without enabling a group."""
-        async with self._editor(port, target, source, timeout) as editor:
+        async with self._editor(
+            port,
+            target,
+            source,
+            timeout,
+            expected_identity=expected_identity,
+        ) as editor:
             return await edit_snowmelt_setpoint(
                 editor,
                 target,
@@ -632,11 +668,18 @@ class RawDispatcher:
         change: SetpointTargetChange,
         *,
         source: NativeAddress,
+        expected_identity: NativeIdentity | None = None,
         timeout: float = 20,
         preview: bool = True,
     ) -> NativeWriteResult:
         """Preview or verify one stored target on the specified 161/162 application."""
-        async with self._editor(port, target, source, timeout) as editor:
+        async with self._editor(
+            port,
+            target,
+            source,
+            timeout,
+            expected_identity=expected_identity,
+        ) as editor:
             return await edit_setpoint_target(editor, target, change, preview=preview)
 
     async def set_snowmelt_group(
@@ -647,13 +690,20 @@ class RawDispatcher:
         *,
         enabled: bool,
         source: NativeAddress,
+        expected_identity: NativeIdentity | None = None,
         expected_group: int | None = None,
         expected_zone: int | None = None,
         timeout: float = 20,
         preview: bool = True,
     ) -> SnowmeltGroupResult:
         """Read the binding, optionally broadcast once, then query the selected zone."""
-        async with self._editor(port, target, source, timeout) as editor:
+        async with self._editor(
+            port,
+            target,
+            source,
+            timeout,
+            expected_identity=expected_identity,
+        ) as editor:
             return await apply_snowmelt_group(
                 editor,
                 lambda msg: self._send(port, msg),
@@ -679,11 +729,18 @@ class RawDispatcher:
         change: ScheduleChange,
         *,
         source: NativeAddress,
+        expected_identity: NativeIdentity | None = None,
         timeout: float = 20,
         preview: bool = False,
     ) -> NativeWriteResult:
         """Verify ownership and grouping before updating one display event."""
-        async with self._editor(port, target.address, source, timeout) as editor:
+        async with self._editor(
+            port,
+            target.address,
+            source,
+            timeout,
+            expected_identity=expected_identity,
+        ) as editor:
             return await edit_schedule_time(editor, target, change, preview=preview)
 
     @asynccontextmanager
@@ -693,6 +750,8 @@ class RawDispatcher:
         target: NativeAddress | NativeTargets,
         source: NativeAddress,
         timeout: float,
+        *,
+        expected_identity: NativeIdentity | None,
     ) -> AsyncIterator[NativeBlockEditor]:
         if port not in TN4_PORTS or target.request_mask().bit_count() != 1:
             msg = "expected a single destination on a physical port"
@@ -716,7 +775,7 @@ class RawDispatcher:
             if port in self._pending or port in self._waiters:
                 msg = f"native operation already in progress on port {port}"
                 raise NativePortBusyError(msg)
-            yield NativeBlockEditor(source, read, update, timeout)
+            yield NativeBlockEditor(source, read, update, timeout, expected_identity)
 
     async def _collect_blocks(
         self,

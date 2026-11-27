@@ -13,6 +13,7 @@ from ._native_payloads.products import product_revision
 from .constants import TN4_PORTS
 from .management import BridgeManagement
 from .native import NativeAddress, NativeBlockQuery, NativeMessage
+from .native_identity import check_identity
 from .raw import NativePortBusyError, TxResult, TxStatus
 
 if TYPE_CHECKING:
@@ -20,6 +21,7 @@ if TYPE_CHECKING:
 
     from ._native_payloads.line import ZoneSyncAdjustment
     from ._native_payloads.scenes import NativeScene
+    from .native_identity import NativeIdentity
     from .raw import BridgeStream
 
 _HOST = NativeAddress(0, 0)
@@ -186,6 +188,7 @@ class DeviceGroupBinding:
         address: NativeAddress,
         *,
         source: NativeAddress = _HOST,
+        expected_identity: NativeIdentity | None = None,
         timeout: float = 20,
     ) -> Self:
         """Resolve a 161/162's configured group from live identity and setup."""
@@ -205,7 +208,9 @@ class DeviceGroupBinding:
             )
             return batch.require_report().decoded
 
-        product, _ = product_revision(await read(0))
+        fields = await read(0)
+        check_identity(expected_identity, fields)
+        product, _ = product_revision(fields)
         if product is None or product.family != "setpoint_control":
             msg = "group lookup requires an identified setpoint control"
             raise ValueError(msg)

@@ -11,7 +11,7 @@ from ._native_payloads import BLOCK_SELECTORS
 from .constants import TN4_PORTS
 from .exceptions import ProtocolError
 from .native import NativeFrame
-from .native_write import BlockDelivery
+from .native_write import BlockDelivery, NativeWriteStatus
 from .raw import FailureReason, NativeBlockBatch, RejectReason, TxResult, TxStatus
 
 if TYPE_CHECKING:
@@ -41,6 +41,7 @@ class _EditEnd(IntEnum):
     EXPIRED = 2
     BASELINE_FAILED = 3
     UPDATE_UNAVAILABLE = 4
+    TARGET_MOVED = 5
 
 
 def block_read_terminal(body: bytes) -> bool:
@@ -196,12 +197,13 @@ def edit_result(port: int, body: bytes) -> BlockDelivery:
     _, code, baseline, attempt = _EDIT_RESULT.unpack(body)
     guard, tx = tx_outcome(port, baseline), tx_outcome(port, attempt)
     ready = guard is not None and guard.completed_frame
-    match _EditEnd(code):
+    end = _EditEnd(code)
+    match end:
         case _EditEnd.ATTEMPTED:
             valid = ready and tx is not None and tx.status != TxStatus.REJECTED
         case _EditEnd.CHANGED:
             valid = ready and tx is None
-        case _EditEnd.EXPIRED:
+        case _EditEnd.EXPIRED | _EditEnd.TARGET_MOVED:
             valid = (guard is None or ready) and tx is None
         case _EditEnd.BASELINE_FAILED:
             valid = (
@@ -215,4 +217,8 @@ def edit_result(port: int, body: bytes) -> BlockDelivery:
     if not valid:
         msg = "Normal block edit terminal disagrees with its link evidence"
         raise ProtocolError(msg)
-    return BlockDelivery(tx, guard, code == _EditEnd.CHANGED)
+    rejection = {
+        _EditEnd.CHANGED: NativeWriteStatus.BASELINE_CHANGED,
+        _EditEnd.TARGET_MOVED: NativeWriteStatus.TARGET_MOVED,
+    }.get(end)
+    return BlockDelivery(tx, guard, rejection)

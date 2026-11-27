@@ -112,9 +112,7 @@ async def _reported_application(
     editor: NativeBlockEditor,
     target: NativeAddress,
 ) -> tuple[NativeFrame, SnowmeltApplication]:
-    identity = NativeIdentity.from_report(
-        (await editor.read(NativeBlockQuery(target, 0))).require_report().decoded,
-    )
+    identity = NativeIdentity.from_report(await editor.identification(target))
     if (
         identity is None
         or not identity.product
