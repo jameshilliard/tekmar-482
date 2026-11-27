@@ -10,7 +10,7 @@ import signal
 import unittest
 from calendar import Day
 from contextlib import asynccontextmanager, suppress
-from datetime import time
+from datetime import UTC, datetime, time
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -21,16 +21,20 @@ from tekmar_482 import (
     GatewayEndpoint,
     IoDirectory,
     IoEndpoint,
+    LineBroadcast,
     NativeAddress,
     NativeBlockQuery,
     NativeField,
     NativeIdentity,
     NativeIdentityMismatchError,
     NativePath,
+    NativeScene,
     NativeSnapshot,
     NativeState,
     NativeStatusQuery,
     NativeWriteStatus,
+    SceneResponse,
+    SceneSetup,
     ScheduleBinding,
     ScheduleChange,
     ScheduleCycle,
@@ -58,10 +62,12 @@ from tekmar_482 import (
     TraceTx,
     TxStatus,
     WaterDetection,
+    WritableBlock,
     read_io_directory,
     read_weekly_schedule,
     watch_native,
 )
+from tekmar_482.native_scene import scene_response_fields
 from tekmar_482.wire_trace import observe_bridge_packets
 
 if TYPE_CHECKING:
@@ -541,6 +547,53 @@ class FirmwareInteropTests(unittest.IsolatedAsyncioTestCase):
             assert occupied.display_event is ScheduleEvent.OCCUPIED
             assert unoccupied.display_event is ScheduleEvent.UNOCCUPIED
             assert unoccupied.days == (3, 6, 9, 12, 15, 48, 48)
+
+    async def test_scene_and_clock_broadcasts_and_verified_response_edit(self) -> None:
+        port = 3
+        before = _block(port, "23 10000000", "0e00", "6e72314b 0e00ff 000a050304030001")
+        script = (
+            (3, "2ff00003 05b400", ()),
+            (1, "31f00005 1e01060e1e", ()),
+            _block(port, "23 10000000", "0000", "6e723149 00003f 8e9a01 c60402"),
+            before,
+            before,
+            (port, "6df0000c 2305 0e00 000a050504030000", ()),
+            _block(port, "23 10000000", "0e00", "6e723145 0e0088 0500"),
+        )
+        async with _gateway(script) as manager:
+            (scene,) = await LineBroadcast.scene(
+                (3,),
+                NativeScene.TEMPORARY_OCCUPIED,
+            ).send(manager)
+            (clock,) = await LineBroadcast.clock(
+                (1,),
+                datetime(2030, 7, 15, 0, 30, tzinfo=UTC),
+            ).send(manager)
+            assert scene.port == 3 and scene.link_acknowledged
+            assert clock.port == 1 and clock.link_acknowledged
+            changes = scene_response_fields(
+                NativeScene.PERMANENT_4,
+                SceneResponse.SCHEDULE,
+            ) | {
+                NativeField.SCENES_ENABLED: 0,
+            }
+            result = await manager.write_block(
+                port,
+                NativeBlockQuery(_THERMOSTAT, WritableBlock.SCENE_SETUP),
+                changes,
+                expected_identity=NativeIdentity(105102, 1222, 2, None),
+                preview=False,
+            )
+            assert (
+                result.status is NativeWriteStatus.CONFIRMED
+                and result.readback is not None
+            )
+            verified = SceneSetup(result.readback.require_report())
+            assert verified.enabled is False
+            assert (
+                verified.configured_response(NativeScene.PERMANENT_4)
+                is SceneResponse.SCHEDULE
+            )
 
     async def test_peer_address_move_aborts_an_admitted_edit(self) -> None:
         port = 3
