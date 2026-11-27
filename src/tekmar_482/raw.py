@@ -35,6 +35,7 @@ if TYPE_CHECKING:
     from .native_target_edit import ThermostatTargetChange
     from .native_write import NativeWriteResult
     from .packet import Packet
+    from .traffic import TrafficCounters
 
 _HEADER = 4
 _RAW_HEADER = 2
@@ -264,6 +265,8 @@ class BridgeStream(Protocol):
     def diagnostics(self) -> Mapping[int, PortDiagnostic]: ...
     @property
     def error_reporting(self) -> ErrorReporting: ...
+    @property
+    def traffic(self) -> TrafficCounters: ...
     async def wait_transmit_idle(self, port: int) -> None: ...
     async def send(self, port: int, body: bytes | NativeMessage) -> TxResult: ...
     async def read_status(
@@ -356,6 +359,7 @@ class RawDispatcher:
         backlog: int,
         *,
         error_reporting: ErrorReporting | None = None,
+        traffic: TrafficCounters | None = None,
     ) -> None:
         if backlog < 1:
             msg = "capture backlog must be positive"
@@ -372,6 +376,7 @@ class RawDispatcher:
         self._ready = asyncio.Event()
         self._active = False
         self._error_reporting = error_reporting
+        self._traffic = traffic
         self._error: Exception | None = None
 
     @property
@@ -381,6 +386,14 @@ class RawDispatcher:
             msg = "no management session attached to the Raw dispatcher"
             raise ProtocolError(msg)
         return self._error_reporting
+
+    @property
+    def traffic(self) -> TrafficCounters:
+        self._check_active()
+        if self._traffic is None:
+            msg = "no management session attached to the Raw dispatcher"
+            raise ProtocolError(msg)
+        return self._traffic
 
     def _check_active(self) -> None:
         if self._error is not None:

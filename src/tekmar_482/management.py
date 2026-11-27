@@ -13,6 +13,7 @@ from .constants import TN4_PORTS
 from .error_reports import ALL_SOURCES, ErrorReports, GatewayErrorCounter, source_mask
 from .exceptions import ProtocolError, TekmarError
 from .normal_trace import NormalTrace, NormalTraceState
+from .traffic import TrafficCounters
 from .trpc import ResponseMatch, TrpcCommand, TrpcMethod, TrpcPacket, TrpcService
 
 if TYPE_CHECKING:
@@ -46,6 +47,7 @@ class BridgeFeature(IntFlag):
     NORMAL_TRACE = 4
     ERROR_REPORTING = 8
     NORMAL_IDENTITY = 16
+    TRAFFIC_COUNTS = 32
 
 
 class BridgeMethod(IntEnum):
@@ -62,6 +64,7 @@ class BridgeMethod(IntEnum):
     NORMAL_TRACE = 0x544BF00B
     ERROR_REPORTING = ERROR_REPORTING_METHOD
     NORMAL_IDENTITY = 0x544BF00D
+    TRAFFIC_COUNTS = 0x544BF00E
 
 
 @dataclass(frozen=True, slots=True)
@@ -256,6 +259,20 @@ class BridgeManagement(_Management):
     def __init__(self, client: Tekmar482Client) -> None:
         super().__init__(client)
         self.error_reporting = ErrorReporting(client)
+        self.traffic = TrafficCounters(self._traffic_request)
+
+    async def _traffic_request(self, body: bytes) -> bytes:
+        reply = await self._exchange(
+            _ExtensionCommand(
+                TrpcService.REQUEST,
+                BridgeMethod.TRAFFIC_COUNTS,
+                payload=body,
+            ),
+        )
+        if reply.method_id != BridgeMethod.TRAFFIC_COUNTS:
+            msg = "gateway does not implement traffic counters"
+            raise ProtocolError(msg)
+        return reply.extra
 
     async def build_revision(self) -> str:
         reply = await self._exchange(TrpcCommand.request(BridgeMethod.BUILD))

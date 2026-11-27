@@ -198,6 +198,14 @@ envelopes differ: Raw type `0x01` carries bridge operations; trace type
 `0xD0` identifies Normal RX or a gateway TX attempt with its origin and
 outcome. Trace is not an alternate encoding for sending Raw requests.
 
+**Gateway traffic counters.** With `BridgeFeature.TRAFFIC_COUNTS`, use
+`BridgeManagement(client).traffic` in Normal mode or `stream.traffic` in
+Raw mode. Await `traffic.port(port)` or `traffic.device(NativePath(...))`,
+or enumerate `async for device in traffic.devices()`. These read the 482's
+saturating 64-bit counters since boot, including time without a host. RX
+excludes local echoes; invalid RX and unaddressed TX remain port totals.
+TX ACK measures a link outcome, not application acceptance.
+
 **Gateway error diagnostics.** The custom firmware counts errors even when no
 host is listening. `errors` subscribes to changed counters without changing
 the current Normal/Raw mode, trace, thermostat reporting or link ACKs.

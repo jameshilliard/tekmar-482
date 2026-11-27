@@ -16,9 +16,9 @@ from .exceptions import ConnectionClosedError, ProtocolError, TekmarError
 from .management import (
     BridgeCapabilities,
     BridgeFeature,
+    BridgeManagement,
     BridgeMethod,
     BridgeMode,
-    ErrorReporting,
     unpack_diagnostic,
 )
 from .packet import TYPE_TN4, TYPE_TRPC, Packet
@@ -274,10 +274,12 @@ class BridgeClient:
         client = Tekmar482Client(
             _SessionTransport(receive_control, self._write_packet, self._wire),
         )
+        management = BridgeManagement(client)
         stream = RawDispatcher(
             self._write_raw,
             capture_backlog,
-            error_reporting=ErrorReporting(client),
+            error_reporting=management.error_reporting,
+            traffic=management.traffic,
         )
         async with self._transaction():
             await self._set_byte(BridgeMethod.MODE, BridgeMode.RAW)

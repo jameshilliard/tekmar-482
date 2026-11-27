@@ -330,6 +330,7 @@ from .state import (
     is_topology_message,
     require_device_support,
 )
+from .traffic import DeviceTraffic, FrameCounts, PortTraffic, TrafficCounters
 from .transport import (
     NullTransport,
     PacketTransport,
@@ -453,6 +454,7 @@ __all__ = [
     "DeviceMode",
     "DeviceRuntime",
     "DeviceSnapshot",
+    "DeviceTraffic",
     "DeviceValue",
     "DhwStatus",
     "DiscoveredDevice",
@@ -470,6 +472,7 @@ __all__ = [
     "FanSetup",
     "FieldSpec",
     "FirmwareBundle",
+    "FrameCounts",
     "GatewayAccess",
     "GatewayEndpoint",
     "GatewayErrorCounter",
@@ -555,6 +558,7 @@ __all__ = [
     "PortDiagnostic",
     "PortError",
     "PortErrorReason",
+    "PortTraffic",
     "ProtocolError",
     "PumpElectricOutput",
     "RawTcpTpckTransport",
@@ -654,6 +658,7 @@ __all__ = [
     "TraceRx",
     "TraceStep",
     "TraceTx",
+    "TrafficCounters",
     "TransportError",
     "TrpcCommand",
     "TrpcFieldMap",
