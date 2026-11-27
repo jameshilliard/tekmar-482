@@ -271,6 +271,41 @@ class PlantStateTests(unittest.TestCase):
         assert verified and verified.assignment and verified.assignment.mix_number == 3
         assert not verified.pending_setup and not verified.equipment.outputs
 
+    def test_402_setup_and_energy_registers_have_independent_support(self) -> None:
+        state = NativeState()
+        state.observe(identity(_402))
+        assert {(0x02, None), (0x24, None), (0x25, None)} <= set(
+            _registers(state).missing,
+        )
+        for number, data in (
+            (0x02, "03 85 31"),
+            (0x24, "41 00 02"),
+            (0x25, "01 01"),
+            (0x4B, "03 3412"),
+            (0x4C, "03 0000"),
+        ):
+            assert state.observe(block(number, bytes.fromhex(data))) == (TEST_PATH,)
+        settings = _registers(state)
+        assert settings.product and settings.product.model == "402"
+        assert settings.boiler_energy_hours == 0x1234
+        assert settings.energy_savings_hours == 0
+        dhw = settings.report(0x24)
+        assert dhw and dhw.frame.decoded["mode"] == 0
+        assert dhw.frame.decoded["dhw_sensor_usage"] == 2
+        assert "wake_exchange_target_raw" not in dhw.frame.decoded
+        expected = {key[0] for key in settings.missing}
+        assert expected.isdisjoint({0x02, 0x24, 0x25, 0x4B, 0x4C})
+        host = NativePath(TEST_PATH.port, 0, 0)
+        command = bytes([TEST_PATH.subnet, TEST_PATH.node, 0x24, 0]) + bytes(8)
+        assert state.observe(frame(0x2DF, command, host)) == (TEST_PATH,)
+        updated = _registers(state)
+        assert updated.report(0x24) is None and (0x24, None) in updated.missing
+        assert updated.report(0x25) is not None
+
+        state.observe(identity(104104, path=_OTHER))  # 403 is a different product.
+        state.observe(block(0x4B, bytes.fromhex("03 3412"), _OTHER))
+        assert _registers(state, _OTHER).boiler_energy_hours is None
+
 
 class PlantSessionTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self) -> None:
@@ -490,7 +525,22 @@ class PlantSessionTests(unittest.IsolatedAsyncioTestCase):
         self.ack()
         self.rx(identity(_402))
         expected = {
-            (b, 0) for b in (0x22, 0x23, 0x3C, 0x41, 0x43, 0x44, 0x4B, 0x4C, 0x4E, 0x50)
+            (b, 0)
+            for b in (
+                0x02,
+                0x22,
+                0x23,
+                0x24,
+                0x25,
+                0x3C,
+                0x41,
+                0x43,
+                0x44,
+                0x4B,
+                0x4C,
+                0x4E,
+                0x50,
+            )
         } | {(0x44, 129)}
         for _ in range(len(expected)):
             b, selector = await self.query()

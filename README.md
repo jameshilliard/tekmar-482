@@ -582,6 +582,17 @@ assignment stays unlabelled. Master and plant-loop status are independent.
 DHW status exposes temperatures; the separate tank status retains raw
 readings by tank ID because their scale is not established.
 
+For ports that are known to share a tN4 network, pass `--shared-network` to
+`read-water` to show one logical system for each shared MasterPresent slot
+map. The Python equivalents are `state.water_systems(ports=(0, 2))` and
+`result.water_systems(ports=(0, 2))` on a `WaterRead`. Each loop's `source`
+is the one path that claims the full subnet with that map and has a known
+assignment. Copied status without an announcement is still visible in
+`water_sources` but cannot supply that route. Competing claims, duplicate
+slots, and setup changes without fresh reports leave the source unresolved.
+This is a map of loops, not proof that several routes are one physical
+controller. The CLI scopes each port independently unless asked to group.
+
 For example, `state.water_source(path).equipment.outputs` contains the
 latest plant reports by output subtype and reported device ID on that path.
 A staged boiler reports separate available and operating stage masks; a heat
@@ -597,6 +608,12 @@ pairs from operating reports. For example, on a 402, pump-hour selectors
 0 and 129 refer to the primary and DHW pumps. A zero availability mask
 advertises no instances; a missing mask or a partial hours word is not
 zero. An equipment change invalidates readings for the affected instances.
+Plant scans also record the supported reset curve, DHW setup and setpoint
+setup fields (`02`, `24`, `25`) where the device supplies them. On a 402,
+`boiler_energy_hours` is the time-based estimate described in the
+[402 monitor menu](https://www.watts.com/dfsmedia/0533dbba17714b1ab581ab07a4cbb521/81499-source/638820695310000000/402-d-07.pdf#page=19),
+not a measured energy reading. `energy_savings_hours` is time spent in the
+savings state. Missing or partial words are not substituted with zero.
 
 ### Weekly schedules
 

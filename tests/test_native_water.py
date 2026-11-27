@@ -4,16 +4,18 @@ import unittest
 
 from tekmar_482 import (
     CaptureGap,
+    GatewayTraceGap,
     LoopKind,
     NativeAddress,
     NativeFrame,
     NativeMessage,
+    NativeState,
     Packet,
     WaterMonitor,
     read_water,
 )
 from tekmar_482.cli import build_parser
-from tekmar_482.cli_status import water_fields
+from tekmar_482.cli_status import water_fields, water_system_fields
 from tekmar_482.raw import RawDispatcher
 
 _LOCAL = NativeAddress(0x25, 31)
@@ -146,6 +148,108 @@ class MonitorTests(unittest.TestCase):
         assert not monitor.observe(CaptureGap(1)) and monitor.dropped == 3
 
 
+class WaterSystemTests(unittest.TestCase):
+    def test_shared_map_resolves_boiler_and_mix_on_their_claiming_ports(self) -> None:
+        state = NativeState()
+        slots = bytes([_LOCAL.subnet, _OTHER.subnet])
+        for port, local in ((1, _OTHER), (3, _LOCAL)):
+            for sender in (_LOCAL, _OTHER):
+                state.observe(_frame(0x3CF, _BASE, port=port, peer=sender))
+            claim = slots + (b"\0" if port == 1 else b"")
+            state.observe(_frame(0x3FF, claim, port=port, peer=local))
+
+        (system,) = state.water_systems(ports=(1, 3))
+        boiler, mix = system.loops
+        assert system.subnets == (_LOCAL.subnet, _OTHER.subnet)
+        assert (
+            boiler.source
+            and boiler.source.port == 3
+            and boiler.source.address == _LOCAL
+        )
+        assert mix.source and mix.source.port == 1 and mix.source.address == _OTHER
+        assert len(state.water_sources) == 4
+        (port_one,) = state.water_systems(ports=(1,))
+        assert (
+            port_one.loops[0].source is None and port_one.loops[1].source == mix.source
+        )
+        assert water_system_fields(system)["loops"] == [
+            {
+                "slot": 0,
+                "subnet": _LOCAL.subnet,
+                "advertised_kind": "boiler",
+                "source": {"port": 3, "subnet": _LOCAL.subnet, "node": 31},
+                "candidates": [{"port": 3, "subnet": _LOCAL.subnet, "node": 31}],
+                "other_claims": [],
+                "repeated_slot": False,
+            },
+            {
+                "slot": 1,
+                "subnet": _OTHER.subnet,
+                "advertised_kind": "mix",
+                "source": {"port": 1, "subnet": _OTHER.subnet, "node": 31},
+                "candidates": [{"port": 1, "subnet": _OTHER.subnet, "node": 31}],
+                "other_claims": [],
+                "repeated_slot": False,
+            },
+        ]
+
+        # Hearing another matching status is not a reason to change the route.
+        state.observe(_frame(0x3CF, _BASE, port=1, stamp=1240))
+        state.observe(GatewayTraceGap(2, 1 << 3))
+        (after_drop,) = state.water_systems(ports=(1, 3))
+        assert after_drop.loops[0].source is None
+        assert after_drop.loops[1].source == mix.source
+        assert any(s.address == _LOCAL and s.master for s in state.water_sources)
+
+    def test_competing_maps_repeated_slots_and_partial_addresses_stay_ambiguous(
+        self,
+    ) -> None:
+        state = NativeState()
+        same_bus = NativeAddress(_LOCAL.subnet ^ 0x20, 31)
+        state.observe(_frame(0x3FF, bytes([_LOCAL.subnet]), peer=same_bus))
+        (wrong_subnet,) = state.water_systems(ports=(3,))
+        assert wrong_subnet.loops[0].source is None
+        state.observe(_frame(0x3FF, bytes([_LOCAL.subnet])))
+        state.observe(_frame(0x3FF, bytes([_LOCAL.subnet]), port=1, peer=_LOCAL))
+        (competing,) = state.water_systems(ports=(1, 3))
+        assert len(competing.loops[0].candidates) == 2
+        assert competing.loops[0].source is None
+
+        state.observe(_frame(0x3FF, bytes([_LOCAL.subnet, _LOCAL.subnet]), port=1))
+        single, repeated = state.water_systems(ports=(1, 3))
+        assert single.loops[0].other_claims[0].port == 1
+        assert single.loops[0].source is None
+        assert all(
+            loop.repeated_slot and loop.source is None for loop in repeated.loops
+        )
+        for ports in ((), (1, 6)):
+            with self.subTest(ports=ports), self.assertRaises(ValueError):
+                state.water_systems(ports=ports)
+
+    def test_addressed_setup_invalidation_withholds_topology_route(self) -> None:
+        state = NativeState()
+        state.observe(_frame(0x3FF, bytes([_LOCAL.subnet])))
+        state.observe(_frame(0x3CF, _BASE))
+        assert state.water_systems(ports=(3,))[0].loops[0].source is not None
+
+        update = bytes(
+            [_LOCAL.subnet, _LOCAL.node, 0x33, 0, _LOCAL.subnet, 2, 0, 0, 0, 0, 0, 0],
+        )
+        state.observe(_frame(0x2DF, update, peer=NativeAddress(0, 0)))
+        (pending,) = state.water_systems(ports=(3,))
+        assert len(pending.loops[0].candidates) == 1 and pending.loops[0].source is None
+        state.observe(_frame(0x2E7, bytes.fromhex("330003 25 02")))
+        (confirmed,) = state.water_systems(ports=(3,))
+        loop = confirmed.loops[0]
+        assert loop.advertised.kind is LoopKind.BOILER
+        assert (
+            loop.source
+            and loop.source.assignment
+            and loop.source.assignment.kind is LoopKind.MIX
+        )
+        assert loop.source.master is None  # No old status relabelled as mixing.
+
+
 class WaterReadTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self) -> None:
         self.tx: asyncio.Queue[bytes] = asyncio.Queue()
@@ -208,6 +312,8 @@ class WaterReadTests(unittest.IsolatedAsyncioTestCase):
             sample.sources[1].assignment
             and sample.sources[1].assignment.kind is LoopKind.TANK
         )
+        systems = sample.water_systems(ports=(1, 3))
+        assert len(systems) == 1 and systems[0].loops[0].source == sample.sources[1]
         assert self.tx.empty()
 
     async def test_master_node_zero_not_an_addressed_block_target(self) -> None:
@@ -227,9 +333,17 @@ class WaterReadTests(unittest.IsolatedAsyncioTestCase):
         assert not sample.master_queries and sample.sources[0].assignment is None
         assert self.tx.empty() and sample.dropped == 0
         args = build_parser().parse_args(
-            ["read-water", "1", "3", "--passive", "--tcp", "localhost:1234"],
+            [
+                "read-water",
+                "1",
+                "3",
+                "--passive",
+                "--shared-network",
+                "--tcp",
+                "localhost:1234",
+            ],
         )
-        assert args.passive and args.ports == [1, 3]
+        assert args.passive and args.shared_network and args.ports == [1, 3]
 
     async def test_missing_or_cancelled_query_releases_capture_reader(self) -> None:
         task = asyncio.create_task(read_water(self.stream, [3], duration=20))

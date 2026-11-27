@@ -54,6 +54,7 @@ from .cli_status import (
     sensor_fields,
     watch_from_args,
     water_fields,
+    water_system_fields,
 )
 from .cli_trace import add_trace_command, trace_record
 from .client import Tekmar482Client
@@ -883,9 +884,16 @@ async def _native_status(
             if args.passive
             else NativeAddress(args.source_subnet, args.source_node),
         )
+    ports = tuple(sorted(set(args.ports)))
+    scopes = (ports,) if args.shared_network else tuple((p,) for p in ports)
     emit(
         {
             "water_sources": [water_fields(s) for s in water.sources],
+            "water_systems": [
+                {"ports": scope, **water_system_fields(system)}
+                for scope in scopes
+                for system in water.water_systems(ports=scope)
+            ],
             "plant_configurations": [
                 {**asdict(path), **plant_register_fields(settings)}
                 for path, settings in water.plant_configurations

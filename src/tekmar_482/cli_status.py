@@ -30,6 +30,7 @@ if TYPE_CHECKING:
     from .native_watch import ClimateChange
     from .native_water import WaterSource
     from .raw import BridgeStream
+    from .water_topology import WaterSystem
 
 
 def sensor_fields(device: SensorObservation) -> dict[str, object]:
@@ -123,6 +124,8 @@ def plant_register_fields(config: PlantRegisters) -> dict[str, object]:
             }
             for t in config.runtimes
         ],
+        "boiler_energy_hours": config.boiler_energy_hours,
+        "energy_savings_hours": config.energy_savings_hours,
         "reports": [
             {
                 "block": r.block,
@@ -161,6 +164,31 @@ def water_fields(source: WaterSource) -> dict[str, object]:
         "dhw_status": _sample_fields(source.dhw),
         "tank_statuses": [_sample_fields(s) for s in source.tanks],
         "equipment": _equipment_fields(source.equipment),
+    }
+
+
+def water_system_fields(system: WaterSystem) -> dict[str, object]:
+    def path(source: WaterSource) -> dict[str, int]:
+        return {
+            "port": source.port,
+            "subnet": source.address.subnet,
+            "node": source.address.node,
+        }
+
+    return {
+        "subnets": system.subnets,
+        "loops": [
+            {
+                "slot": loop.advertised.slot,
+                "subnet": loop.advertised.subnet,
+                "advertised_kind": loop.advertised.kind.value,
+                "source": path(source) if (source := loop.source) is not None else None,
+                "candidates": [path(source) for source in loop.candidates],
+                "other_claims": [path(source) for source in loop.other_claims],
+                "repeated_slot": loop.repeated_slot,
+            }
+            for loop in system.loops
+        ],
     }
 
 
@@ -411,6 +439,11 @@ def add_status_commands(
         help="capture window in seconds",
     )
     water.add_argument("--passive", action="store_true", help="do not send MasterQuery")
+    water.add_argument(
+        "--shared-network",
+        action="store_true",
+        help="group loop announcements when the selected ports share one tN4 network",
+    )
     water.add_argument(
         "--no-plant-settings",
         action="store_true",

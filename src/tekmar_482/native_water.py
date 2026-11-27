@@ -19,6 +19,7 @@ from .native_plant_registers import has_plant_registers
 from .native_state import BLOCK_REPORT, TAKING_ADDRESS, NativePath, NativeState
 from .normal_trace import GatewayTraceGap
 from .raw import CaptureGap
+from .water_topology import water_systems
 
 if TYPE_CHECKING:
     from collections.abc import Iterable
@@ -28,6 +29,7 @@ if TYPE_CHECKING:
     from .native_plant_registers import PlantRegisters
     from .native_status import NativeStatusBatch
     from .raw import CaptureRecord, NativeBlockBatch, NativeReader
+    from .water_topology import WaterSystem
 
 _HOST = NativeAddress(0, 0)
 _MASTER = NativeStatusQuery(StatusRequest.MASTER)
@@ -48,6 +50,10 @@ class WaterRead:
     @property
     def dropped(self) -> int:
         return self.host_records_dropped + self.gateway_trace_records_dropped
+
+    def water_systems(self, *, ports: Iterable[int]) -> tuple[WaterSystem, ...]:
+        """Resolve advertised loops without modifying the observed source paths."""
+        return water_systems(self.sources, ports=ports)
 
 
 class _PortScan:

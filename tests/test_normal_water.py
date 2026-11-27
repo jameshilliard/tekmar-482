@@ -249,3 +249,60 @@ class NormalWaterTests(unittest.IsolatedAsyncioTestCase):
             data["gateway_trace_records_dropped"] == data["host_records_dropped"] == 0
         )
         assert not data["unfinished_ports"]
+
+    async def test_cli_combines_claims_only_for_an_explicit_shared_network(
+        self,
+    ) -> None:
+        mix = NativePath(2, 0x46, 19)
+        slots = bytes([TEST_PATH.subnet, mix.subnet])
+
+        async def gateway(wire: Wire) -> None:
+            await start(wire, "0c")
+            for path in (mix, TEST_PATH):
+                wire.queue_packet(peer(frame(0x3FF, slots, path)))
+                wire.queue_packet(peer(frame(0x3CF, _WATER, path)))
+            await restore(wire)
+
+        parser = build_parser()
+        for shared in (False, True):
+            with self.subTest(shared=shared):
+                args = parser.parse_args(
+                    [
+                        "read-water",
+                        "2",
+                        "3",
+                        "--passive",
+                        "--tcp",
+                        "localhost:4321",
+                        "--duration",
+                        "0.06",
+                        "--json",
+                        *(["--shared-network"] if shared else []),
+                    ],
+                )
+                output, wire = StringIO(), Wire()
+                async with (
+                    Tekmar482Client(wire) as client,
+                    asyncio.TaskGroup() as tasks,
+                ):
+                    bridge = MagicMock(spec=BridgeClient)
+                    bridge.normal.return_value.__aenter__.return_value = client
+                    tasks.create_task(gateway(wire))
+                    with patch("tekmar_482.cli.open_gateway") as opened:
+                        opened.return_value.__aenter__.return_value = bridge
+                        assert await run(args, stdout=output) == 0
+
+                data = json.loads(output.getvalue())
+                systems = data["water_systems"]
+                assert len(data["water_sources"]) == 2 and not data["master_queries"]
+                if shared:
+                    (system,) = systems
+                    assert system["ports"] == [2, 3]
+                    assert [loop["source"]["port"] for loop in system["loops"]] == [
+                        3,
+                        2,
+                    ]
+                else:
+                    assert [system["ports"] for system in systems] == [[2], [3]]
+                    assert systems[0]["loops"][0]["source"] is None
+                    assert systems[1]["loops"][1]["source"] is None

@@ -19,11 +19,16 @@ if TYPE_CHECKING:
     from .native import BlockKey, NativeFrame
 
 _PUMP_SETUP = 0x41
+_BOILER_ENERGY = 0x4B
+_ENERGY_SAVINGS = 0x4C
 _MASK_BITS = 8
 PLANT_REGISTERS = frozenset(
     (
+        0x02,
         0x22,
         0x23,
+        0x24,
+        0x25,
         0x33,
         0x34,
         0x35,
@@ -106,6 +111,39 @@ class PlantRegisterReport:
 class PlantRegisters:
     reports: tuple[PlantRegisterReport, ...]
     missing: tuple[BlockKey, ...]
+    product: NativeProduct | None = None
+
+    def report(
+        self,
+        block: int,
+        selector: int | None = None,
+    ) -> PlantRegisterReport | None:
+        return next(
+            (r for r in self.reports if (r.block, r.selector) == (block, selector)),
+            None,
+        )
+
+    @property
+    def boiler_energy_hours(self) -> int | None:
+        """The 402's hours-based estimate, not measured energy."""
+        if (
+            self.product
+            and self.product.model == "402"
+            and (r := self.report(_BOILER_ENERGY))
+        ):
+            return _integer(r.frame.decoded, "energy_usage_raw")
+        return None
+
+    @property
+    def energy_savings_hours(self) -> int | None:
+        """Hours the 402 spent in its savings state."""
+        if (
+            self.product
+            and self.product.model == "402"
+            and (r := self.report(_ENERGY_SAVINGS))
+        ):
+            return _integer(r.frame.decoded, "energy_savings_time")
+        return None
 
     @property
     def banks(self) -> tuple[EquipmentAvailability, ...]:
@@ -235,4 +273,5 @@ class PlantRegisterBook:
         return PlantRegisters(
             tuple(self.reports[key] for key in sorted(self.reports)),
             tuple(self.missing(product, subnet)) if addressable else (),
+            product,
         )

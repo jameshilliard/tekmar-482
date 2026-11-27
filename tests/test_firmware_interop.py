@@ -38,6 +38,7 @@ from tekmar_482 import (
     SnowmeltKey,
     SnowmeltOperatingState,
     SnowmeltOperation,
+    StatusRequest,
     TargetSlot,
     ThermostatMode,
     ThermostatTarget,
@@ -553,3 +554,66 @@ class FirmwareInteropTests(unittest.IsolatedAsyncioTestCase):
                 result.readback
                 and result.readback.require_report().decoded["sleep_raw"] == 1780
             )
+
+    async def test_plant_topology_resolves_each_loop_with_forwarded_reports(
+        self,
+    ) -> None:
+        boiler = NativePath(3, 0x45, 31)
+        mix = NativePath(2, 0x56, 31)
+        statuses = (
+            "7cf457c9 bc07 00c0 9828 2211 fe",
+            "7cf567c9 0807 00c0 1426 4400 01",
+        )
+        script = (
+            (3, "3f700000", ("7ff457c2 4556", *statuses)),
+            (2, "3f700000", ("7ff567c2 4556", *statuses)),
+            _block(3, "45 00000040", "0000", "6e7457c9 00003f a79601 b60402"),
+            _block(2, "56 00000040", "0000", "6e7567c9 00003f a79601 b60402"),
+            _block(3, "45 00000040", "2400", "6e7457c5 240041 00 02"),
+            _block(2, "56 00000040", "0200", "6e7567c5 020003 85 31"),
+        )
+        state = NativeState()
+        async with _gateway(script) as manager, manager.peer_capture((2, 3)) as capture:
+            query = NativeStatusQuery(StatusRequest.MASTER)
+            for path, register in ((boiler, 0x24), (mix, 0x02)):
+                response = await manager.read_status(path.port, query)
+                assert (
+                    response.answered
+                    and response.reports[0].message.source == path.address
+                )
+                async with asyncio.timeout(3):
+                    while sum(
+                        s.port == path.port and s.master is not None
+                        for s in state.water_sources
+                    ) < len(statuses):
+                        state.observe(await capture.read())
+                for block in (0, register):
+                    await manager.read_block(
+                        path.port,
+                        NativeBlockQuery(path.address, block),
+                    )
+
+            async with asyncio.timeout(3):
+                while any(
+                    state.block(path, block) is None
+                    for path, block in ((boiler, 0x24), (mix, 0x02))
+                ):
+                    state.observe(await capture.read())
+
+        assert len(state.water_sources) == 4 and state.dropped == 0
+        (plant,) = state.water_systems(ports=(2, 3))
+        first, second = plant.loops
+        assert first.source and (first.source.port, first.source.address) == (
+            boiler.port,
+            boiler.address,
+        )
+        assert first.source.master and first.source.master.value.supply_f == 113
+        assert second.source and (second.source.port, second.source.address) == (
+            mix.port,
+            mix.address,
+        )
+        assert second.source.master and second.source.master.value.supply_f == 95
+        dhw = state.plant_registers(boiler)
+        reset = state.plant_registers(mix)
+        assert dhw and dhw.report(0x24) and dhw.report(0x02) is None
+        assert reset and reset.report(0x02) and reset.report(0x24) is None

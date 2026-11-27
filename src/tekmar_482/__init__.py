@@ -400,6 +400,7 @@ from .units import (
     fahrenheit_to_celsius,
     fahrenheit_to_degh,
 )
+from .water_topology import WaterLoop, WaterSystem
 
 __all__ = [
     "DEFAULT_BAUDRATE",
@@ -705,10 +706,12 @@ __all__ = [
     "WarmWeatherShutdown",
     "WaterCycle",
     "WaterDetection",
+    "WaterLoop",
     "WaterMonitor",
     "WaterRead",
     "WaterSample",
     "WaterSource",
+    "WaterSystem",
     "WeeklyEvent",
     "WritableBlock",
     "ZoneSyncAdjustment",

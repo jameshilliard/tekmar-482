@@ -48,6 +48,7 @@ from .native_setpoint import SETPOINT_BLOCKS, NativeSetpointControl, SetpointBoo
 from .native_snowmelt import NativeSnowmelt, SnowmeltChannels, SnowmeltConfiguration
 from .native_targets import ADJUSTMENT_BLOCKS, AdjustmentState, ThermostatAdjustments
 from .raw import CaptureGap
+from .water_topology import water_systems
 
 if TYPE_CHECKING:
     from collections.abc import Iterable
@@ -58,6 +59,7 @@ if TYPE_CHECKING:
     from .native_snowmelt import SnowmeltChannel
     from .native_status import NativeStatusBatch
     from .raw import CaptureRecord
+    from .water_topology import WaterSystem
 
 BLOCK_REPORT = 0x2E7
 BLOCK_UPDATE = 0x2DF
@@ -196,6 +198,10 @@ class NativeState:
 
     def water_source(self, path: NativePath) -> WaterSource | None:
         return self._water.source(path.port, path.address)
+
+    def water_systems(self, *, ports: Iterable[int]) -> tuple[WaterSystem, ...]:
+        """Resolve advertised loops within a known shared physical network."""
+        return water_systems(self.water_sources, ports=ports)
 
     def io_directory(
         self,
