@@ -30,7 +30,7 @@ from .native_snow_control import apply_snowmelt_group
 from .native_status import StatusCollector, snowmelt_status_query
 from .native_target_edit import edit_thermostat_target
 from .native_write import NativeBlockEditor
-from .normal_trace import NormalTrace, NormalTraceState
+from .normal_trace import NormalPeerCapture, NormalTrace, NormalTraceState
 from .raw import NativePortBusyError
 from .traffic import TrafficCounters
 from .trpc import ResponseMatch, TrpcCommand, TrpcMethod, TrpcPacket, TrpcService
@@ -51,6 +51,7 @@ if TYPE_CHECKING:
     from .native_status import NativeStatusBatch
     from .native_target_edit import ThermostatTargetChange
     from .native_write import BlockDelivery, NativeWriteResult
+    from .packet import Packet
     from .raw import NativeBlockBatch, TxResult
 
 _CAPABILITY_BYTES = 4
@@ -88,6 +89,7 @@ class BridgeFeature(IntFlag):
     NORMAL_STATUS_READ = 128
     NORMAL_ANNOUNCE = 512
     BLOCK_TRANSFERS = 1024
+    ORDERED_TRACE_GAPS = 2048
 
 
 class BridgeMethod(IntEnum):
@@ -672,12 +674,15 @@ class BridgeManagement(_Management):
             raise ProtocolError(msg)
         return NormalTraceState(mask, tuple(counts))
 
-    async def _require_trace(self) -> None:
+    async def _require_trace(
+        self,
+        features: BridgeFeature = BridgeFeature.NORMAL_TRACE,
+    ) -> None:
         caps = await self.capabilities()
         if (
             caps is None
             or caps.mode != BridgeMode.NORMAL
-            or not caps.features & BridgeFeature.NORMAL_TRACE
+            or caps.features & features != features
         ):
             msg = "Normal trace requires capable custom firmware in Normal mode"
             raise ProtocolError(msg)
@@ -702,14 +707,8 @@ class BridgeManagement(_Management):
             msg = "Normal trace mask was not acknowledged"
             raise ProtocolError(msg)
 
-    @asynccontextmanager
-    async def trace(
-        self,
-        ports: Iterable[int] = TN4_PORTS,
-        *,
-        backlog: int = 512,
-    ) -> AsyncIterator[NormalTrace]:
-        """Trace an open Normal session without changing its operating mode."""
+    @staticmethod
+    def _trace_mask(ports: Iterable[int]) -> int:
         mask = 0
         for port in ports:
             if port not in TN4_PORTS:
@@ -719,13 +718,62 @@ class BridgeManagement(_Management):
         if not mask:
             msg = "select at least one trace port"
             raise ValueError(msg)
+        return mask
+
+    @staticmethod
+    def _trace_ack(mask: int) -> Packet:
+        return (
+            _ExtensionCommand(
+                TrpcService.RESPONSE_UPDATE,
+                BridgeMethod.NORMAL_TRACE,
+                payload=bytes([mask]),
+            )
+            .to_message()
+            .to_packet()
+        )
+
+    @asynccontextmanager
+    async def trace(
+        self,
+        ports: Iterable[int] = TN4_PORTS,
+        *,
+        backlog: int = 512,
+    ) -> AsyncIterator[NormalTrace]:
+        """Trace an open Normal session without changing its operating mode."""
         trace = NormalTrace(backlog)
+        async with self._capture(trace, self._trace_mask(ports)):
+            yield trace
+
+    @asynccontextmanager
+    async def peer_capture(
+        self,
+        ports: Iterable[int] = TN4_PORTS,
+        *,
+        backlog: int = 512,
+    ) -> AsyncIterator[NormalPeerCapture]:
+        """Receive peers and ordered loss notices without sending on tN4."""
+        mask = self._trace_mask(ports)
+        peers = NormalPeerCapture(backlog, mask, self._trace_ack(mask))
+        async with self._capture(peers, mask):
+            yield peers
+
+    @asynccontextmanager
+    async def _capture(
+        self,
+        trace: NormalTrace | NormalPeerCapture,
+        mask: int,
+    ) -> AsyncIterator[None]:
         with self._session.connection_scope(), self._session.trace_packets(trace):
-            await self._require_trace()
+            required = BridgeFeature.NORMAL_TRACE
+            if isinstance(trace, NormalPeerCapture):
+                required |= BridgeFeature.ORDERED_TRACE_GAPS
+            await self._require_trace(required)
             before = await self._trace_state()
 
             async def restore() -> None:
                 if self._session.is_open and self._session.reader_error is None:
+                    if isinstance(trace, NormalPeerCapture):
+                        trace.stop_at(self._trace_ack(before.port_mask))
                     await self._set_trace_mask(before.port_mask)
                     after = await self._trace_state()
                     deltas = tuple(
@@ -743,7 +791,7 @@ class BridgeManagement(_Management):
 
             try:
                 await self._set_trace_mask(mask)
-                yield trace
+                yield
             except BaseException as err:
                 try:
                     await restore()

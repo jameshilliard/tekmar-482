@@ -30,7 +30,7 @@ if TYPE_CHECKING:
     from types import TracebackType
 
     from .error_reports import ErrorReports
-    from .normal_trace import NormalTrace
+    from .normal_trace import NormalPeerCapture, NormalTrace
     from .packet import Packet
     from .transport import PacketTransport
 
@@ -193,7 +193,7 @@ class Tekmar482Session:
         ] = {}
         self._observers: set[Callable[[TrpcPacket, TrpcCommand | None], None]] = set()
         self._packet_observers: set[Callable[[Packet], None]] = set()
-        self._trace: NormalTrace | None = None
+        self._trace: NormalTrace | NormalPeerCapture | None = None
         self._error_reports: ErrorReports | None = None
         self._coalesced_updates: OrderedDict[Hashable, _QueuedUpdate] = OrderedDict()
         self._writer_wake = asyncio.Event()
@@ -774,7 +774,7 @@ class Tekmar482Session:
             self._error_reports = None
 
     @contextmanager
-    def trace_packets(self, trace: NormalTrace) -> Iterator[None]:
+    def trace_packets(self, trace: NormalTrace | NormalPeerCapture) -> Iterator[None]:
         """Attach one diagnostic observer without consuming application replies."""
         self._raise_if_unavailable()
         if self._trace is not None:

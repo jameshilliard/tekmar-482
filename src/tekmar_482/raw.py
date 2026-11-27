@@ -200,10 +200,23 @@ class InvalidCapture:
     bit_count: int
     bits: bytes
 
+    @classmethod
+    def from_detail(cls, port: int, stamp: int, detail: bytes) -> InvalidCapture | None:
+        """Decode the shared Raw and Normal invalid-frame evidence."""
+        if len(detail) < _INVALID_HEADER - _RX_HEADER:
+            return None
+        count = int.from_bytes(detail[1:3], "little")
+        bits = detail[3:]
+        if len(bits) != (count + 7) // 8 or (
+            count % 8 and bits[-1] & ((1 << (8 - count % 8)) - 1)
+        ):
+            return None
+        return cls(port, stamp, _reason(InvalidReason, detail[0]), count, bits)
+
 
 @dataclass(frozen=True, slots=True)
 class CaptureGap:
-    """Number of oldest records lost from the host buffer before the next record."""
+    """Missing capture records before the next observation (host backlog by default)."""
 
     dropped: int
 
@@ -249,18 +262,13 @@ def decode_raw_packet(packet: Packet, capture_index: int = 0) -> _Record | TxRes
                             _reason(FailureReason, why),
                         )
             if kind == _Service.RX_INVALID and len(data) >= _INVALID_HEADER:
-                count = int.from_bytes(data[7:9], "little")
-                bits = data[9:]
-                if (count + 7) // 8 == len(bits) and (
-                    not count % 8 or not bits[-1] & ((1 << (8 - count % 8)) - 1)
-                ):
-                    return InvalidCapture(
-                        port,
-                        int.from_bytes(data[2:6], "little"),
-                        _reason(InvalidReason, data[6]),
-                        count,
-                        bits,
-                    )
+                capture = InvalidCapture.from_detail(
+                    port,
+                    int.from_bytes(data[2:6], "little"),
+                    data[_RX_HEADER:],
+                )
+                if capture is not None:
+                    return capture
     msg = "unexpected raw packet type, service, port or payload length"
     raise ProtocolError(msg)
 

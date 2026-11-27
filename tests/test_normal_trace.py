@@ -7,6 +7,7 @@ from io import StringIO
 from tekmar_482 import (
     BridgeManagement,
     ConnectionClosedError,
+    GatewayTraceGap,
     NormalTrace,
     NormalTraceState,
     ProtocolError,
@@ -29,7 +30,9 @@ from .test_management import Script
 
 class NormalTraceTests(unittest.IsolatedAsyncioTestCase):
     def test_decode_independent_wire_vectors_without_losing_unknown_bytes(self) -> None:
-        def decode(data: str) -> TraceRx | TraceTx | InvalidCapture | TrpcPacket | None:
+        def decode(
+            data: str,
+        ) -> TraceRx | TraceTx | InvalidCapture | GatewayTraceGap | TrpcPacket | None:
             return TracePacket(
                 42,
                 outbound=False,
@@ -53,11 +56,19 @@ class NormalTraceTests(unittest.IsolatedAsyncioTestCase):
             9,
             bytes.fromhex("8080"),
         )
+        assert decode("05 15 ffffffffffffffff") == GatewayTraceGap((1 << 64) - 1, 0x15)
         for data in (
             "00",
             "00 05 00000000 00 76f00600",
             "ff 00 00000000",
             "04 03 02000000 02 0900 80",
+            "04 03 02000000 02 0900 8081",
+            "05 00 0100000000000000",
+            "05 20 0100000000000000",
+            "05 11 0100000000000000",
+            "05 01 0000000000000000",
+            "05 01 01000000",
+            "05 01 010000000000000000",
             "01 02 00000000 00 00 12300004",
         ):
             assert decode(data) is None

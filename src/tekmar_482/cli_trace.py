@@ -6,7 +6,7 @@ from enum import IntEnum
 from typing import TYPE_CHECKING
 
 from .constants import TN4_PORTS
-from .normal_trace import RxFlag, TracePacket, TraceRx, TraceTx
+from .normal_trace import GatewayTraceGap, RxFlag, TracePacket, TraceRx, TraceTx
 from .raw import CaptureGap, InvalidCapture
 from .trpc import TrpcPacket
 
@@ -82,6 +82,12 @@ def trace_record(event: TracePacket | CaptureGap) -> dict[str, object]:
                 origin=_label(sample.origin),
                 outcome="ack" if sample.failure is None else _label(sample.failure),
             )
+    elif isinstance(sample, GatewayTraceGap):
+        details.update(
+            layer="tn4",
+            trace_gateway_gap=sample.dropped,
+            ports=sample.ports,
+        )
     elif isinstance(sample, InvalidCapture):
         details.update(
             layer="tn4",

@@ -50,7 +50,8 @@ async def read_frame() -> None:
         print(stream.diagnostics)
 ```
 
-`monitor` streams native frames. `discover` sends one read-only block-zero
+`monitor` streams native peer frames in Normal mode without resetting
+inventory or interrupting stock tRPC reporting. `discover` sends one read-only block-zero
 request per observed port/subnet to identify all answering nodes, including
 quiet thermostats and plant masters. `dump` then reads the cataloged and
 previously observed blocks for those receive paths and prints the panel
@@ -90,7 +91,9 @@ tekmar-482 discover --tcp 192.0.2.10:3001 --duration 45 --json
 ```
 
 Use `--probe-subnet PORT:SUBNET` to include a known silent subnet, or
-`--passive` to skip all native requests. A solitary peer can need a link
+`--passive` to skip all native requests. Passive discovery, dump and
+watch commands use Normal peer capture by default. Use `--raw` to
+explicitly select Raw capture. A solitary peer in Raw can need a link
 ACK to deliver its frames: `--ack-port PORT` is explicit and repeatable.
 By default the gateway does not ACK incoming Raw frames. Use a longer
 window if devices have not yet answered. Scanning does not change setpoints.
@@ -105,8 +108,19 @@ for device in result.devices:
 ```
 
 The scanner owns the capture consumer for the window; `on_record` can
-observe the same traffic. For an ongoing subscription, feed frames from
+observe the same traffic. For an ongoing subscription, feed records (including gaps) from
 your own receive loop to `NativeInventory.observe()` instead.
+
+For a long-running read-only consumer, use
+`async with BridgeManagement(client).peer_capture(ports) as peers` on an
+open Normal session. `await peers.read()` returns peer frames, invalid
+receptions, or an ordered loss notice. Gateway transmissions, early-start
+frames and tRPC packets are not peer updates. A `GatewayTraceGap` gives
+the affected ports and the total number of lost gateway records; an ordinary
+`CaptureGap` indicates host backlog. Feed gaps to `NativeState.observe()`
+as well as frames: an address or a group master could have changed.
+The trace mask is restored on exit, including cancellation. Older firmware
+without ordered loss notices is rejected, not silently switched into Raw.
 
 For a model-aware read of one device, use its physical port, native subnet
 and node from discovery, for example:

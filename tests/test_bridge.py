@@ -852,7 +852,7 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
                         "--tcp",
                         f"{endpoint.address}:{endpoint.port}",
                         "--json",
-                        *(["--passive"] if passive else []),
+                        *(["--passive", "--raw"] if passive else []),
                     ],
                 )
                 out = StringIO()

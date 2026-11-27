@@ -10,6 +10,7 @@ from ._native_payloads import BLOCK_SELECTORS
 from .constants import TN4_PORTS
 from .native import NativeAddress, NativeFrame, NativeMessage, NativeTargets
 from .native_identity import NativeIdentity
+from .normal_trace import GatewayTraceGap, NormalPeerCapture
 from .raw import CaptureGap
 
 if TYPE_CHECKING:
@@ -46,12 +47,28 @@ class NativeInventory:
             (d.port, d.address.subnet, d.address.node & _NODE_BITS): d for d in devices
         }
         self._moved_from: dict[tuple[int, int, int], tuple[int, int, int]] = {}
+        self.host_records_dropped = 0
+        self.gateway_trace_records_dropped = 0
 
     @property
     def devices(self) -> tuple[NativeDevice, ...]:
         return tuple(self._nodes[key] for key in sorted(self._nodes))
 
-    def observe(self, frame: NativeFrame) -> NativeDevice | None:
+    def observe(self, frame: CaptureRecord) -> NativeDevice | None:
+        if isinstance(frame, CaptureGap):
+            if isinstance(frame, GatewayTraceGap):
+                self.gateway_trace_records_dropped += frame.dropped
+                for routes in (self._nodes, self._moved_from):
+                    for key in tuple(routes):
+                        if frame.port_mask & (1 << key[0]):
+                            del routes[key]
+            else:
+                self.host_records_dropped += frame.dropped
+                self._nodes.clear()
+                self._moved_from.clear()
+            return None
+        if not isinstance(frame, NativeFrame):
+            return None
         node = frame.node & _NODE_BITS
         key = (frame.port, frame.subnet, node)
         data = frame.message.payload
@@ -122,10 +139,11 @@ class NativeDiscovery:
     devices: tuple[NativeDevice, ...]
     probes: tuple[NativeProbe, ...]
     host_records_dropped: int
+    gateway_trace_records_dropped: int = 0
 
 
 async def discover_native(
-    stream: BridgeStream,
+    stream: BridgeStream | NormalPeerCapture,
     *,
     duration: float = 30,
     source: NativeAddress | None = _HOST,
@@ -140,7 +158,9 @@ async def discover_native(
     pending: dict[int, asyncio.Queue[int]] = {p: asyncio.Queue() for p in TN4_PORTS}
     seen: set[tuple[int, int]] = set()
     probes: dict[tuple[int, int], TxResult | None] = {}
-    dropped = 0
+    if isinstance(stream, NormalPeerCapture) and source is not None:
+        msg = "a Normal peer capture is passive; use source=None"
+        raise ValueError(msg)
 
     def enqueue(port: int, subnet: int) -> None:
         key = (port, subnet)
@@ -155,27 +175,24 @@ async def discover_native(
         enqueue(port, NativeTargets(subnet).subnet)
 
     async def receive() -> None:
-        nonlocal dropped, inventory
         while True:
             record = await stream.read()
             if on_record is not None:
                 on_record(record)
+            device = inventory.observe(record)
             if isinstance(record, CaptureGap):
-                dropped += record.dropped
-                # An address reassignment could be missing.
-                inventory = NativeInventory()
                 # Keep queued or in-flight identity probes; fresh traffic can
                 # request a previously completed probe again after the gap.
                 seen.difference_update(k for k, v in probes.items() if v is not None)
             elif (
                 isinstance(record, NativeFrame)
-                and inventory.observe(record) is not None
+                and device is not None
                 and source is not None
                 and record.node & _NODE_BITS
             ):
                 enqueue(record.port, record.subnet)
 
-    async def probe(port: int, sender: NativeAddress) -> None:
+    async def probe(raw: BridgeStream, port: int, sender: NativeAddress) -> None:
         while True:
             subnet = await pending[port].get()
             key = (port, subnet)
@@ -186,11 +203,13 @@ async def discover_native(
                 target=NativeTargets(subnet),
                 argument=0,
             )
-            probes[key] = await stream.send(port, request)
+            probes[key] = await raw.send(port, request)
 
     tasks = [asyncio.create_task(receive())]
-    if source is not None:
-        tasks.extend(asyncio.create_task(probe(port, source)) for port in TN4_PORTS)
+    if source is not None and not isinstance(stream, NormalPeerCapture):
+        tasks.extend(
+            asyncio.create_task(probe(stream, port, source)) for port in TN4_PORTS
+        )
     try:
         done, _ = await asyncio.wait(
             tasks,
@@ -206,5 +225,6 @@ async def discover_native(
     return NativeDiscovery(
         inventory.devices,
         tuple(NativeProbe(*key, probes[key]) for key in sorted(probes)),
-        dropped,
+        inventory.host_records_dropped,
+        inventory.gateway_trace_records_dropped,
     )

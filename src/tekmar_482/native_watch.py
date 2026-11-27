@@ -20,6 +20,7 @@ from .native_plant_registers import PLANT_REGISTERS
 from .native_setpoint import SETPOINT_BLOCKS
 from .native_state import BLOCK_UPDATE, TAKING_ADDRESS, NativePath, NativeState
 from .native_targets import ADJUSTMENT_BLOCKS
+from .normal_trace import NormalPeerCapture
 from .raw import CaptureGap
 
 if TYPE_CHECKING:
@@ -433,7 +434,7 @@ class _Watch:
 
 
 async def _run_watch(
-    stream: BridgeStream,
+    stream: BridgeStream | NormalPeerCapture,
     watch: _Watch,
     *,
     source: NativeAddress | None,
@@ -442,6 +443,9 @@ async def _run_watch(
     on_record: Callable[[CaptureRecord], None] | None,
 ) -> None:
     selected = watch.paths
+    if isinstance(stream, NormalPeerCapture) and source is not None:
+        msg = "a Normal peer capture is passive; use source=None"
+        raise ValueError(msg)
     if source is not None and (
         not selected or (not watch.io_discovery and any(not p.node for p in selected))
     ):
@@ -463,7 +467,7 @@ async def _run_watch(
             watch.observe(record)
 
     tasks = [asyncio.create_task(receive())]
-    if source is not None:
+    if source is not None and not isinstance(stream, NormalPeerCapture):
         tasks.extend(
             asyncio.create_task(watch.probe(stream, q, source, timeout))
             for q in watch.queues.values()
@@ -483,7 +487,7 @@ async def _run_watch(
 
 
 async def watch_native(
-    stream: BridgeStream,
+    stream: BridgeStream | NormalPeerCapture,
     paths: Iterable[NativePath] | None = None,
     *,
     source: NativeAddress | None = _HOST,
@@ -535,7 +539,7 @@ async def watch_native(
 
 
 async def watch_climate(
-    stream: BridgeStream,
+    stream: BridgeStream | NormalPeerCapture,
     paths: Iterable[NativePath] | None = None,
     *,
     source: NativeAddress | None = _HOST,

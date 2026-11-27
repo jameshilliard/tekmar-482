@@ -27,6 +27,7 @@ if TYPE_CHECKING:
     from .native_snowmelt import NativeSnowmelt, SnowmeltChannel
     from .native_state import NativeFaultReport, NativeLineReport, NativeState
     from .native_watch import NativeWatchResult
+    from .normal_trace import NormalPeerCapture
     from .raw import BridgeStream
 
 
@@ -223,7 +224,7 @@ def _emit_fault(
 
 
 async def watch_all_from_args(
-    stream: BridgeStream,
+    stream: BridgeStream | NormalPeerCapture,
     args: argparse.Namespace,
     emit: Callable[[object], None],
 ) -> int:
@@ -372,7 +373,7 @@ def _watch_summary(
     emit(
         {
             "completed_reads": result.reads,
-            "host_records_dropped": state.dropped,
+            "capture_records_dropped": state.dropped,
             "observed_paths": [asdict(p) for p in state.paths],
             "missing_identities": unidentified,
             "missing_mode_reports": no_mode,

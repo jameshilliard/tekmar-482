@@ -27,6 +27,7 @@ if TYPE_CHECKING:
     from .native_targets import ThermostatAdjustments
     from .native_watch import ClimateChange
     from .native_water import WaterSource
+    from .normal_trace import NormalPeerCapture
     from .raw import BridgeStream
 
 
@@ -234,7 +235,7 @@ def adjustment_fields(settings: ThermostatAdjustments) -> dict[str, object]:
 
 
 async def watch_from_args(
-    stream: BridgeStream,
+    stream: BridgeStream | NormalPeerCapture,
     args: argparse.Namespace,
     emit: Callable[[object], None],
 ) -> int:
@@ -269,7 +270,7 @@ async def watch_from_args(
                 }
                 for b in result.latest_reads
             ],
-            "host_records_dropped": result.dropped,
+            "capture_records_dropped": result.dropped,
             "thermostats": len(result.thermostats),
         },
     )

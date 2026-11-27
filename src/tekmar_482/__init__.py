@@ -284,6 +284,8 @@ from .native_watch import (
 from .native_water import WaterMonitor, WaterRead, WaterSource, read_water
 from .native_write import NativeWriteResult, NativeWriteStatus
 from .normal_trace import (
+    GatewayTraceGap,
+    NormalPeerCapture,
     NormalTrace,
     NormalTraceState,
     RxFlag,
@@ -485,6 +487,7 @@ __all__ = [
     "GatewayInfo",
     "GatewayRuntime",
     "GatewaySnapshot",
+    "GatewayTraceGap",
     "GeneralDemand",
     "GroupReport",
     "HeatPumpOutput",
@@ -548,6 +551,7 @@ __all__ = [
     "NativeWriteStatus",
     "NetworkFault",
     "NetworkLock",
+    "NormalPeerCapture",
     "NormalTrace",
     "NormalTraceState",
     "NullTransport",

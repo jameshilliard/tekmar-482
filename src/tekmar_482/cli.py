@@ -79,6 +79,7 @@ from .native_state import NativeState
 from .native_target_edit import ThermostatTargetChange
 from .native_water import read_water
 from .native_write import NativeWriteStatus
+from .normal_trace import GatewayTraceGap, NormalPeerCapture
 from .raw import CaptureGap, InvalidCapture, PortError, TxStatus
 from .trpc import (
     ResponseMatch,
@@ -116,6 +117,7 @@ class CliError(Exception):
 
 ClientFactory = Callable[[argparse.Namespace], Tekmar482Client]
 _MAX_TCP_PORT = 65535
+_WATCH_COMMANDS = frozenset({"watch-native", "watch-climate"})
 _ADDRESSED_READS = frozenset(
     {"read-block", "read-device", "read-schedule", "read-sensors"},
 )
@@ -303,6 +305,12 @@ def build_parser() -> argparse.ArgumentParser:
         _add_native_target,
     )
     add_status_commands(subparsers, _common_parent(default_timeout=20), _int_value)
+    for name in {"monitor", "discover", "dump", *_WATCH_COMMANDS}:
+        subparsers.choices[name].add_argument(
+            "--raw",
+            action="store_true",
+            help="use Raw rather than Normal for passive capture",
+        )
     for name in _ADDRESSED_READS:
         subparsers.choices[name].add_argument(
             "--raw",
@@ -648,7 +656,8 @@ async def run(
         or hasattr(args, "line_status")
         or hasattr(args, "block_attempts")
         or any(
-            getattr(args, key, None) for key in ("passive", "probe_subnet", "ack_port")
+            getattr(args, key, None)
+            for key in ("passive", "probe_subnet", "ack_port", "raw")
         )
     ):
         msg = "native discovery options are unavailable with --vendor"
@@ -697,6 +706,9 @@ def _endpoint(args: argparse.Namespace) -> GatewayEndpoint:
 
 
 def _validate_native_args(args: argparse.Namespace) -> None:
+    if _passive_normal(args) and getattr(args, "ack_port", False):
+        msg = "link ACKs require an explicit --raw capture"
+        raise CliError(msg)
     if (
         (
             args.command in _BLOCK_EDITS
@@ -810,6 +822,14 @@ async def _native_status(
     args: argparse.Namespace,
     emit: Callable[[object], None],
 ) -> int:
+    if args.command in _WATCH_COMMANDS and _passive_normal(args):
+        async with (
+            bridge.normal(select_mode=False) as client,
+            BridgeManagement(client).peer_capture() as peers,
+        ):
+            if args.command == "watch-native":
+                return await watch_all_from_args(peers, args, emit)
+            return await watch_from_args(peers, args, emit)
     if args.command == "read-status" and not args.raw:
         async with bridge.normal(select_mode=False) as client:
             answer = await read_status_from_args(BridgeManagement(client), args)
@@ -1131,6 +1151,29 @@ def _write_fields(result: NativeWriteResult) -> dict[str, object]:
     }
 
 
+def _passive_normal(args: argparse.Namespace) -> bool:
+    return (
+        args.command == "monitor"
+        or (args.command in {"discover", "dump", *_WATCH_COMMANDS} and args.passive)
+    ) and not args.raw
+
+
+@asynccontextmanager
+async def _capture_session(
+    bridge: BridgeClient,
+    args: argparse.Namespace,
+) -> AsyncIterator[NormalPeerCapture | BridgeStream]:
+    if _passive_normal(args):
+        async with (
+            bridge.normal(select_mode=False) as client,
+            BridgeManagement(client).peer_capture() as peers,
+        ):
+            yield peers
+    else:
+        async with bridge.stream(ack_ports=getattr(args, "ack_port", ())) as raw:
+            yield raw
+
+
 async def _native_capture(
     bridge: BridgeClient,
     args: argparse.Namespace,
@@ -1157,7 +1200,7 @@ async def _native_capture(
         if args.command == "dump":
             observed.observe(frame)
         if isinstance(frame, CaptureGap):
-            emit({"host_records_dropped": frame.dropped})
+            emit(_capture_gap_fields(frame))
         elif isinstance(frame, PortError):
             emit({"port": frame.port, "port_error": frame.reason})
         elif isinstance(frame, InvalidCapture):
@@ -1179,7 +1222,7 @@ async def _native_capture(
                 emit(_frame_fields(frame))
 
     summary = None
-    async with bridge.stream(ack_ports=getattr(args, "ack_port", ())) as stream:
+    async with _capture_session(bridge, args) as stream:
         if args.command in {"discover", "dump"}:
             summary = await discover_native(
                 stream,
@@ -1216,6 +1259,7 @@ async def _native_capture(
                     for p in summary.probes
                 ],
                 "host_records_dropped": summary.host_records_dropped,
+                "gateway_trace_records_dropped": summary.gateway_trace_records_dropped,
             },
         )
     if args.command in {"diagnostics", "dump"}:
@@ -1238,13 +1282,27 @@ async def _native_capture(
         _emit_capture_summary(scan, observed, emit)
 
 
+def _capture_gap_fields(gap: CaptureGap) -> dict[str, object]:
+    if isinstance(gap, GatewayTraceGap):
+        return {"gateway_trace_records_dropped": gap.dropped, "ports": gap.ports}
+    return {"host_records_dropped": gap.dropped}
+
+
 def _emit_capture_summary(
-    stream: BridgeStream,
+    stream: BridgeStream | NormalPeerCapture,
     observed: NativeState,
     emit: Callable[[object], None],
 ) -> None:
-    for diagnostic in stream.diagnostics.values():
-        emit(asdict(diagnostic))
+    if isinstance(stream, NormalPeerCapture):
+        emit(
+            {
+                "trace_host_drops": stream.host_drops,
+                "trace_gateway_drops_by_port": stream.gateway_drops,
+            },
+        )
+    else:
+        for diagnostic in stream.diagnostics.values():
+            emit(asdict(diagnostic))
     if sources := observed.water_sources:
         emit({"water_sources": [water_fields(s) for s in sources]})
     if reports := observed.fault_reports:
