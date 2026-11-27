@@ -6,6 +6,10 @@ from tekmar_482 import FrameCounts, NativePath, ProtocolError, TrafficCounters
 
 
 class TrafficTests(unittest.IsolatedAsyncioTestCase):
+    def test_combined_attempts_saturate_at_the_counter_width(self) -> None:
+        maximum = 2**64 - 1
+        self.assertEqual(FrameCounts(0, maximum, 1, 2).tx_attempts, maximum)
+
     async def test_port_and_stable_device_directory_preserve_u64(self) -> None:
         high = 2**64 - 1
         path = NativePath(4, 0x42, 7)

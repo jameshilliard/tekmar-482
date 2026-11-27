@@ -19,6 +19,7 @@ _PORT = Struct("<B7Q")
 _PATH = Struct("<4B4Q")
 _ENTRY = Struct("<H3B4Q")
 _MAX_NATIVE_NODE = 31
+_MAX_COUNTER = (1 << 64) - 1
 
 
 @dataclass(frozen=True, slots=True)
@@ -31,7 +32,7 @@ class FrameCounts:
     @property
     def tx_attempts(self) -> int:
         """All recorded attempts, not just acknowledged completions."""
-        return self.tx_ack + self.tx_no_ack + self.tx_failed
+        return min(_MAX_COUNTER, self.tx_ack + self.tx_no_ack + self.tx_failed)
 
 
 @dataclass(frozen=True, slots=True)
