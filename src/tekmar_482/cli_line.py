@@ -1,4 +1,4 @@
-"""Preview and send explicit native line announcements."""
+"""Preview and send explicit native line operations."""
 
 from __future__ import annotations
 
@@ -8,9 +8,11 @@ from typing import TYPE_CHECKING
 
 from ._native_payloads.line import GROUP_IDS, ZoneSyncAdjustment, ZoneTargetMode
 from ._native_payloads.scenes import NativeScene
+from ._native_payloads.water import StageCommand, StageSelection
 from .constants import TN4_PORTS
-from .native import NativeAddress
+from .native import NativeAddress, NativeMessage
 from .native_line import BroadcastIssue, DeviceGroupBinding, LineBroadcast
+from .raw import NativePortBusyError, TxStatus
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -25,6 +27,7 @@ LINE_COMMANDS = {
     "set-group": "enable or disable a setpoint group",
     "set-zone-sync": "announce zone synchronization, purging and target mode",
 }
+_STAGE_COMMANDS = {c.name.lower().replace("_", "-"): c for c in StageCommand}
 
 
 def _wall_time(value: str) -> datetime:
@@ -100,6 +103,86 @@ def add_line_commands(
                 choices=[v.name.lower().replace("_", "-") for v in ZoneTargetMode],
                 required=True,
             )
+
+    stage = subparsers.add_parser(
+        "stage-command",
+        parents=[parent],
+        help="preview or attempt a native staged demand, purge or override",
+    )
+    stage.add_argument("operation", choices=_STAGE_COMMANDS)
+    stage.add_argument("port", type=int, choices=TN4_PORTS)
+    stage.add_argument("subnet", type=number)
+    stage.add_argument(
+        "--nodes",
+        type=int,
+        choices=range(1, 25),
+        nargs="+",
+        required=True,
+        metavar="NODE",
+        help="one or more native nodes, 1..24",
+    )
+    stage.add_argument("--stage", type=int, choices=(0, 1), required=True)
+    stage.add_argument("--output-level", type=number, required=True, help="raw 0..127")
+    stage.add_argument(
+        "--confirm",
+        action="store_true",
+        help="attempt one send; default is offline preview",
+    )
+
+
+def stage_from_args(args: argparse.Namespace) -> tuple[StageCommand, StageSelection]:
+    selection = StageSelection.from_nodes(
+        args.subnet,
+        args.nodes,
+        stage=args.stage,
+        output_level=args.output_level,
+    )
+    return _STAGE_COMMANDS[args.operation], selection
+
+
+def stage_preview(
+    port: int,
+    command: StageCommand,
+    selection: StageSelection,
+) -> dict[str, object]:
+    message = NativeMessage.stage_command(
+        command,
+        selection,
+        source=NativeAddress(0, 0),
+        priority=0,
+    )
+    return {
+        "port": port,
+        "message_id": command.value,
+        "target_subnet": selection.subnet,
+        "target_nodes": selection.nodes,
+        "stage": selection.stage,
+        "output_level": selection.output_level,
+        "body": message.to_bytes().hex(),
+    }
+
+
+async def send_stage(
+    manager: BridgeManagement,
+    port: int,
+    command: StageCommand,
+    selection: StageSelection,
+    timeout: float,
+    emit: Callable[[object], None],
+) -> int:
+    try:
+        tx = await manager.send_stage_command(port, command, selection, timeout=timeout)
+    except NativePortBusyError:
+        issue = BroadcastIssue.PORT_BUSY
+    except TimeoutError:
+        issue = BroadcastIssue.DEADLINE
+    else:
+        if tx is not None:
+            emit({"port": port, "tx_status": tx.status.name, "tx_reason": tx.reason})
+            return int(tx.status is not TxStatus.ACK)
+        issue = BroadcastIssue.EXPIRED_NOT_SENT
+    emit({"port": port, "tx_status": issue.value, "tx_reason": None})
+    return 1
 
 
 def prepare_broadcast(

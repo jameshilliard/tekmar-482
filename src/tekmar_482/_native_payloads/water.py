@@ -1,6 +1,6 @@
 """Hydronic status and loop assignments from the 483 SW 11 native layouts."""
 
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from enum import Enum, IntEnum
 
@@ -47,6 +47,20 @@ class StageSelection:
                                    ("output_level", self.output_level, 7), ("nodes_mask", self.nodes_mask, 24)):
             if not isinstance(value, int) or not 0 <= value < 1 << width:
                 raise ValueError(f"{name} must be a {width}-bit unsigned integer")
+
+    @classmethod
+    def from_nodes(
+        cls, subnet: int, nodes: Iterable[int], *, stage: int, output_level: int
+    ) -> "StageSelection":
+        """Select at least one native node by its one-based number."""
+        mask = 0
+        for node in nodes:
+            if not isinstance(node, int) or not 1 <= node <= 24:
+                raise ValueError("stage commands select native nodes 1..24")
+            mask |= 1 << (node - 1)
+        if not mask:
+            raise ValueError("stage commands require at least one native node")
+        return cls(subnet, stage, output_level, mask)
 
     @classmethod
     def read(cls, r: Reader) -> "StageSelection":

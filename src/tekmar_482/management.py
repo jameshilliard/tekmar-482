@@ -25,6 +25,7 @@ from ._native_payloads.line import (
     ZONE_ADJUSTMENT,
 )
 from ._native_payloads.scenes import SCENE_REPORT
+from ._native_payloads.water import StageCommand
 from ._native_payloads.writes import BlockPatch
 from ._normal_block import (
     BlockCollector,
@@ -38,7 +39,7 @@ from ._normal_status import status_key, status_read_terminal, status_result
 from .constants import DEFAULT_BLOCK_TIMEOUT, TN4_PORTS
 from .error_reports import ALL_SOURCES, ErrorReports, GatewayErrorCounter, source_mask
 from .exceptions import ConnectionClosedError, ProtocolError, TekmarError
-from .native import NativeAddress, NativeTargets
+from .native import NativeAddress, NativeTargets, require_enum
 from .native_schedule import edit_schedule_time
 from .native_schedule_setup import edit_schedule_setup
 from .native_setpoint import edit_setpoint_target
@@ -66,6 +67,7 @@ if TYPE_CHECKING:
     from ._native_payloads.queries import NativeStatusQuery
     from ._native_payloads.schedules import ScheduleBinding
     from ._native_payloads.snowmelt import SnowmeltApplication
+    from ._native_payloads.water import StageSelection
     from ._native_payloads.writes import NativeField
     from .client import Tekmar482Client
     from .native import NativeBlockQuery, NativeFrame, NativeMessage
@@ -121,6 +123,7 @@ class BridgeFeature(IntFlag):
     NORMAL_DISCOVER = 4096
     ORDERED_NATIVE_RESULTS = 8192
     LINK_TIMING = 16384
+    NORMAL_STAGE_COMMAND = 32768
 
 
 class BridgeMethod(IntEnum):
@@ -144,6 +147,7 @@ class BridgeMethod(IntEnum):
     NORMAL_ANNOUNCE = 0x544BF012
     NORMAL_DISCOVER = 0x544BF013
     LINK_TIMING = LINK_TIMING_METHOD
+    NORMAL_STAGE_COMMAND = 0x544BF015
 
 
 _PORT_OPERATIONS = frozenset(
@@ -153,6 +157,7 @@ _PORT_OPERATIONS = frozenset(
         BridgeMethod.NORMAL_BLOCK_EDIT,
         BridgeMethod.NORMAL_ANNOUNCE,
         BridgeMethod.NORMAL_DISCOVER,
+        BridgeMethod.NORMAL_STAGE_COMMAND,
     },
 )
 
@@ -180,7 +185,11 @@ def _port_terminal(port: int, packet: TrpcPacket) -> bool:
             return status_read_terminal(body)
         case BridgeMethod.NORMAL_BLOCK_EDIT:
             return block_edit_terminal(body)
-        case BridgeMethod.NORMAL_ANNOUNCE | BridgeMethod.NORMAL_DISCOVER:
+        case (
+            BridgeMethod.NORMAL_ANNOUNCE
+            | BridgeMethod.NORMAL_DISCOVER
+            | BridgeMethod.NORMAL_STAGE_COMMAND
+        ):
             return len(body) == _LINK_RESULT_BYTES
     return False
 
@@ -828,6 +837,32 @@ class BridgeManagement(_Management):
         """Send one known announcement in Normal mode. None means it expired unsent."""
         self._check_edit_idle(port)
         return await self._announce(port, message, timeout)
+
+    async def send_stage_command(
+        self,
+        port: int,
+        command: StageCommand,
+        selection: StageSelection,
+        *,
+        timeout: float = 15,
+    ) -> TxResult | None:
+        """Attempt one stage command. None is expiry without starting the send."""
+        require_enum(command, StageCommand)
+        if port not in TN4_PORTS or not selection.nodes_mask:
+            msg = (
+                "a stage command requires a physical port and at least one target node"
+            )
+            raise ValueError(msg)
+        self._check_edit_idle(port)
+        key = bytes((port,)) + command.to_bytes(2, "little") + selection.payload
+        async with self._normal_events(
+            BridgeMethod.NORMAL_STAGE_COMMAND,
+            BridgeFeature.NORMAL_STAGE_COMMAND,
+            key,
+            timeout,
+            service=TrpcService.UPDATE,
+        ) as receive:
+            return self._link_result(port, await receive())
 
     async def discover_subnet(
         self,

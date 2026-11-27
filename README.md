@@ -65,10 +65,9 @@ An empty tuple means the bitmap selected no nodes; `None` means the message
 doesn't establish a native destination. Group IDs, I/O payload endpoints
 and RH selectors are not assumed to be native node addresses.
 For a stage command, `message.stage_selection` exposes its subnet, selected
-nodes, stage bit and raw output level. To construct (not send) one, use
-`NativeMessage.stage_command(StageCommand.START_PURGE, selection, source=..., priority=...)`
-with a `StageSelection`. The wire node mask has 24 bits, not 31. Neither an
-observed command nor a link ACK is a report of the actual output state.
+nodes, stage bit and raw output level. See [stage commands](#stage-commands)
+for sending them without leaving Normal mode. Neither an observed command
+nor a link ACK is a report of the actual output state.
 
 Discovery reports receive paths, **not a count of physical devices**:
 a plant controller can forward the same identity onto multiple lines.
@@ -625,6 +624,37 @@ setup fields (`02`, `24`, `25`) where the device supplies them. On a 402,
 [402 monitor menu](https://www.watts.com/dfsmedia/0533dbba17714b1ab581ab07a4cbb521/81499-source/638820695310000000/402-d-07.pdf#page=19),
 not a measured energy reading. `energy_savings_hours` is time spent in the
 savings state. Missing or partial words are not substituted with zero.
+
+### Stage commands
+
+Preview a staged heat demand request, start or end purge, or start or end
+an on/off override. Choose one physical port, the native target subnet,
+nodes 1 through 24, a stage bit and a raw output level (0 through 127,
+not a percentage):
+
+```bash
+tekmar-482 stage-command start-purge 3 0xab --nodes 1 16 24 --stage 1 --output-level 117 --json
+```
+
+This preview does not connect. Add `--confirm` and a transport for an
+intentional send. The gateway stays in Normal mode and reports the link
+outcome of one attempt. A busy port rejects the operation, and a host
+timeout leaves delivery unknown. Neither causes a retry. These commands
+can change equipment outputs; use them only with a verified target and
+observe actual plant telemetry separately. A link ACK does not confirm
+that any selected device acted.
+
+```python
+from tekmar_482 import StageCommand, StageSelection
+
+selection = StageSelection.from_nodes(0xAB, (1, 16, 24), stage=1, output_level=117)
+tx = await manager.send_stage_command(3, StageCommand.START_PURGE, selection)
+```
+
+`None` means the gateway expired the command before transmission. For
+an explicitly Raw session, build the same payload with
+`NativeMessage.stage_command(command, selection, source=source, priority=0)`
+and pass it to `stream.send`.
 
 ### Weekly schedules
 

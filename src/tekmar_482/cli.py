@@ -29,6 +29,9 @@ from .cli_line import (
     device_group,
     prepare_broadcast,
     send_broadcast,
+    send_stage,
+    stage_from_args,
+    stage_preview,
 )
 from .cli_native_watch import (
     calendar_fields,
@@ -798,8 +801,8 @@ async def _native(args: argparse.Namespace, stdout: TextIO) -> int:
         if args.command in {"watch-climate", "watch-native", "trace-normal", "errors"}:
             stdout.flush()
 
-    if args.command in LINE_COMMANDS:
-        return await _broadcast(args, emit)
+    if handler := _NATIVE_SENDS.get(args.command):
+        return await handler(args, emit)
     _validate_native_args(args)
     endpoint = _endpoint(args)
     if args.command in {"install", "update"}:
@@ -971,6 +974,37 @@ async def _broadcast(
                 )
         async with bridge.stream(diagnostics=False) as stream:
             return await send_broadcast(stream, announcement, args.timeout, emit)
+
+
+async def _stage_command(
+    args: argparse.Namespace,
+    emit: Callable[[object], None],
+) -> int:
+    command, selection = stage_from_args(args)
+    if not isfinite(args.timeout) or args.timeout <= 0:
+        msg = "stage send timeout must be finite and positive"
+        raise CliError(msg)
+    if not args.confirm:
+        emit({"preview": stage_preview(args.port, command, selection)})
+        return 0
+    async with open_gateway(_endpoint(args), auto_update=args.auto_update) as bridge:
+        if not isinstance(bridge, BridgeClient):
+            msg = "expected native firmware"
+            raise CliError(msg)
+        async with bridge.normal(select_mode=False) as client:
+            return await send_stage(
+                BridgeManagement(client),
+                args.port,
+                command,
+                selection,
+                args.timeout,
+                emit,
+            )
+
+
+_NATIVE_SENDS = dict.fromkeys(LINE_COMMANDS, _broadcast) | {
+    "stage-command": _stage_command,
+}
 
 
 def _native_edits(items: Sequence[str]) -> dict[NativeField, int]:

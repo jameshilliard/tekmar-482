@@ -45,11 +45,16 @@ from tekmar_482 import (
     SnowmeltKey,
     SnowmeltOperatingState,
     SnowmeltOperation,
+    StageCommand,
+    StageSelection,
     StatusRequest,
     TargetSlot,
     ThermostatMode,
     ThermostatTarget,
     ThermostatTargetChange,
+    TraceOrigin,
+    TracePacket,
+    TraceTx,
     TxStatus,
     WaterDetection,
     read_weekly_schedule,
@@ -179,6 +184,37 @@ _SETPOINT = NativeAddress(0x31, 7)
 
 @unittest.skipUnless(_IMAGE, "set TEKMAR_TEST_FLASH_IMAGE to run the ARM interop suite")
 class FirmwareInteropTests(unittest.IsolatedAsyncioTestCase):
+    async def test_stage_commands_keep_exact_targets_and_normal_tx_evidence(
+        self,
+    ) -> None:
+        script = (
+            (1, "39f00005 abf5018080", ()),
+            (4, "3af00005 2300000080", ()),
+        )
+        purge = StageSelection.from_nodes(0xAB, (1, 16, 24), stage=1, output_level=117)
+        override = StageSelection.from_nodes(0x23, (24,), stage=0, output_level=0)
+        async with _gateway(script) as manager, manager.trace((1, 4)) as trace:
+            first, second = await asyncio.gather(
+                manager.send_stage_command(1, StageCommand.START_PURGE, purge),
+                manager.send_stage_command(4, StageCommand.END_OVERRIDE_OFF, override),
+            )
+            assert first is not None and second is not None
+            assert (first.port, first.status) == (1, TxStatus.ACK)
+            assert (second.port, second.status) == (4, TxStatus.ACK)
+            attempts = sorted(
+                (tx.frame.port, tx.frame.body)
+                for record in trace.drain()
+                if isinstance(record, TracePacket)
+                and isinstance(tx := record.decoded, TraceTx)
+                and tx.origin is TraceOrigin.STAGE_COMMAND
+            )
+            assert attempts == [(p, bytes.fromhex(body)) for p, body, _ in script]
+            target = await manager.traffic.device(NativePath(4, 0x23, 24))
+            assert target is not None and target.counts.tx_ack == 1
+            for node in (1, 16, 24):
+                assert await manager.traffic.device(NativePath(1, 0xAB, node)) is None
+        assert trace.gateway_drops == (0,) * 5 and not trace.host_drops
+
     async def test_link_timing_reads_from_the_production_image(self) -> None:
         async with _gateway(()) as manager:
             caps = await manager.capabilities()
