@@ -43,6 +43,18 @@ class _EditEnd(IntEnum):
     UPDATE_UNAVAILABLE = 4
 
 
+def block_read_terminal(body: bytes) -> bool:
+    if len(body) < _BLOCK_HEADER or body[1] not in _Status:
+        return False
+    if body[1] == _Status.REPORT:
+        return len(body) > _BLOCK_HEADER + _STAMP.size
+    return len(body) == _BLOCK_HEADER and body[1] != _Status.MORE
+
+
+def block_edit_terminal(body: bytes) -> bool:
+    return len(body) == _EDIT_RESULT.size and body[1] in _EditEnd
+
+
 def tx_outcome(port: int, code: int) -> TxResult | None:
     if code == _NOT_SENT:
         return None
@@ -178,7 +190,7 @@ def edit_key(
 
 
 def edit_result(port: int, body: bytes) -> BlockDelivery:
-    if len(body) != _EDIT_RESULT.size or body[0] != port or body[1] not in _EditEnd:
+    if not block_edit_terminal(body) or body[0] != port:
         msg = "invalid Normal block edit result"
         raise ProtocolError(msg)
     _, code, baseline, attempt = _EDIT_RESULT.unpack(body)

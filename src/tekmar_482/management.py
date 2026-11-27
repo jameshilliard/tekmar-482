@@ -19,8 +19,15 @@ from ._native_payloads.line import (
 )
 from ._native_payloads.scenes import SCENE_REPORT
 from ._native_payloads.writes import BlockPatch
-from ._normal_block import BlockCollector, edit_key, edit_result, tx_outcome
-from ._normal_status import status_key, status_result
+from ._normal_block import (
+    BlockCollector,
+    block_edit_terminal,
+    block_read_terminal,
+    edit_key,
+    edit_result,
+    tx_outcome,
+)
+from ._normal_status import status_key, status_read_terminal, status_result
 from .constants import DEFAULT_BLOCK_TIMEOUT, TN4_PORTS
 from .error_reports import ALL_SOURCES, ErrorReports, GatewayErrorCounter, source_mask
 from .exceptions import ConnectionClosedError, ProtocolError, TekmarError
@@ -61,6 +68,7 @@ if TYPE_CHECKING:
 
 _CAPABILITY_BYTES = 4
 _LINK_RESULT_BYTES = 2  # physical port and link outcome
+_BUSY = b"\x01"
 _GATEWAY_SOURCE = NativeAddress(0, 0)
 
 
@@ -119,6 +127,57 @@ class BridgeMethod(IntEnum):
     NORMAL_BLOCK_EDIT = 0x544BF011
     NORMAL_ANNOUNCE = 0x544BF012
     NORMAL_DISCOVER = 0x544BF013
+
+
+_PORT_OPERATIONS = frozenset(
+    {
+        BridgeMethod.NORMAL_BLOCK_READ,
+        BridgeMethod.NORMAL_STATUS_READ,
+        BridgeMethod.NORMAL_BLOCK_EDIT,
+        BridgeMethod.NORMAL_ANNOUNCE,
+        BridgeMethod.NORMAL_DISCOVER,
+    },
+)
+
+
+def _port_events(port: int, packet: TrpcPacket) -> bool:
+    if packet.method_id == BridgeMethod.ERROR:
+        return packet.extra[4:] == _BUSY
+    if packet.service in (TrpcService.RESPONSE_REQUEST, TrpcService.RESPONSE_UPDATE):
+        return (
+            packet.method_id in _PORT_OPERATIONS
+            and bool(packet.extra)
+            and packet.extra[0] == port
+        )
+    return _port_terminal(port, packet)
+
+
+def _port_terminal(port: int, packet: TrpcPacket) -> bool:
+    body = packet.extra
+    if packet.service is not TrpcService.REPORT or not body or body[0] != port:
+        return False
+    match packet.method_id:
+        case BridgeMethod.NORMAL_BLOCK_READ:
+            return block_read_terminal(body)
+        case BridgeMethod.NORMAL_STATUS_READ:
+            return status_read_terminal(body)
+        case BridgeMethod.NORMAL_BLOCK_EDIT:
+            return block_edit_terminal(body)
+        case BridgeMethod.NORMAL_ANNOUNCE | BridgeMethod.NORMAL_DISCOVER:
+            return len(body) == _LINK_RESULT_BYTES
+    return False
+
+
+class _OccupiedPortError(NativePortBusyError):
+    def __init__(self, rejection: TrpcPacket) -> None:
+        super().__init__("gateway is busy; native operation was not accepted")
+        self.reply = rejection
+
+
+class _NativeResultTimeoutError(TimeoutError):
+    def __init__(self, admission: TrpcPacket) -> None:
+        super().__init__("timed out waiting for the admitted Normal operation result")
+        self.reply = admission
 
 
 @dataclass(frozen=True, slots=True)
@@ -187,16 +246,10 @@ class _Management:
             raise TimeoutError(msg)
         if packet.method_id == BridgeMethod.ERROR:
             reason = packet.extra[4:]
-            if reason == b"\x01":
+            if reason == _BUSY:
+                if command.method in _PORT_OPERATIONS:
+                    raise _OccupiedPortError(packet)
                 msg = "gateway is busy; management operation was not accepted"
-                if command.method in (
-                    BridgeMethod.NORMAL_BLOCK_READ,
-                    BridgeMethod.NORMAL_STATUS_READ,
-                    BridgeMethod.NORMAL_BLOCK_EDIT,
-                    BridgeMethod.NORMAL_ANNOUNCE,
-                    BridgeMethod.NORMAL_DISCOVER,
-                ):
-                    raise NativePortBusyError(msg)
             elif reason == b"\x02":
                 msg = "gateway rejected the management service or payload"
             elif reason == b"\x03":
@@ -561,6 +614,33 @@ class BridgeManagement(_Management):
         )
         return await self.read_status(port, query, peer=peer, timeout=timeout)
 
+    @asynccontextmanager
+    async def _hold_port_until_terminal(self, port: int) -> AsyncIterator[None]:
+        # Arm before sending. A terminal can arrive in the same UART burst as
+        # admission or rejection. Older completions do not release this waiter.
+        with self._session.connection_scope():
+            async with self._session.reports(
+                include_matched=_PORT_OPERATIONS | {BridgeMethod.ERROR},
+                predicate=lambda packet: _port_events(port, packet),
+            ) as events:
+                try:
+                    yield
+                except (_OccupiedPortError, _NativeResultTimeoutError) as err:
+                    method = err.reply.method_id
+                    boundary = False
+                    async for packet in events:
+                        if (
+                            boundary
+                            and method in {BridgeMethod.ERROR, packet.method_id}
+                            and _port_terminal(port, packet)
+                        ):
+                            break
+                        boundary |= packet is err.reply
+                    else:
+                        msg = f"connection closed while waiting for port {port}"
+                        raise ConnectionClosedError(msg) from None
+                    raise
+
     async def send_announcement(
         self,
         port: int,
@@ -674,7 +754,10 @@ class BridgeManagement(_Management):
         with session.connection_scope():
             async with session.reports(
                 include_matched=frozenset({command.method_id}),
-                only_method=command.method_id,
+                predicate=lambda packet: (
+                    packet.method_id == command.method_id
+                    and packet.extra[:1] == key[:1]
+                ),
             ) as events:
                 # Fence abandoned admission replies without waiting on other ports.
                 async with session.normal_operation_admission:
@@ -703,11 +786,17 @@ class BridgeManagement(_Management):
                     msg = "connection closed before the Normal operation result"
                     raise ConnectionClosedError(msg)
 
-                async with asyncio.timeout(timeout) as deadline:
-                    async for packet in events:
-                        if packet is ack:
-                            yield receive
-                            return
+                deadline = asyncio.timeout(timeout)
+                try:
+                    async with deadline:
+                        async for packet in events:
+                            if packet is ack:
+                                yield receive
+                                return
+                except TimeoutError as err:
+                    if deadline.expired():
+                        raise _NativeResultTimeoutError(ack) from err
+                    raise
         msg = "connection closed before Normal operation admission"
         raise ConnectionClosedError(msg)
 

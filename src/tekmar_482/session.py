@@ -189,7 +189,7 @@ class Tekmar482Session:
         self._packet_backlog: list[Packet] = []
         self._report_queues: dict[
             asyncio.Queue[_ReportItem],
-            tuple[frozenset[int], int | None],
+            tuple[frozenset[int], MessagePredicate | None],
         ] = {}
         self._observers: set[Callable[[TrpcPacket, TrpcCommand | None], None]] = set()
         self._packet_observers: set[Callable[[Packet], None]] = set()
@@ -713,9 +713,9 @@ class Tekmar482Session:
         max_queue_size: int = 0,
         replay_backlog: bool = False,
         include_matched: frozenset[int] = frozenset(),
-        only_method: int | None = None,
+        predicate: MessagePredicate | None = None,
     ) -> ReportSubscription:
-        """Subscribe to public messages and selected methods' matched replies."""
+        """Subscribe in wire order. The optional message predicate must not block."""
         queue: asyncio.Queue[_ReportItem] = asyncio.Queue(
             maxsize=max_queue_size,
         )
@@ -725,9 +725,9 @@ class Tekmar482Session:
 
         if replay_backlog:
             for message in self._message_backlog:
-                if only_method is None or message.method_id == only_method:
+                if predicate is None or predicate(message):
                     self._put_report_item(queue, (message, None))
-        self._report_queues[queue] = (include_matched, only_method)
+        self._report_queues[queue] = (include_matched, predicate)
         return ReportSubscription(queue, lambda: self._unsubscribe_reports(queue))
 
     @contextmanager
@@ -1259,9 +1259,16 @@ class Tekmar482Session:
         del self._packet_backlog[: -self.max_packet_backlog]
 
     def _publish_report(self, event: ReportEvent, *, public: bool) -> None:
-        method = event[0].method_id
-        for queue, (included, only) in self._report_queues.items():
-            if (only is None or method == only) and (public or method in included):
+        message, _ = event
+        for queue, (included, predicate) in tuple(self._report_queues.items()):
+            if not public and message.method_id not in included:
+                continue
+            try:
+                selected = predicate is None or predicate(message)
+            except Exception:
+                LOGGER.exception("tekmar 482 report predicate failed")
+                continue
+            if selected and queue in self._report_queues:
                 self._put_report_item(queue, event)
 
     def _put_report_item(

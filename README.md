@@ -822,6 +822,10 @@ Pass explicit `paths` instead of `ports` to watch a fixed set of addresses.
 An automatic watch follows TakingAddress on the same wire without moving
 old measurements to the new address. A trace gap retires only affected
 routes; fresh reports can discover replacements.
+If a Normal read is refused as busy, only that port waits for the previous
+operation's terminal report before reconsidering the queued read. A read
+that was already admitted is not replayed after a host response deadline.
+Other ports continue receiving and reading throughout.
 Set `stale_after=seconds` (CLI `--stale-after`) to discard a path after
 that much silence on the connection. Unchanged frames renew the interval;
 expiry neither sends a probe nor claims the device has been removed.

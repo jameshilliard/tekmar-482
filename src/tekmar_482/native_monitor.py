@@ -14,7 +14,6 @@ from .management import BridgeManagement
 from .native import NativeAddress
 from .native_state import NativeState
 from .native_watch import watch_native
-from .raw import NativePortBusyError
 
 if TYPE_CHECKING:
     from collections.abc import Iterable
@@ -90,7 +89,7 @@ class NativeMonitor:
             while True:
                 try:
                     await self._watch_connection()
-                except (ConnectionClosedError, OSError, NativePortBusyError) as err:
+                except (ConnectionClosedError, OSError) as err:
                     self._last_error = err
                 except Exception as err:
                     self._last_error = err

@@ -68,6 +68,39 @@ async def block_reply(wire: Wire, key: str, reply: NativeFrame) -> None:
 
 
 class NormalWaterTests(unittest.IsolatedAsyncioTestCase):
+    async def test_busy_port_expires_without_discarding_other_ports(self) -> None:
+        wire = Wire()
+        healthy = NativePath(2, TEST_PATH.subnet, 0)
+
+        async def gateway() -> None:
+            await start(wire, "0c")
+            await wire.expect(_CAP)
+            wire.feed(_FEATURES)
+            for port in (2, 3):
+                await wire.expect(_CAP)
+                wire.feed(_FEATURES)
+                request = f"{port:02x}000000f703"
+                await wire.expect("0110f04b54" + request)
+                if port == healthy.port:
+                    wire.feed("0410f04b54" + request)
+                else:
+                    wire.feed("0406f04b54 10f04b54 01")
+            claim = frame(0x3FF, _WATER, healthy)
+            wire.queue_packet(peer(claim))
+            wire.feed("0210f04b54 020001000000" + claim.body.hex())
+            wire.feed("0210f04b54 020100")
+            # The old operation on port 3 never completes within this scan.
+            await restore(wire)
+
+        async with Tekmar482Client(wire) as client, asyncio.TaskGroup() as tasks:
+            tasks.create_task(gateway())
+            async with BridgeManagement(client).native_session([2, 3]) as link:
+                result = await read_water(link, [2, 3], duration=0.15)
+            assert not client.session.report_subscription_count
+        assert result.unfinished_ports == (3,)
+        assert [batch.port for batch in result.master_queries] == [2]
+        assert [(s.port, s.address) for s in result.sources] == [(2, healthy.address)]
+
     async def test_identifies_plant_and_reads_pump_setup_before_window_ends(
         self,
     ) -> None:

@@ -14,7 +14,12 @@ from ._native_payloads.io import IoEndpoint
 from ._native_payloads.layouts import MULTI_WEEK
 from ._native_payloads.queries import NativeStatusQuery
 from ._native_payloads.schedules import SCHEDULE_STATUS, SETUP_BLOCK
-from ._observation import OrderedNormalReads, observation
+from ._observation import (
+    DeferredReadError,
+    ExpiredReadError,
+    OrderedNormalReads,
+    observation,
+)
 from ._snow_watch import SnowRead, SnowWatch
 from .constants import TN4_PORTS
 from .native import NativeAddress, NativeFrame
@@ -463,81 +468,98 @@ class _Watch:
         while True:
             path, block = await queue.take()
             epoch = self.epochs.get(path, 0)
-            if isinstance(block, tuple):
-                if self.configuration is None:
-                    continue
-                observation = await self.configuration.read(
+            try:
+                await self._probe_one(
                     stream,
+                    reader,
                     path,
                     block,
-                    source=source,
-                    timeout=timeout,
-                )
-                if observation is None:
-                    continue
-                result = observation.tx_result
-            elif isinstance(block, IoEndpoint):
-                before = self.state.io_directory(path, block)
-                if before is None:
-                    self.io_pending.discard((path, block))
-                    continue
-                result = await self._read_io(
-                    stream,
-                    path,
-                    before,
                     epoch,
                     source,
                     timeout,
                 )
-            elif isinstance(block, SnowRead):
-                if self.snow is None or (query := self.snow.query(path, block)) is None:
-                    continue
-                route = self.snow.routes.get(path)
-                self.reading_status.add(path)
-                try:
-                    answer = await stream.read_status(
-                        path.port,
-                        query,
-                        source=source,
-                        peer=path.address,
-                        timeout=timeout,
-                        wait_for_edits=True,
-                    )
-                finally:
-                    self.reading_status.discard(path)
-                if epoch == self.epochs.get(path, 0) and route == self.snow.routes.get(
-                    path,
-                ):
-                    self.statuses[path, block] = answer
-                result = answer.tx_result
-            else:
-                if (
-                    not block
-                    and self.discover
-                    and self.state.identity(path) is not None
-                ):
-                    continue  # Already identified before this queued read got the line.
-                if (
-                    block
-                    and path not in self.current
-                    and (self.snow is None or path not in self.snow.current)
-                ):
-                    continue
-                key = (block, None)
-                batch, current = await reader.read(
-                    stream,
-                    path,
-                    key,
-                    self.state.block_revision(path, key),
+            except DeferredReadError:
+                if epoch == self.epochs.get(path, 0):
+                    self._queue(path, block)
+            except ExpiredReadError:
+                self.count += 1
+                if isinstance(block, IoEndpoint) and epoch == self.epochs.get(path, 0):
+                    self.io_pending.discard((path, block))
+
+    async def _probe_one(
+        self,
+        stream: BridgeStream | OrderedNormalReads,
+        reader: ConfigurationReader,
+        path: NativePath,
+        block: _Read,
+        epoch: int,
+        source: NativeAddress,
+        timeout: float,
+    ) -> None:
+        if isinstance(block, tuple):
+            if self.configuration is None:
+                return
+            observation = await self.configuration.read(
+                stream,
+                path,
+                block,
+                source=source,
+                timeout=timeout,
+            )
+            if observation is None:
+                return
+            result = observation.tx_result
+        elif isinstance(block, IoEndpoint):
+            before = self.state.io_directory(path, block)
+            if before is None:
+                self.io_pending.discard((path, block))
+                return
+            result = await self._read_io(stream, path, before, epoch, source, timeout)
+        elif isinstance(block, SnowRead):
+            if self.snow is None or (query := self.snow.query(path, block)) is None:
+                return
+            route = self.snow.routes.get(path)
+            self.reading_status.add(path)
+            try:
+                answer = await stream.read_status(
+                    path.port,
+                    query,
                     source=source,
+                    peer=path.address,
                     timeout=timeout,
+                    wait_for_edits=True,
                 )
-                if current and epoch == self.epochs.get(path, 0):
-                    self.latest[path, block] = batch
-                result = batch.tx_result
-            self.count += 1
-            if result is None and not isinstance(stream, OrderedNormalReads):
-                await stream.wait_transmit_idle(path.port)
+            finally:
+                self.reading_status.discard(path)
+            if epoch == self.epochs.get(path, 0) and route == self.snow.routes.get(
+                path,
+            ):
+                self.statuses[path, block] = answer
+            result = answer.tx_result
+        else:
+            if not block and self.discover and self.state.identity(path) is not None:
+                return  # Already identified before the queued read got the line.
+            if (
+                block
+                and path not in self.current
+                and (self.snow is None or path not in self.snow.current)
+            ):
+                return
+            key = (block, None)
+            batch, current = await reader.read(
+                stream,
+                path,
+                key,
+                self.state.block_revision(path, key),
+                source=source,
+                timeout=timeout,
+            )
+            if current and epoch == self.epochs.get(path, 0):
+                self.latest[path, block] = batch
+            result = batch.tx_result
+        self.count += 1
+        if result is None and not isinstance(stream, OrderedNormalReads):
+            await stream.wait_transmit_idle(path.port)
 
 
 async def _run_watch(
@@ -641,6 +663,8 @@ async def watch_native(
     Synchronous callbacks may inspect immutable snapshots in the current state.
     Passive mode (source=None) never sends. Use a new watch on each connection.
     An optional stale_after timeout marks a silent path unknown without sending.
+    Each Normal worker waits for its own occupied slot; an admitted read is
+    never replayed after a timeout.
     """
     selected = None if paths is None else frozenset(paths)
     if selected is not None and ports is not None:

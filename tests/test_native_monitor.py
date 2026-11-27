@@ -1,16 +1,23 @@
+from __future__ import annotations
+
 import asyncio
 import unittest
+from typing import TYPE_CHECKING
 
 from tekmar_482 import (
     ConnectionClosedError,
     GatewayEndpoint,
     NativeMonitor,
+    NativePath,
     Packet,
     ProtocolError,
 )
 from tekmar_482.tpck import serialize
 
 from .native_fixtures import TEST_PATH, frame, identity
+
+if TYPE_CHECKING:
+    from tekmar_482 import NativeFrame
 
 _CAP = "0101f04b54"
 _SUPPORT = "0401f04b54020005bf3e"
@@ -39,21 +46,34 @@ class Gateway:
         await self.expect(request)
         self.send(reply)
 
-    async def start(self, product: int) -> None:
+    async def setup(self, mask: str) -> None:
         await self.exchange(_CAP, _SUPPORT)  # Application identification.
         await self.exchange(_CAP, _SUPPORT)  # Normal peer capture features.
         await self.exchange(_TRACE, "040bf04b5400" + _COUNTS)
-        await self.exchange("000bf04b5408", "030bf04b5408")
+        await self.exchange("000bf04b54" + mask, "030bf04b54" + mask)
         await self.exchange(_CAP, _SUPPORT)  # Ordered active reads.
+
+    def report(self, packet: NativeFrame) -> None:
         self.send(
-            "00030100000001" + frame(0x3FF, b"").body.hex(),
+            f"00{packet.port:02x}0100000001" + packet.body.hex(),
             packet_type=0xD0,
         )
+
+    async def request(self, key: str) -> None:
         await self.exchange(_CAP, _SUPPORT)
-        await self.exchange("010ff04b54" + _ID, "040ff04b54" + _ID)
-        body = identity(product).body.hex()
-        self.send("00030200000001" + body, packet_type=0xD0)
-        self.send("020ff04b5403000002000000" + body)
+        await self.expect("010ff04b54" + key)
+
+    async def identify(self, key: str, product: int, path: NativePath) -> None:
+        await self.request(key)
+        self.send("040ff04b54" + key)
+        packet = identity(product, path=path)
+        self.report(packet)
+        self.send(f"020ff04b54{path.port:02x}000001000000" + packet.body.hex())
+
+    async def start(self, product: int) -> None:
+        await self.setup("08")
+        self.report(frame(0x3FF, b""))
+        await self.identify(_ID, product, TEST_PATH)
 
     async def restore(self) -> None:
         await self.exchange("000bf04b5400", "030bf04b5400")
@@ -64,9 +84,13 @@ class Gateway:
         await self.writer.wait_closed()
 
 
-async def wait_for_product(monitor: NativeMonitor, product: int) -> None:
+async def wait_for_product(
+    monitor: NativeMonitor,
+    product: int,
+    path: NativePath = TEST_PATH,
+) -> None:
     revision = monitor.revision
-    while (reported := monitor.state.identity(TEST_PATH)) is None or (
+    while (reported := monitor.state.identity(path)) is None or (
         reported.product_number != product
     ):
         revision = await monitor.wait_for_change(revision)
@@ -150,6 +174,85 @@ class NativeMonitorTests(unittest.IsolatedAsyncioTestCase):
             assert await peer.reader.read() == b""
         assert isinstance(monitor.last_error, ProtocolError)
         assert monitor.management is None and self.accepted.empty()
+
+    async def test_busy_port_does_not_reset_the_monitor_or_wait_for_unrelated_work(
+        self,
+    ) -> None:
+        other = NativePath(2, TEST_PATH.subnet, TEST_PATH.node)
+        monitor = NativeMonitor(self.endpoint, ports=[2, 3], reconnect_interval=0.01)
+        async with asyncio.TaskGroup() as tasks, asyncio.timeout(2):
+            running = tasks.create_task(monitor.run())
+            gateway = await self.accepted.get()
+            await gateway.setup("0c")
+            gateway.report(frame(0x3FF, b""))
+            await gateway.request(_ID)
+            gateway.send("0213f04b54 0300")  # Earlier completion on this port.
+            gateway.send("0406f04b54 0ff04b54 01")
+            gateway.send("020ff04b54 03040001000000" + identity().body.hex())
+            gateway.send("020ff04b54 030000")  # Truncated final report.
+            gateway.send("0212f04b54 0200")  # Other port, not a release.
+            gateway.report(frame(0x3FF, b"", other))
+            await gateway.identify("02" + _ID[2:], 200004, other)
+            await wait_for_product(monitor, 200004, other)
+            previous = monitor.state
+            manager = monitor.management
+            assert manager is not None and previous.identity(TEST_PATH) is None
+            gateway.send("020ff04b54 030100")  # Actual terminal, after Busy.
+            await gateway.identify(_ID, 200003, TEST_PATH)
+            await wait_for_product(monitor, 200003)
+            assert monitor.state is previous and monitor.management is manager
+            assert monitor.last_error is None and self.accepted.empty()
+            running.cancel()
+            await gateway.restore()
+
+    async def test_busy_and_terminal_in_one_burst_do_not_retry_a_moved_address(
+        self,
+    ) -> None:
+        moved = NativePath(3, TEST_PATH.subnet, TEST_PATH.node + 1)
+        monitor = NativeMonitor(self.endpoint, ports=[3])
+        async with asyncio.TaskGroup() as tasks, asyncio.timeout(2):
+            running = tasks.create_task(monitor.run())
+            gateway = await self.accepted.get()
+            await gateway.setup("08")
+            gateway.report(frame(0x3FF, b""))
+            await gateway.request(_ID)
+            gateway.send("0406f04b54 0ff04b54 01")
+            gateway.report(frame(0x3E7, bytes.fromhex("3507"), moved))
+            gateway.send("0210f04b54 0302ff")  # A different method owned the slot.
+            await gateway.identify("03358000000000000000", 200003, moved)
+            await wait_for_product(monitor, 200003, moved)
+            assert monitor.state.paths == (moved,) and self.accepted.empty()
+            running.cancel()
+            await gateway.restore()
+
+    async def test_admitted_read_timeout_keeps_capture_alive_and_is_not_replayed(
+        self,
+    ) -> None:
+        other = NativePath(2, TEST_PATH.subnet, TEST_PATH.node)
+        next_peer = NativePath(3, TEST_PATH.subnet, TEST_PATH.node + 1)
+        monitor = NativeMonitor(self.endpoint, ports=[2, 3], timeout=0.15)
+        async with asyncio.TaskGroup() as tasks, asyncio.timeout(2):
+            running = tasks.create_task(monitor.run())
+            gateway = await self.accepted.get()
+            await gateway.setup("0c")
+            gateway.report(frame(0x3FF, b""))
+            await gateway.request(_ID)
+            gateway.send("040ff04b54" + _ID)  # Already admitted, unlike Busy.
+            with self.assertRaises(TimeoutError):
+                async with asyncio.timeout(0.2):
+                    await gateway.reader.read(1)
+            gateway.report(frame(0x3FF, b"", next_peer))
+            gateway.send("0213f04b54 0300")  # Not the admitted method's terminal.
+            gateway.report(frame(0x3FF, b"", other))
+            await gateway.identify("02" + _ID[2:], 200004, other)
+            await wait_for_product(monitor, 200004, other)
+            gateway.send("020ff04b54 030100")
+            await gateway.identify("03358000000000000000", 200003, next_peer)
+            await wait_for_product(monitor, 200003, next_peer)
+            assert monitor.state.identity(TEST_PATH) is None
+            assert monitor.last_error is None and self.accepted.empty()
+            running.cancel()
+            await gateway.restore()
 
     async def test_silent_gateway_startup_respects_timeout_and_can_be_cancelled(
         self,

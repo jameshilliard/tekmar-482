@@ -43,9 +43,12 @@ from tekmar_482 import (
     read_weekly_schedule,
     watch_native,
 )
+from tekmar_482.wire_trace import observe_bridge_packets
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Sequence
+
+    from tekmar_482 import Packet
 
 type Exchange = tuple[int, str, tuple[str, ...]]
 _IMAGE = os.environ.get("TEKMAR_TEST_FLASH_IMAGE")
@@ -164,6 +167,54 @@ _SETPOINT = NativeAddress(0x31, 7)
 
 @unittest.skipUnless(_IMAGE, "set TEKMAR_TEST_FLASH_IMAGE to run the ARM interop suite")
 class FirmwareInteropTests(unittest.IsolatedAsyncioTestCase):
+    async def test_watch_resumes_busy_wire_after_an_abandoned_firmware_read(
+        self,
+    ) -> None:
+        blocked = NativePath(3, _THERMOSTAT.subnet, _THERMOSTAT.node)
+        healthy = NativePath(4, _PLANT.subnet, _PLANT.node)
+        script = (
+            (3, "6d70000b 4100 23 10000000 00000000", ()),
+            _block(3, "23 10000000", "0000", "6e723149 00003f 430d03 c60402"),
+            _block(4, "2a 80000000", "0000", "6e72a209 00003f 440d03 b60402"),
+        )
+        evidence: list[NativePath] = []
+        complete = asyncio.Event()
+        rejections = 0
+
+        def on_packet(packet: Packet, outbound: bool) -> None:  # noqa: FBT001
+            nonlocal rejections
+            if (
+                not outbound
+                and packet.type == 6
+                and packet.data == bytes.fromhex("0406f04b54 0ff04b54 01")
+            ):
+                rejections += 1
+
+        def observe(path: NativePath, state: NativeState) -> None:
+            if path not in evidence and state.identity(path) is not None:
+                evidence.append(path)
+                if len(evidence) == 2:
+                    complete.set()
+
+        with observe_bridge_packets(on_packet):
+            async with (
+                _gateway(script) as manager,
+                manager.native_session([3, 4]) as capture,
+                asyncio.TaskGroup() as tasks,
+            ):
+                with self.assertRaises(TimeoutError):
+                    await manager.read_block(
+                        3,
+                        NativeBlockQuery(_THERMOSTAT, 0x41),
+                        timeout=0.02,
+                    )
+                watch = tasks.create_task(
+                    watch_native(capture, [blocked, healthy], on_change=observe),
+                )
+                await complete.wait()
+                assert evidence == [healthy, blocked] and rejections == 1
+                watch.cancel()
+
     async def test_passive_watch_publishes_unsolicited_mode_without_querying_it(
         self,
     ) -> None:

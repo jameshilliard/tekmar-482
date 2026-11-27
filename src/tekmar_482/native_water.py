@@ -10,7 +10,7 @@ from typing import TYPE_CHECKING
 from ._configuration_watch import ConfigurationReader
 from ._native_payloads.queries import NativeStatusQuery, StatusRequest
 from ._native_payloads.water import MASTER_PRESENT, SETUP_SLOTS
-from ._observation import observation
+from ._observation import DeferredReadError, ExpiredReadError, observation
 from ._water_monitor import WaterMonitor, WaterSource
 from .constants import TN4_PORTS
 from .native import NativeAddress, NativeFrame
@@ -112,13 +112,18 @@ class _PortScan:
         window = asyncio.timeout_at(deadline)
         try:
             async with window:
-                self.master = await reads.read_status(
-                    self.port,
-                    _MASTER,
-                    source=source,
-                    timeout=timeout,
-                    wait_for_edits=True,
-                )
+                while True:
+                    try:
+                        self.master = await reads.read_status(
+                            self.port,
+                            _MASTER,
+                            source=source,
+                            timeout=timeout,
+                            wait_for_edits=True,
+                        )
+                    except DeferredReadError:
+                        continue
+                    break
                 if not self.master.answered:
                     return
                 answer = self.master.reports[-1]
@@ -142,6 +147,8 @@ class _PortScan:
                     timeout,
                     plant_settings=plant_settings,
                 )
+        except ExpiredReadError:
+            self.unfinished = True
         except TimeoutError:
             if not window.expired():
                 raise
@@ -156,22 +163,37 @@ class _PortScan:
         *,
         plant_settings: bool,
     ) -> None:
-        async def block(key: BlockKey, revision: int) -> tuple[NativeBlockBatch, bool]:
-            batch, current = await self.reader.read(
-                reads,
-                path,
-                key,
-                revision,
-                source=source,
-                timeout=timeout,
-            )
-            self.blocks.append(batch)
-            return batch, current
+        async def block(
+            key: BlockKey,
+            revision: int,
+        ) -> tuple[NativeBlockBatch, bool] | None:
+            while (
+                not self._lost
+                and path not in self._retired
+                and self.state.block_revision(path, key) == revision
+            ):
+                try:
+                    batch, current = await self.reader.read(
+                        reads,
+                        path,
+                        key,
+                        revision,
+                        source=source,
+                        timeout=timeout,
+                    )
+                except DeferredReadError:
+                    continue
+                self.blocks.append(batch)
+                return batch, current
+            return None
 
-        batch, current = await block(
+        identified = await block(
             (0, None),
             self.state.block_revision(path, (0, None)),
         )
+        if identified is None:
+            return
+        batch, current = identified
         identity = self.state.identity(path)
         if (
             not current
@@ -199,8 +221,8 @@ class _PortScan:
             if job is None:
                 return
             attempted.add(job)
-            batch, _ = await block(*job)
-            if batch.tx_result is None:
+            response = await block(*job)
+            if response is not None and response[0].tx_result is None:
                 return
 
 

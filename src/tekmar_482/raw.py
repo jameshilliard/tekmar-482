@@ -176,7 +176,7 @@ class NativeTransmitError(TekmarError):
 
 
 class NativePortBusyError(ProtocolError):
-    """A local operation already owns this port. No new request was sent."""
+    """A previous operation owns the port. The new request was not admitted."""
 
 
 @dataclass(frozen=True, slots=True)

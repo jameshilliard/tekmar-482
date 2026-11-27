@@ -31,6 +31,10 @@ class _Event(IntEnum):
     TRANSMIT_FAULT = 4
 
 
+def status_read_terminal(body: bytes) -> bool:
+    return len(body) == _END_SIZE and body[1] in _Event and body[1] != _Event.FRAME
+
+
 def status_key(
     port: int,
     query: NativeStatusQuery,
