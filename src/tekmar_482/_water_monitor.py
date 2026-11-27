@@ -221,12 +221,21 @@ class WaterMonitor:
         """Return whether visible water sources changed; never combine input paths."""
         if isinstance(record, CaptureGap):
             self.dropped += record.dropped
-            changed = bool(self._sources)
-            self._reidentify.update(self._sources)
-            self._reidentify.update(self._identities)
-            self._moves.clear()
-            self._sources.clear()
-            self._identities.clear()
+            lost = {
+                p
+                for p in self._sources.keys() | self._identities.keys()
+                if record.affects(p[0])
+            }
+            self._reidentify.update(lost)
+            changed = False
+            for path in lost:
+                changed |= self._sources.pop(path, None) is not None
+                self._identities.pop(path, None)
+            self._moves = {
+                path: old
+                for path, old in self._moves.items()
+                if not record.affects(path[0])
+            }
             return changed
         if not isinstance(record, NativeFrame) or record.message_id not in _TRACKED:
             return False

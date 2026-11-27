@@ -8,6 +8,7 @@ from tekmar_482 import (
     BoilerChillerOutput,
     CaptureGap,
     EquipmentBank,
+    GatewayTraceGap,
     HeatPumpOutput,
     Modulation,
     NativeBlockQuery,
@@ -175,6 +176,21 @@ class PlantStateTests(unittest.TestCase):
         state.observe(frame(0x24F, _STAGED, moved))
         state.observe(identity(_402, path=moved))
         assert not state.water_sources
+
+    def test_trace_gap_discards_only_the_affected_wires_native_samples(self) -> None:
+        state = NativeState()
+        for path in (TEST_PATH, _OTHER):
+            state.observe(identity(_402, path=path))
+            state.observe(frame(0x24F, _STAGED, path))
+            state.observe(block(0x44, bytes.fromhex("07 81 4523"), path))
+        prior = state.water_source(TEST_PATH)
+        assert prior and prior.equipment.outputs
+        assert state.observe(GatewayTraceGap(3, 1 << _OTHER.port)) == (_OTHER,)
+        assert state.water_sources == (prior,) and state.identity(_OTHER) is None
+        assert len(state.plant_configurations) == 1
+        assert _registers(state).runtimes[0].hours == 0x2345
+        assert state.observe(CaptureGap(2)) == (TEST_PATH,)
+        assert not state.paths and state.dropped == 5
 
     def test_bank_masks_runtime_selector_and_complete_word_are_independent(
         self,

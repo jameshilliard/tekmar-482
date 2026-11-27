@@ -60,14 +60,12 @@ class NativeInventory:
         if isinstance(frame, CaptureGap):
             if isinstance(frame, GatewayTraceGap):
                 self.gateway_trace_records_dropped += frame.dropped
-                for routes in (self._nodes, self._moved_from):
-                    for key in tuple(routes):
-                        if frame.port_mask & (1 << key[0]):
-                            del routes[key]
             else:
                 self.host_records_dropped += frame.dropped
-                self._nodes.clear()
-                self._moved_from.clear()
+            for routes in (self._nodes, self._moved_from):
+                for key in tuple(routes):
+                    if frame.affects(key[0]):
+                        del routes[key]
             return None
         if not isinstance(frame, NativeFrame):
             return None
@@ -163,12 +161,7 @@ class _SubnetProbes:
             self.queues[port].put_nowait(subnet)
 
     def lost(self, gap: CaptureGap) -> None:
-        if isinstance(gap, GatewayTraceGap):
-            self.finished = {
-                k for k in self.finished if not gap.port_mask & (1 << k[0])
-            }
-        else:
-            self.finished.clear()
+        self.finished = {k for k in self.finished if not gap.affects(k[0])}
 
     def stop(self) -> None:
         self.accepting = False

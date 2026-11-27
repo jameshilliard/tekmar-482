@@ -220,6 +220,10 @@ class CaptureGap:
 
     dropped: int
 
+    def affects(self, _port: int, /) -> bool:
+        """Whether this physical port's capture continuity was lost."""
+        return True  # The host backlog does not preserve the lost ports.
+
 
 type _Record = NativeFrame | InvalidCapture | PortError
 type CaptureRecord = _Record | CaptureGap

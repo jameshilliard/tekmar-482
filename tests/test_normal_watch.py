@@ -21,6 +21,7 @@ from tekmar_482 import (
     Tekmar482Client,
     ThermostatMode,
     watch_climate,
+    watch_native,
 )
 from tekmar_482.cli import CliError, build_parser, run
 
@@ -32,6 +33,7 @@ _CAP = "0101f04b54"
 _SUPPORT = "0401f04b54020005bf3e"
 _ID = "03354000000000000000"
 _MODE = "03354000000003000000"
+_PLANT = 104103
 
 
 def record(peer: NativeFrame) -> Packet:
@@ -40,6 +42,25 @@ def record(peer: NativeFrame) -> Packet:
 
 def end(wire: Wire, peer: NativeFrame) -> None:
     wire.feed("020ff04b54 030000 01000000 " + peer.body.hex())
+
+
+async def admit_read(wire: Wire, keys: set[tuple[int, int]]) -> None:
+    await wire.expect(_CAP)
+    wire.feed(_SUPPORT)
+    async with asyncio.timeout(1):
+        request = await wire.out.get()
+    assert request[:5].hex() == "010ff04b54"
+    port = request[5]
+    block_id = int.from_bytes(request[11:13], "little")
+    keys.remove((port, block_id))
+    assert request[6:].hex() == f"3540000000{block_id:02x}000000"
+    wire.feed("040ff04b54" + request[5:].hex())
+
+
+def plant_report(wire: Wire, f: NativeFrame, *, traced: bool = True) -> None:
+    if traced:
+        wire.queue_packet(trace(f"00 {f.port:02x} 01000000 01 " + f.body.hex()))
+    wire.feed(f"020ff04b54 {f.port:02x}0000 01000000 " + f.body.hex())
 
 
 class NormalWatchTests(unittest.IsolatedAsyncioTestCase):
@@ -94,6 +115,54 @@ class NormalWatchTests(unittest.IsolatedAsyncioTestCase):
         for change in ("none", "gap", "move"):
             with self.subTest(change=change):
                 await self._watch(change)
+
+    async def test_port_gap_retires_only_that_ports_in_flight_reads(self) -> None:
+        wire = Wire()
+        paths = {p: NativePath(p, TEST_PATH.subnet, TEST_PATH.node) for p in (2, 3)}
+        changes: list[tuple[NativePath, bool]] = []
+
+        async def gateway() -> None:
+            await start(wire, "0c")
+            await wire.expect(_CAP)
+            wire.feed(_SUPPORT)
+            for block_id in (0, 0x41):
+                remaining = {(p, block_id) for p in paths}
+                await admit_read(wire, remaining)
+                await admit_read(wire, remaining)
+                if block_id == 0:
+                    for path in paths.values():
+                        plant_report(wire, identity(_PLANT, path=path))
+            wire.queue_packet(trace("05 04 0300000000000000"))
+            plant_report(wire, block(0x41, b"\x01\x04", paths[2]), traced=False)
+            plant_report(wire, block(0x41, b"\x01\x05", paths[3]))
+            remaining = {(2, 0), (3, 0x50)}  # Reidentify port 2, continue port 3.
+            await admit_read(wire, remaining)
+            await admit_read(wire, remaining)
+            await restore(wire)
+
+        async with Tekmar482Client(wire) as client, asyncio.TaskGroup() as tasks:
+            tasks.create_task(gateway())
+            async with BridgeManagement(client).native_session(paths) as link:
+                result = await watch_native(
+                    link,
+                    paths.values(),
+                    duration=0.25,
+                    on_change=lambda p, state: changes.append(
+                        (p, state.identity(p) is not None),
+                    ),
+                )
+        state = result.state
+        assert state.dropped == 3 and state.paths == (paths[3],)
+        assert state.identity(paths[2]) is None and state.identity(paths[3]) is not None
+        assert (
+            state.block(paths[2], 0x41) is None
+            and state.block(paths[3], 0x41) is not None
+        )
+        assert {(b.port, b.query.block_id) for b in result.latest_blocks} == {
+            (3, 0),
+            (3, 0x41),
+        }
+        assert (paths[2], False) in changes and (paths[3], False) not in changes
 
     async def _watch(self, change: str) -> None:
         wire = Wire()

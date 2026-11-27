@@ -72,9 +72,12 @@ class GatewayTraceGap(CaptureGap):
 
     port_mask: int
 
+    def affects(self, port: int, /) -> bool:
+        return bool(self.port_mask & (1 << port))
+
     @property
     def ports(self) -> tuple[int, ...]:
-        return tuple(p for p in TN4_PORTS if self.port_mask & (1 << p))
+        return tuple(p for p in TN4_PORTS if self.affects(p))
 
 
 def _decode_trace(

@@ -43,10 +43,6 @@ class ConfigurationReader:
             p.retired = True
             p.seen.set()
 
-    def discard_pending(self) -> None:
-        for pending in self.pending.values():
-            self.discard(pending.path)
-
     def observe(self, record: CaptureRecord) -> tuple[NativePath, ...] | None:
         if isinstance(record, NativeFrame):
             p = self.pending.get(record.port)
@@ -66,7 +62,9 @@ class ConfigurationReader:
         old = self.state.identity(identity_path) if identity_path else None
         changed = self.state.observe(record)
         if isinstance(record, CaptureGap):
-            self.discard_pending()
+            for port, pending in self.pending.items():
+                if record.affects(port):
+                    self.discard(pending.path)
         elif isinstance(record, NativeFrame) and record.message_id == TAKING_ADDRESS:
             for path in changed:
                 self.discard(path)

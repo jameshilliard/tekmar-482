@@ -550,10 +550,18 @@ class NativeState:
     def observe(self, record: CaptureRecord) -> tuple[NativePath, ...]:
         """Return changed paths. Equal samples refresh timestamps without notifying."""
         if isinstance(record, CaptureGap):
-            changed = self.paths
-            self._reidentify.update(self._selected or changed)
-            self._peers.clear()
-            self._moves.clear()
+            changed = tuple(p for p in self.paths if record.affects(p.port))
+            self._reidentify.update(
+                p for p in self._selected or changed if record.affects(p.port)
+            )
+            for path in changed:
+                self._peers.pop(path, None)
+            self._moves = {
+                path: old
+                for path, old in self._moves.items()
+                if not record.affects(path.port)
+            }
+            # A lost master report could change a group shared across wires.
             self._air_groups = AirGroupTargets()
             self._water.observe(record)
             return changed

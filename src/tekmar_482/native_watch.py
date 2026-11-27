@@ -187,6 +187,15 @@ class _Watch:
             self.io_pending = {k for k in self.io_pending if k[0] != path}
             self.statuses = {k: b for k, b in self.statuses.items() if k[0] != path}
 
+    def _reidentify(self, paths: Iterable[NativePath]) -> None:
+        for path in paths:
+            self._invalidate(path)
+            if self.current.pop(path, None) is not None and self.on_change is not None:
+                self.on_change(ClimateChange(path, None))
+            self._queue(path, 0)
+            if self.on_native is not None:
+                self.on_native(path, self.state)
+
     def _updated(self, path: NativePath) -> None:
         before = self.current.get(path)
         current = self.state.climate(path)
@@ -248,24 +257,15 @@ class _Watch:
         )
         if changed is None:
             return
-        if isinstance(record, CaptureGap) or (
-            isinstance(record, NativeFrame) and record.message_id == TAKING_ADDRESS
-        ):
-            paths = (
-                self.paths if isinstance(record, CaptureGap) and self.paths else changed
+        if isinstance(record, CaptureGap):
+            if self.snow is not None:
+                self.snow.capture_gap(record)
+            self._reidentify(
+                p for p in sorted(self.paths or changed) if record.affects(p.port)
             )
-            if self.snow is not None and (paths or isinstance(record, CaptureGap)):
-                self.snow.clear_hints()
-            for path in paths:
-                self._invalidate(path)
-                if (
-                    self.current.pop(path, None) is not None
-                    and self.on_change is not None
-                ):
-                    self.on_change(ClimateChange(path, None))
-                self._queue(path, 0)
-                if self.on_native is not None:
-                    self.on_native(path, self.state)
+            return
+        if isinstance(record, NativeFrame) and record.message_id == TAKING_ADDRESS:
+            self._reidentify(changed)
             return
         if isinstance(record, NativeFrame) and record.message_id == BLOCK_UPDATE:
             # A block update names its destination, not its author. Only a

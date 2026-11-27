@@ -19,7 +19,7 @@ if TYPE_CHECKING:
     from .native import NativeFrame
     from .native_snowmelt import NativeSnowmelt
     from .native_state import NativeState
-    from .raw import NativeBlockBatch
+    from .raw import CaptureGap, NativeBlockBatch
 
 _GROUP_WIDTH = 2
 _RETRY_REPORTS = 5  # SW 11 retries incomplete snowmelt data every fifth report.
@@ -49,9 +49,12 @@ class SnowWatch:
         self._retry.pop(path, None)
         self.routes.pop(path, None)
         self._setup_hints = {h for h in self._setup_hints if h[0] != path}
+        self._group_flags = {k: v for k, v in self._group_flags.items() if k[0] != path}
 
-    def clear_hints(self) -> None:
-        self._group_flags.clear()
+    def capture_gap(self, gap: CaptureGap) -> None:
+        self._group_flags = {
+            k: v for k, v in self._group_flags.items() if not gap.affects(k[0].port)
+        }
 
     def changed(self, path: NativePath) -> bool:
         current = self.state.snowmelt(path)

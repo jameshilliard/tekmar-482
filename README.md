@@ -739,9 +739,12 @@ partial scan or silence cannot. A newer change seen during a scan wins.
 Stream frames have a connection-local `capture_index` in addition to the
 gateway's millisecond timestamp. The live watcher uses receive order, so
 two reports in the same timestamp tick cannot reverse a channel update.
-A `CaptureGap`, address move or identity replacement invalidates old
-routes. A board-terminal name is not a discovered label or proof of an
-output, and there is no generic I/O channel write in these services.
+A gateway trace gap invalidates routes and pending readbacks only on the
+ports in its mask. A host capture gap has no port information and
+invalidates every observed route. Address moves and identity replacements
+invalidate the affected paths. A board-terminal name is not a discovered
+label or proof of an output. These services do not include a generic
+I/O channel write.
 
 An active `watch-native` discovers the first time it sees an I/O endpoint
 and can rediscover when a later report supplies a new channel, type or count.
