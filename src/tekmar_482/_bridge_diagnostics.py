@@ -40,6 +40,7 @@ class ErrorReason(IntEnum):
     RAW_VALID_DROP = 15
     RAW_INVALID_DROP = 16
     TRACE_DROP = 17
+    STATUS_READ_DROP = 18
     UART_OVERRUN = 0x80
     UART_PARITY = 0x81
     UART_FRAMING = 0x82

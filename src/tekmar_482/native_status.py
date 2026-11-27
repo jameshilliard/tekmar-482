@@ -11,6 +11,8 @@ from .exceptions import TekmarError
 from .native import NativeBlockQuery
 
 if TYPE_CHECKING:
+    from collections.abc import Awaitable, Callable
+
     from ._native_payloads.snowmelt import SnowmeltPair
     from .native import NativeAddress, NativeFrame
     from .raw import BridgeStream, TxResult
@@ -65,6 +67,15 @@ class StatusCollector:
     _latest: dict[int, NativeFrame] = field(default_factory=dict, init=False)
 
     def observe(self, frame: NativeFrame) -> bool:
+        return (
+            self.add(frame)
+            and self.expected_count is not None
+            and self.expected_count > 0
+            and len(self.covered) == self.expected_count
+        )
+
+    def add(self, frame: NativeFrame) -> bool:
+        """Accept a matching part, whether or not it completes the exchange."""
         if self.peer is not None and (
             frame.subnet != self.peer.subnet or (frame.node ^ self.peer.node) & 31
         ):
@@ -90,7 +101,7 @@ class StatusCollector:
         elif not part.items.issubset(self.covered):
             self.reports.append(frame)
             self.covered.update(part.items)
-        return self.expected_count > 0 and len(self.covered) == self.expected_count
+        return True
 
     def batch(self, port: int, result: TxResult | None) -> NativeStatusBatch:
         return NativeStatusBatch(
@@ -104,25 +115,16 @@ class StatusCollector:
         )
 
 
-async def read_snowmelt_status(
-    stream: BridgeStream,
-    port: int,
+async def snowmelt_status_query(
     peer: NativeAddress,
-    *,
-    source: NativeAddress,
-    keys: bytes | None = None,
-    timeout: float = 20,
-) -> NativeStatusBatch:
-    """Read the application and configured number, then request that peer's status."""
+    read: Callable[[NativeBlockQuery], Awaitable[NativeFrame]],
+    keys: bytes | None,
+) -> NativeStatusQuery:
+    """Resolve a native peer's separately configured snowmelt zone or sensor number."""
 
     async def setting(block: SnowmeltBlock, name: str) -> int:
-        batch = await stream.read_block_group(
-            port,
-            NativeBlockQuery(peer, block),
-            source=source,
-            timeout=timeout,
-        )
-        value = batch.require_report().decoded.get(name)
+        frame = await read(NativeBlockQuery(peer, block))
+        value = frame.decoded.get(name)
         if not isinstance(value, int):
             msg = f"device did not report {name} in block {block:#04x}"
             raise TekmarError(msg)
@@ -135,7 +137,30 @@ async def read_snowmelt_status(
         if role is SnowmeltRole.SENSOR
         else await setting(SnowmeltBlock.ZONE_ID, "zone_id")
     )
-    query = NativeStatusQuery.for_snowmelt_device(application, number, keys)
+    return NativeStatusQuery.for_snowmelt_device(application, number, keys)
+
+
+async def read_snowmelt_status(
+    stream: BridgeStream,
+    port: int,
+    peer: NativeAddress,
+    *,
+    source: NativeAddress,
+    keys: bytes | None = None,
+    timeout: float = 20,
+) -> NativeStatusBatch:
+    """Read the application and configured number, then request that peer's status."""
+
+    async def read(query: NativeBlockQuery) -> NativeFrame:
+        batch = await stream.read_block_group(
+            port,
+            query,
+            source=source,
+            timeout=timeout,
+        )
+        return batch.require_report()
+
+    query = await snowmelt_status_query(peer, read, keys)
     return await stream.read_status(
         port,
         query,

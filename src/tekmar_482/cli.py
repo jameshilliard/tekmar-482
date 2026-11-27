@@ -654,11 +654,11 @@ def _endpoint(args: argparse.Namespace) -> GatewayEndpoint:
 
 def _validate_native_args(args: argparse.Namespace) -> None:
     if (
-        args.command == "read-block"
+        args.command in {"read-block", "read-status"}
         and not args.raw
         and (args.ack or args.source_subnet or args.source_node)
     ):
-        msg = "custom source addresses and --ack require read-block --raw"
+        msg = f"custom source addresses and --ack require {args.command} --raw"
         raise CliError(msg)
     if (
         args.command in {"watch-native", "watch-climate"}
@@ -778,6 +778,11 @@ async def _native_status(
     args: argparse.Namespace,
     emit: Callable[[object], None],
 ) -> int:
+    if args.command == "read-status" and not args.raw:
+        async with bridge.normal(select_mode=False) as client:
+            answer = await read_status_from_args(BridgeManagement(client), args)
+        emit(_status_fields(answer))
+        return int(not answer.answered)
     ack_ports = (
         (args.port,) if getattr(args, "ack", False) else getattr(args, "ack_port", ())
     )

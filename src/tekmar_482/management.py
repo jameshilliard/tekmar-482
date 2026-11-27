@@ -12,21 +12,25 @@ from typing import TYPE_CHECKING, Self
 
 from ._bridge_diagnostics import ERROR_REPORTING_METHOD, TRACE_STATE, WIRE_VERSION
 from ._normal_block import read_key, read_result
+from ._normal_status import status_key, status_result
 from .constants import TN4_PORTS
 from .error_reports import ALL_SOURCES, ErrorReports, GatewayErrorCounter, source_mask
 from .exceptions import ConnectionClosedError, ProtocolError, TekmarError
+from .native_status import StatusCollector, snowmelt_status_query
 from .normal_trace import NormalTrace, NormalTraceState
 from .traffic import TrafficCounters
 from .trpc import ResponseMatch, TrpcCommand, TrpcMethod, TrpcPacket, TrpcService
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Iterable
+    from collections.abc import AsyncIterator, Awaitable, Callable, Iterable
     from struct import Struct
 
     from ._bridge_diagnostics import ErrorReason, ErrorSource
+    from ._native_payloads.queries import NativeStatusQuery
     from .client import Tekmar482Client
-    from .native import NativeBlockQuery, NativeFrame
+    from .native import NativeAddress, NativeBlockQuery, NativeFrame
     from .native_state import NativePath
+    from .native_status import NativeStatusBatch
 
 _CAPABILITY_BYTES = 4
 
@@ -53,6 +57,7 @@ class BridgeFeature(IntFlag):
     NORMAL_IDENTITY = 16
     TRAFFIC_COUNTS = 32
     NORMAL_BLOCK_READ = 64
+    NORMAL_STATUS_READ = 128
 
 
 class BridgeMethod(IntEnum):
@@ -71,6 +76,7 @@ class BridgeMethod(IntEnum):
     NORMAL_IDENTITY = 0x544BF00D
     TRAFFIC_COUNTS = 0x544BF00E
     NORMAL_BLOCK_READ = 0x544BF00F
+    NORMAL_STATUS_READ = 0x544BF010
 
 
 @dataclass(frozen=True, slots=True)
@@ -315,15 +321,62 @@ class BridgeManagement(_Management):
         timeout: float = 15,
     ) -> NativeFrame:
         """Read one peer in Normal mode without relying on trace or cached replies."""
-        if not isfinite(timeout) or timeout <= 0:
-            msg = "Normal block read timeout must be finite and positive"
-            raise ValueError(msg)
-        key = read_key(port, query)
-        command = _ExtensionCommand(
-            TrpcService.REQUEST,
+        async with self._read_events(
             BridgeMethod.NORMAL_BLOCK_READ,
-            payload=key,
+            BridgeFeature.NORMAL_BLOCK_READ,
+            read_key(port, query),
+            timeout,
+        ) as receive:
+            return read_result(port, query, await receive())
+
+    async def read_status(
+        self,
+        port: int,
+        query: NativeStatusQuery,
+        *,
+        peer: NativeAddress | None = None,
+        timeout: float = 15,
+    ) -> NativeStatusBatch:
+        """Read peer status without changing mode, trace or link-ACK settings."""
+        collector = StatusCollector(query, peer)
+        async with self._read_events(
+            BridgeMethod.NORMAL_STATUS_READ,
+            BridgeFeature.NORMAL_STATUS_READ,
+            status_key(port, query, peer),
+            timeout,
+        ) as receive:
+            while True:
+                batch = status_result(port, collector, await receive())
+                if batch is not None:
+                    return batch
+
+    async def read_snowmelt_status(
+        self,
+        port: int,
+        peer: NativeAddress,
+        *,
+        keys: bytes | None = None,
+        timeout: float = 15,
+    ) -> NativeStatusBatch:
+        query = await snowmelt_status_query(
+            peer,
+            lambda block: self.read_block(port, block, timeout=timeout),
+            keys,
         )
+        return await self.read_status(port, query, peer=peer, timeout=timeout)
+
+    @asynccontextmanager
+    async def _read_events(
+        self,
+        method: BridgeMethod,
+        feature: BridgeFeature,
+        key: bytes,
+        timeout: float,
+    ) -> AsyncIterator[Callable[[], Awaitable[bytes]]]:
+        if not isfinite(timeout) or timeout <= 0:
+            msg = "Normal read timeout must be finite and positive"
+            raise ValueError(msg)
+        command = _ExtensionCommand(TrpcService.REQUEST, method, payload=key)
         session = self._session
         with session.connection_scope():
             async with session.reports(
@@ -336,27 +389,31 @@ class BridgeManagement(_Management):
                     if (
                         caps is None
                         or caps.mode != BridgeMode.NORMAL
-                        or not caps.features & BridgeFeature.NORMAL_BLOCK_READ
+                        or not caps.features & feature
                     ):
-                        msg = "gateway does not support block reads in Normal mode"
+                        msg = f"gateway does not support {method.name} in Normal mode"
                         raise ProtocolError(msg)
                     ack = await self._exchange(command)
                     if ack.method_id != command.method_id or ack.extra != key:
-                        msg = "gateway did not acknowledge this Normal block read"
+                        msg = "gateway did not acknowledge this Normal read"
                         raise ProtocolError(msg)
-                armed = False
+
+                async def receive() -> bytes:
+                    async for packet in events:
+                        if (
+                            packet.service is TrpcService.REPORT
+                            and packet.extra[:1] == key[:1]
+                        ):
+                            return packet.extra
+                    msg = "connection closed before the Normal read result"
+                    raise ConnectionClosedError(msg)
+
                 async with asyncio.timeout(timeout):
                     async for packet in events:
                         if packet is ack:
-                            armed = True
-                        elif (
-                            armed
-                            and packet.method_id == command.method_id
-                            and packet.service is TrpcService.REPORT
-                            and packet.extra[:1] == key[:1]
-                        ):
-                            return read_result(port, query, packet.extra)
-        msg = "connection closed before the Normal block result"
+                            yield receive
+                            return
+        msg = "connection closed before Normal read admission"
         raise ConnectionClosedError(msg)
 
     async def _trace_state(self) -> NormalTraceState:

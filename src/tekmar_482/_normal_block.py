@@ -56,16 +56,20 @@ def read_result(port: int, query: NativeBlockQuery, body: bytes) -> NativeFrame:
             raise TimeoutError(msg)
         msg = f"gateway could not complete the native read: {status.name.lower()}"
         raise ProtocolError(msg)
-    if len(body) < _RESULT.size:
-        msg = "truncated Normal block result"
-        raise ProtocolError(msg)
-    _, _, stamp = _RESULT.unpack_from(body)
-    try:
-        frame = NativeFrame(port, stamp, body[_RESULT.size :])
-    except ValueError as err:
-        msg = "invalid native frame in Normal block result"
-        raise ProtocolError(msg) from err
+    frame = peer_frame(port, body)
     if not query.matches(frame.message):
         msg = "Normal block result does not match the requested peer, block or selector"
         raise ProtocolError(msg)
     return frame
+
+
+def peer_frame(port: int, body: bytes) -> NativeFrame:
+    if len(body) < _RESULT.size:
+        msg = "truncated Normal native frame result"
+        raise ProtocolError(msg)
+    _, _, stamp = _RESULT.unpack_from(body)
+    try:
+        return NativeFrame(port, stamp, body[_RESULT.size :])
+    except ValueError as err:
+        msg = "invalid native frame in Normal result"
+        raise ProtocolError(msg) from err

@@ -534,6 +534,7 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
                 [
                     "read-status",
                     "snowmelt",
+                    "--raw",
                     "1",
                     "0x14",
                     "3",
@@ -590,6 +591,7 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
                 [
                     "read-status",
                     "io-discovery",
+                    "--raw",
                     "3",
                     "0x43",
                     "0xa5",

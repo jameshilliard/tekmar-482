@@ -630,6 +630,18 @@ tekmar-482 read-status master 2 --tcp 192.0.2.10:3001 --json
 
 Other services are `outdoor`, `wwsd`, `zone-sync`, `io-discovery`,
 `io-channel`, `humidity` and `gateway-access` (read-only access status).
+All ten `read-status` services default to the gateway's existing Normal
+session. They do not enable trace or change reporting. In Python use
+`BridgeManagement(client).read_status(port, query, peer=peer)` or
+`read_snowmelt_status(port, peer, keys=...)` on that manager. Reads on
+different ports can overlap. A concurrent block or status read on the same
+port is rejected. Use the subcommand's `--raw` only for an explicitly Raw
+session, custom request source or link-ACK controls.
+
+In Normal mode the gateway returns every matching part followed by its link
+outcome and completion status. A gateway deadline returns the partial batch;
+host timeout, lost serial connection or gateway output overflow are errors,
+not evidence that the peer is absent.
 Active `dump` also requests the six shared
 line services once per responding port; use `--no-line-status` to skip them.
 `read_native_snapshot(..., include_line_status=True)` does the same.

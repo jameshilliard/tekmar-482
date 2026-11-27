@@ -9,6 +9,7 @@ from ._native_payloads.climate import ThermostatMode
 from ._native_payloads.queries import NativeStatusQuery, StatusRequest
 from ._native_payloads.thermostat import TargetSlot, ThermostatTarget
 from .constants import TN4_PORTS
+from .management import BridgeManagement
 from .native import NativeAddress
 from .native_state import NativePath
 from .native_status import read_snowmelt_status
@@ -391,6 +392,11 @@ def add_status_commands(
             parents=[common],
         )
         args.set_defaults(status_request=kind)
+        args.add_argument(
+            "--raw",
+            action="store_true",
+            help="switch to Raw mode for this request",
+        )
         args.add_argument("port", type=int, choices=TN4_PORTS)
         args.add_argument("--source-subnet", type=number, default=0)
         args.add_argument("--source-node", type=number, default=0)
@@ -430,12 +436,19 @@ def add_status_commands(
 
 
 async def read_status_from_args(
-    stream: BridgeStream,
+    stream: BridgeStream | BridgeManagement,
     args: argparse.Namespace,
 ) -> NativeStatusBatch:
     kind = args.status_request
     source = NativeAddress(args.source_subnet, args.source_node)
     if kind is StatusRequest.SNOWMELT:
+        if isinstance(stream, BridgeManagement):
+            return await stream.read_snowmelt_status(
+                args.port,
+                NativeAddress(args.subnet, args.node),
+                keys=args.keys,
+                timeout=args.timeout,
+            )
         return await read_snowmelt_status(
             stream,
             args.port,
@@ -460,6 +473,13 @@ async def read_status_from_args(
             query = NativeStatusQuery.gateway_access()
         else:
             query = NativeStatusQuery(kind)
+    if isinstance(stream, BridgeManagement):
+        return await stream.read_status(
+            args.port,
+            query,
+            peer=peer,
+            timeout=args.timeout,
+        )
     return await stream.read_status(
         args.port,
         query,
