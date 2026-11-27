@@ -14,7 +14,7 @@ from ._native_payloads.queries import NativeStatusQuery, StatusRequest
 from .constants import DEFAULT_BLOCK_TIMEOUT, TN4_PORTS
 from .native import NativeAddress, NativeBlockQuery, NativeTargets
 from .native_discovery import NativeInventory
-from .native_io import recover_io_directory
+from .native_io import local_io_endpoint, recover_io_directory
 from .native_schedule import ScheduleDirectory
 from .native_sensors import ThermostatSensorMonitor
 from .native_state import NativePath, NativeState
@@ -332,16 +332,20 @@ def _status_queries(
                 _StatusQuery(device.path.address, query),
             )
     for peer in inventory.devices:
-        if peer.io_endpoints and peer.port not in busy:
-            path = NativePath(peer.port, peer.address.subnet, peer.address.node)
-            identity = state.identity(path)
+        if peer.port in busy:
+            continue
+        path = NativePath(peer.port, peer.address.subnet, peer.address.node)
+        endpoints = peer.io_endpoints
+        if not endpoints and (candidate := local_io_endpoint(state.block(path, 0))):
+            endpoints = frozenset({candidate})
+        if endpoints:
             ports.setdefault(peer.port, []).extend(
                 _StatusQuery(
                     peer.address,
                     NativeStatusQuery.io(e.subnet, e.node),
-                    identity,
+                    state.identity(path),
                 )
-                for e in sorted(peer.io_endpoints)
+                for e in sorted(endpoints)
             )
     if include_line_status:
         for port in active - busy:

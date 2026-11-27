@@ -27,7 +27,7 @@ from .constants import TN4_PORTS
 from .management import BridgeFeature
 from .native import NativeAddress, NativeFrame
 from .native_discovery import NativeProbe
-from .native_io import recover_io_directory
+from .native_io import local_io_endpoint, recover_io_directory
 from .native_plant_registers import PLANT_REGISTERS
 from .native_setpoint import SETPOINT_BLOCKS
 from .native_state import (
@@ -209,6 +209,7 @@ class _Watch:
         self.io_reads: dict[tuple[NativePath, IoEndpoint], IoDirectoryRead] = {}
         self.io_discovery = io_discovery and active
         self.io_pending: set[tuple[NativePath, IoEndpoint]] = set()
+        self.io_attempted: set[NativePath] = set()
         self.capture_index = 0
         self.capture_advanced = asyncio.Event()
         self.reading_status: set[NativePath] = set()
@@ -295,6 +296,7 @@ class _Watch:
             self.latest = {
                 job: batch for job, batch in self.latest.items() if job[0] != path
             }
+            self.io_attempted.discard(path)
             self.io_pending = {k for k in self.io_pending if k[0] != path}
             self.statuses = {k: b for k, b in self.statuses.items() if k[0] != path}
             self.io_reads = {k: r for k, r in self.io_reads.items() if k[0] != path}
@@ -404,6 +406,45 @@ class _Watch:
         if self.on_native is not None:
             self.on_native(path, self.state)
 
+    def _local_io_candidate(self, path: NativePath) -> IoEndpoint | None:
+        if path in self.io_attempted:
+            return None
+        endpoint = local_io_endpoint(self.state.block(path, 0))
+        if endpoint is None or self.state.io_for(path):
+            return None
+        if not self.discover:
+            return endpoint  # The caller selected this physical path.
+        for route in self.state.device_routes(ports=self.ports):
+            if route.address == path.address and (
+                route.preferred == path
+                or (
+                    not route.claiming_ports
+                    and route.paths == (path,)
+                    and not self.state.master_subnets(path.port)
+                )
+            ):
+                return endpoint
+        return None
+
+    def _queue_io(self, path: NativePath, endpoint: IoEndpoint) -> None:
+        key = (path, endpoint)
+        if key not in self.io_pending:
+            self.io_pending.add(key)
+            self._queue(path, endpoint)
+
+    def _discover_local_io(self, sender: NativePath, frame: NativeFrame) -> None:
+        if not self.io_discovery:
+            return
+        if self.discover and frame.message_id == MASTER_PRESENT:
+            paths: Iterable[NativePath] = self.identities
+        elif frame.message_id == BLOCK_REPORT and self.state.block(sender, 0) is frame:
+            paths = (sender,)
+        else:
+            return
+        for path in paths:
+            if (endpoint := self._local_io_candidate(path)) is not None:
+                self._queue_io(path, endpoint)
+
     def _capture_gap(
         self,
         record: CaptureGap,
@@ -482,15 +523,13 @@ class _Watch:
             if self.reader is not None:
                 self._enroll(path)
             self._updated(path)
-            if io is not None:
-                key = (path, io.endpoint)
-                if key not in self.io_pending and (
-                    key not in self.io_reads
-                    or old_io is None
-                    or not old_io.describes(io)
-                ):
-                    self.io_pending.add(key)
-                    self._queue(path, io.endpoint)
+            if io is not None and (
+                (path, io.endpoint) not in self.io_reads
+                or old_io is None
+                or not old_io.describes(io)
+            ):
+                self._queue_io(path, io.endpoint)
+        self._discover_local_io(sender, record)
         if (
             self.configuration is not None
             and self.configuration.schedules
@@ -549,7 +588,8 @@ class _Watch:
         self,
         stream: BridgeStream | OrderedNormalReads,
         path: NativePath,
-        before: IoDirectory,
+        endpoint: IoEndpoint,
+        before: IoDirectory | None,
         epoch: int,
         source: NativeAddress,
         timeout: float,
@@ -578,10 +618,10 @@ class _Watch:
             await self._wait_io_evidence(path, epoch, batch)
             return batch
 
-        endpoint = before.endpoint
         answer = await request(NativeStatusQuery.io(endpoint.subnet, endpoint.node))
         if not await self._wait_io_evidence(path, epoch, answer):
             return answer.tx_result
+        self.io_attempted.add(path)
         previous = self.io_reads.get((path, endpoint))
         read = await recover_io_directory(
             answer,
@@ -640,6 +680,7 @@ class _Watch:
             except ExpiredReadError:
                 self.count += 1
                 if isinstance(block, IoEndpoint) and epoch == self.epochs.get(path, 0):
+                    self.io_attempted.add(path)
                     self.io_pending.discard((path, block))
 
     async def _probe_master(
@@ -732,10 +773,18 @@ class _Watch:
             result = observation.tx_result
         elif isinstance(block, IoEndpoint):
             before = self.state.io_directory(path, block)
-            if before is None:
+            if before is None and self._local_io_candidate(path) != block:
                 self.io_pending.discard((path, block))
                 return
-            result = await self._read_io(stream, path, before, epoch, source, timeout)
+            result = await self._read_io(
+                stream,
+                path,
+                block,
+                before,
+                epoch,
+                source,
+                timeout,
+            )
         elif isinstance(block, SnowRead):
             if self.snow is None or (query := self.snow.query(path, block)) is None:
                 return

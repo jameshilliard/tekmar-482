@@ -15,16 +15,28 @@ from ._native_payloads.io import (
 from ._native_payloads.queries import NativeStatusQuery, StatusRequest
 from .constants import DEFAULT_BLOCK_TIMEOUT
 from .native import NativeAddress
+from .native_identity import NativeIdentity
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
 
     from .native import NativeFrame
-    from .native_identity import NativeIdentity
     from .native_status import NativeStatusBatch
     from .raw import NativeReader
 
 _HOST = NativeAddress(0, 0)
+
+
+def local_io_endpoint(identification: NativeFrame | None) -> IoEndpoint | None:
+    """Suggest a read from a fresh accepted block-zero frame, not a channel."""
+    if identification is None or identification.node not in range(1, 32):
+        return None
+    identity = NativeIdentity.from_report(identification.decoded)
+    # The 553 answers at its unlocked wire address. Neither a locked node
+    # nor a terminal diagram for another model establishes its endpoint.
+    if identity and (product := identity.product) and product.model == "553":
+        return IoEndpoint(identification.subnet, identification.node)
+    return None
 
 
 @dataclass(frozen=True, slots=True)

@@ -8,6 +8,7 @@ from tekmar_482 import (
     IoDirectory,
     IoDirectoryRead,
     IoEndpoint,
+    NativeAddress,
     NativeBlockBatch,
     NativeBlockQuery,
     NativeFrame,
@@ -36,6 +37,7 @@ from tests.native_fixtures import block, frame, identity
 
 END = IoEndpoint(0x43, 0xA5)
 OTHER = IoEndpoint(0x43, 0x85)
+LOCAL = IoEndpoint(PATH.subnet, PATH.node)
 NEIGHBOR = NativePath(PATH.port, PATH.subnet, PATH.node + 1)
 LABEL = bytes.fromhex("410042caff00")
 ACK = TxResult(PATH.port, TxStatus.ACK)
@@ -82,6 +84,12 @@ def channel_reply(channel: int, *, kind: int = 1) -> NativeStatusBatch:
     )
     assert c.observe(value(channel, 1, mid=0x1F3, kind=kind))
     return c.batch(PATH.port, ACK)
+
+
+def locked_identity() -> NativeFrame:
+    report = identity(105102)
+    msg = replace(report.message, source=NativeAddress(PATH.subnet, PATH.node | 32))
+    return replace(report, body=msg.to_bytes())
 
 
 class IoDirectoryTests(unittest.TestCase):
@@ -261,10 +269,10 @@ class IoExchangeTests(unittest.IsolatedAsyncioTestCase):
         wire: asyncio.Queue[Packet] = asyncio.Queue()
         await self.enterAsyncContext(self.stream.receiving(wire.get))
 
-    async def send(self) -> NativeMessage:
+    async def send(self, port: int = PATH.port) -> NativeMessage:
         async with asyncio.timeout(2):
             data = await self.tx.get()
-        assert data[:2] == bytes([1, PATH.port])
+        assert data[:2] == bytes([1, port])
         return NativeMessage.from_bytes(data[2:])
 
     def rx(self, f: NativeFrame) -> None:
@@ -275,8 +283,8 @@ class IoExchangeTests(unittest.IsolatedAsyncioTestCase):
             ),
         )
 
-    def ack(self) -> None:
-        self.stream.feed(Packet(1, bytes([2, PATH.port, TxStatus.ACK])))
+    def ack(self, port: int = PATH.port) -> None:
+        self.stream.feed(Packet(1, bytes([2, port, TxStatus.ACK])))
 
     async def _reply_with_553_configuration(self) -> None:
         for b in (0, 3, 4, 0x97):
@@ -304,8 +312,10 @@ class IoExchangeTests(unittest.IsolatedAsyncioTestCase):
             ),
         )
         await self._reply_with_553_configuration()
-        self.rx(value(1, 1, endpoint=local))
-        assert (await self.send()).message_id == 0x1F6
+        request = await self.send()
+        assert request.message_id == 0x1F6 and request.payload == bytes(
+            (local.subnet, local.node),
+        )
         self.ack()
         for ch in range(5):
             self.rx(discover(ch, 6, endpoint=local))
@@ -335,7 +345,6 @@ class IoExchangeTests(unittest.IsolatedAsyncioTestCase):
             ),
         )
         await self._reply_with_553_configuration()
-        self.rx(value(1, 1, endpoint=local))
         assert (await self.send()).message_id == 0x1F6
         self.ack()
         for ch in range(5):
@@ -348,6 +357,72 @@ class IoExchangeTests(unittest.IsolatedAsyncioTestCase):
         result = await task
         assert result.state.io_directory(PATH, local) is None
         assert not result.latest_statuses and self.tx.empty()
+
+    async def test_automatic_watch_prefers_the_ports_own_subnet_over_a_mirror(
+        self,
+    ) -> None:
+        direct = replace(PATH, port=2)
+        task = asyncio.create_task(
+            watch_native(
+                self.stream,
+                ports=(PATH.port, direct.port),
+                duration=0.25,
+                timeout=0.08,
+                schedules=False,
+                thermostat_targets=False,
+                thermostat_sensors=False,
+                plant_settings=False,
+                setpoint_settings=False,
+            ),
+        )
+        self.rx(frame(0x3FF, b"", NativePath(PATH.port, PATH.subnet + 8, 0)))
+        for path in (PATH, direct):
+            for b in (3, 4, 0x97):
+                self.rx(block(b, b"\0", path))
+            self.rx(identity(105102, path=path))
+        # Both copies are already known when the actual local subnet appears.
+        self.rx(frame(0x3FF, b"", NativePath(direct.port, direct.subnet, 0)))
+        request = await self.send(direct.port)
+        assert (request.message_id, request.payload) == (
+            0x1F6,
+            bytes([PATH.subnet, PATH.node]),
+        )
+        self.ack(direct.port)
+        for channel in range(6):
+            self.rx(discover(channel, 6, endpoint=LOCAL, path=direct))
+        result = await task
+        ((path, directory),) = result.state.io_directories
+        assert path == direct and directory.complete
+        assert result.reads == 1 and self.tx.empty()
+
+    async def test_silent_local_io_probe_does_not_create_channels_or_repeat(
+        self,
+    ) -> None:
+        task = asyncio.create_task(
+            watch_native(
+                self.stream,
+                [PATH],
+                duration=0.25,
+                timeout=0.04,
+                schedules=False,
+                thermostat_targets=False,
+                thermostat_sensors=False,
+                plant_settings=False,
+                setpoint_settings=False,
+            ),
+        )
+        await self._reply_with_553_configuration()
+        assert (await self.send()).message_id == 0x1F6
+        self.ack()
+        # A valid frame on the port from another source is not an answer.
+        self.rx(discover(0, 1, path=NEIGHBOR, endpoint=LOCAL))
+        await asyncio.sleep(0.08)
+        self.rx(identity(105102))
+        result = await task
+        assert not result.state.io_directories
+        assert result.reads == 5 and self.tx.empty()
+        (only,) = result.latest_statuses
+        assert not only.answered
 
     async def test_read_directory_supplements_a_missing_known_sparse_channel(
         self,
@@ -467,7 +542,7 @@ class IoExchangeTests(unittest.IsolatedAsyncioTestCase):
     ) -> None:
         local = IoEndpoint(PATH.subnet, PATH.node)
         inv = NativeInventory()
-        inv.observe(value(0, 1, endpoint=local))
+        inv.observe(identity(105102))
         info = NativeBlockBatch(
             PATH.port,
             NativeBlockQuery(PATH.address, 0),
@@ -488,7 +563,11 @@ class IoExchangeTests(unittest.IsolatedAsyncioTestCase):
                     on_status=statuses.append,
                 ),
             )
-            assert (await self.send()).message_id == 0x1F6
+            request = await self.send()
+            assert (request.message_id, request.payload) == (
+                0x1F6,
+                bytes((local.subnet, local.node)),
+            )
             self.ack()
             for ch in range(5):
                 self.rx(discover(ch, 6, endpoint=local))
@@ -502,6 +581,26 @@ class IoExchangeTests(unittest.IsolatedAsyncioTestCase):
         assert statuses == [directory_read.discovery, *directory_read.supplemental]
         assert result.io_directories == ((PATH, directory_read.directory),)
         assert directory_read.directory.complete
+
+    async def test_snapshot_does_not_guess_from_a_seed_locked_node_or_other_model(
+        self,
+    ) -> None:
+        inv = NativeInventory()
+        inv.observe(identity(105102))
+        for report in (None, locked_identity(), identity(105801)):
+            with self.subTest(report=report):
+                info = NativeBlockBatch(
+                    PATH.port,
+                    NativeBlockQuery(PATH.address, 0),
+                    ACK,
+                    (report,) if report is not None else (),
+                )
+                with patch(
+                    "tekmar_482.native_snapshot.read_native_devices",
+                    return_value=(info,),
+                ):
+                    snapshot = await read_native_snapshot(self.stream, inv.devices)
+                assert not snapshot.statuses and self.tx.empty()
 
     async def test_active_watch_queries_once_then_rediscovery_only_on_new_evidence(
         self,

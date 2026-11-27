@@ -187,6 +187,55 @@ _SETPOINT = NativeAddress(0x31, 7)
 
 @unittest.skipUnless(_IMAGE, "set TEKMAR_TEST_FLASH_IMAGE to run the ARM interop suite")
 class FirmwareInteropTests(unittest.IsolatedAsyncioTestCase):
+    async def test_normal_watch_discovers_io_after_identifying_a_quiet_553(
+        self,
+    ) -> None:
+        path = NativePath(3, _THERMOSTAT.subnet, _THERMOSTAT.node)
+        endpoint = IoEndpoint(path.subnet, path.node)
+        script = (
+            _block(3, "23 10000000", "0000", "6e723149 00003f 8e9a01 c60402"),
+            _block(3, "23 10000000", "0300", "6e723144 030001 01"),
+            _block(3, "23 10000000", "0400", "6e723143 040000"),
+            _block(3, "23 10000000", "9700", "6e723143 970000"),
+            (
+                3,
+                "1f600002 2305",
+                tuple(
+                    f"1f52314d 2305 {ch:02x}06 533100000000 01 0100" for ch in range(6)
+                ),
+            ),
+        )
+        complete = asyncio.Event()
+
+        def observe(updated: NativePath, state: NativeState) -> None:
+            if (
+                updated == path
+                and (directory := state.io_directory(path, endpoint))
+                and directory.complete
+            ):
+                assert {c.sample.channel for c in directory.channels} == set(range(6))
+                complete.set()
+
+        async with (
+            _gateway(script) as manager,
+            manager.native_session([path.port]) as capture,
+            asyncio.TaskGroup() as tasks,
+        ):
+            watch = tasks.create_task(
+                watch_native(
+                    capture,
+                    [path],
+                    schedules=False,
+                    thermostat_targets=False,
+                    thermostat_sensors=False,
+                    plant_settings=False,
+                    setpoint_settings=False,
+                    on_change=observe,
+                ),
+            )
+            await complete.wait()
+            watch.cancel()
+
     async def test_io_recovery_requests_only_the_missing_channel_in_normal_mode(
         self,
     ) -> None:

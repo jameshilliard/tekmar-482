@@ -870,7 +870,10 @@ to a block bitmap or derive it from a thermostat display address. The
 same channel number can exist on multiple endpoints, peers and physical
 ports. The CLI's `dump` and `read_native_snapshot` query endpoints seen
 during discovery or explicitly supplied in `NativeDevice.io_endpoints`.
-A node-zero I/O reporter needs no block request.
+If a fresh identification reply establishes an unlocked 553 with no known
+endpoint, the scan tries its wire address once. A node-zero I/O reporter
+needs no block request. Other models and locked 553 nodes still require
+an observed or explicit I/O endpoint.
 
 `frame.io_report` provides the typed value, raw type ID and discovery
 label bytes. `IoDirectory.from_batch(answer)` describes one discovery
@@ -889,6 +892,11 @@ I/O channel write.
 
 An active `watch-native` discovers the first time it sees an I/O endpoint
 and can rediscover when a later report supplies a new channel, type or count.
+It can also start from fresh 553 identification without an I/O announcement.
+Without explicit device paths it prefers the port claiming the full subnet;
+a sole observed path with no conflicting master announcement also works.
+An ambiguous route needs more evidence or an explicit path. Silence never
+creates channels or starts periodic discovery.
 For a partial directory, it can send one explicit read per missing ID from
 a previously complete directory on that route, or from a known model's
 local terminal layout when the advertised count and observed IDs agree.
