@@ -38,7 +38,7 @@ if TYPE_CHECKING:
     from tekmar_482 import NativeState
 
 _CAP = "0101f04b54"
-_SUPPORT = "0401f04b54020005bf3e"
+_SUPPORT = "0401f04b54020005bf2e"  # Ordered active reads without subnet discovery.
 _ID = "03354000000000000000"
 _MODE = "03354000000003000000"
 _PLANT = 104103

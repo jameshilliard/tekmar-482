@@ -707,13 +707,20 @@ class FirmwareInteropTests(unittest.IsolatedAsyncioTestCase):
         assert dhw and dhw.report(0x24) and dhw.report(0x02) is None
         assert reset and reset.report(0x02) and reset.report(0x24) is None
 
-    async def test_plant_watch_reads_topology_when_it_attaches_after_startup(
+    async def test_cold_watch_finds_a_quiet_thermostat_from_the_master_subnet(
         self,
     ) -> None:
         path = NativePath(3, 0x45, 0)
+        quiet = NativePath(3, 0x45, 5)
         script = (
             (3, "32700000", ("72f45002 fa05", "7cf45009 bc07 00c0 9828 2211 fe")),
             (3, "3f700000", ("7ff45001 45",)),
+            (
+                3,
+                "6d70000b 0000 45 ffffff7f 00000000",
+                ("6e745149 00003f 9d8f01 9c0402",),
+            ),
+            _block(3, "45 10000000", "0300", "6e745144 030001 01"),
         )
         observed: asyncio.Future[NativeState] = (
             asyncio.get_running_loop().create_future()
@@ -721,8 +728,9 @@ class FirmwareInteropTests(unittest.IsolatedAsyncioTestCase):
 
         def change(peer: NativePath, state: NativeState) -> None:
             if (
-                peer == path
-                and state.has_master_announcement(path.port)
+                peer == quiet
+                and (climate := state.climate(quiet)) is not None
+                and climate.setup.mode is ThermostatMode.HEAT
                 and not observed.done()
             ):
                 observed.set_result(state)
@@ -732,7 +740,15 @@ class FirmwareInteropTests(unittest.IsolatedAsyncioTestCase):
             manager.native_session((3,)) as session,
             asyncio.TaskGroup() as tasks,
         ):
-            watch = tasks.create_task(watch_native(session, on_change=change))
+            watch = tasks.create_task(
+                watch_native(
+                    session,
+                    schedules=False,
+                    thermostat_targets=False,
+                    thermostat_sensors=False,
+                    on_change=change,
+                ),
+            )
             # Seed unsolicited loop telemetry on the running Normal link.
             outdoor = await manager.read_status(
                 3,

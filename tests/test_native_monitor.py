@@ -20,7 +20,8 @@ if TYPE_CHECKING:
     from tekmar_482 import NativeFrame
 
 _CAP = "0101f04b54"
-_SUPPORT = "0401f04b54020005bf3e"
+_SUPPORT = "0401f04b54020005bf2e"  # Only the targeted reads used by these scripts.
+_SCAN_SUPPORT = "0401f04b54020005bf3e"
 _TRACE = "010bf04b54"
 _COUNTS = "00" * 40
 _ID = "03354000000000000000"
@@ -35,6 +36,7 @@ class Gateway:
     ) -> None:
         self.reader = reader
         self.writer = writer
+        self.support = _SUPPORT
 
     async def expect(self, request: str) -> None:
         data = serialize(Packet(6, bytes.fromhex(request)))
@@ -48,11 +50,11 @@ class Gateway:
         self.send(reply)
 
     async def setup(self, mask: str) -> None:
-        await self.exchange(_CAP, _SUPPORT)  # Application identification.
-        await self.exchange(_CAP, _SUPPORT)  # Normal peer capture features.
+        await self.exchange(_CAP, self.support)  # Application identification.
+        await self.exchange(_CAP, self.support)  # Normal peer capture features.
         await self.exchange(_TRACE, "040bf04b5400" + _COUNTS)
         await self.exchange("000bf04b54" + mask, "030bf04b54" + mask)
-        await self.exchange(_CAP, _SUPPORT)  # Ordered active reads.
+        await self.exchange(_CAP, self.support)  # Ordered active reads.
 
     def report(self, packet: NativeFrame) -> None:
         self.send(
@@ -61,7 +63,7 @@ class Gateway:
         )
 
     async def request(self, key: str) -> None:
-        await self.exchange(_CAP, _SUPPORT)
+        await self.exchange(_CAP, self.support)
         await self.expect("010ff04b54" + key)
 
     async def identify(self, key: str, product: int, path: NativePath) -> None:
@@ -73,8 +75,14 @@ class Gateway:
 
     async def request_master(self, port: int) -> None:
         key = f"{port:02x}000000f703"
-        await self.exchange(_CAP, _SUPPORT)
+        await self.exchange(_CAP, self.support)
         await self.exchange("0110f04b54" + key, "0410f04b54" + key)
+
+    async def discover(self, port: int, subnet: int) -> None:
+        key = f"{port:02x}{subnet:02x}"
+        await self.exchange(_CAP, self.support)
+        await self.exchange("0113f04b54" + key, "0413f04b54" + key)
+        self.send(f"0213f04b54{port:02x}00")
 
     def complete_master(self, packet: NativeFrame, *, traced: bool = True) -> None:
         if traced:
@@ -130,6 +138,58 @@ class NativeMonitorTests(unittest.IsolatedAsyncioTestCase):
             "127.0.0.1",
             server.sockets[0].getsockname()[1],
         )
+
+    async def test_subnet_scan_identifies_quiet_nodes_and_rearms_only_after_loss(
+        self,
+    ) -> None:
+        master = NativePath(3, 0x53, 0)
+        quiet = NativePath(master.port, master.subnet, 5)
+        claim = frame(0x3FF, b"", master)
+        monitor = NativeMonitor(self.endpoint, ports=[2, 3])
+        async with asyncio.TaskGroup() as tasks, asyncio.timeout(2):
+            running = tasks.create_task(monitor.run())
+            gateway = await self.accepted.get()
+            gateway.support = _SCAN_SUPPORT
+            await gateway.setup("0c")
+            gateway.report(claim)
+            await gateway.discover(master.port, master.subnet)
+            assert monitor.state.identity(quiet) is None
+            gateway.report(identity(200003, path=quiet))
+            await wait_for_product(monitor, 200003, quiet)
+            gateway.send("05040100000000000000", packet_type=0xD0)  # Only port 2.
+            gateway.report(claim)
+            with self.assertRaises(TimeoutError):
+                async with asyncio.timeout(0.04):
+                    await gateway.reader.read(1)
+
+            gateway.send("05080100000000000000", packet_type=0xD0)
+            gateway.report(claim)
+            await gateway.discover(master.port, master.subnet)
+            assert monitor.state.identity(quiet) is None
+            running.cancel()
+            await gateway.restore()
+
+    async def test_competing_subnet_headers_do_not_trigger_a_queued_scan(self) -> None:
+        master = NativePath(3, 0x53, 0)
+        other = NativePath(3, 0x62, 0)
+        monitor = NativeMonitor(self.endpoint, ports=[3])
+        async with asyncio.TaskGroup() as tasks, asyncio.timeout(2):
+            running = tasks.create_task(monitor.run())
+            gateway = await self.accepted.get()
+            gateway.support = _SCAN_SUPPORT
+            await gateway.setup("08")
+            gateway.report(frame(0x3CF, _LOOP, master))
+            await gateway.request_master(3)
+            claim = frame(0x3FF, bytes([master.subnet]), master)
+            gateway.report(claim)
+            gateway.report(frame(0x3FF, b"", other))
+            gateway.complete_master(claim, traced=False)
+            with self.assertRaises(TimeoutError):
+                async with asyncio.timeout(0.04):
+                    await gateway.reader.read(1)
+            assert monitor.state.master_subnets(3) == (0x53, 0x62)
+            running.cancel()
+            await gateway.restore()
 
     async def test_reconnect_clears_old_observations_and_reuses_new_connection(
         self,

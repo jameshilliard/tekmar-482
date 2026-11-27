@@ -22,7 +22,7 @@ if TYPE_CHECKING:
     from ._native_payloads.queries import NativeStatusQuery
     from .native import NativeBlockQuery
     from .native_status import NativeStatusBatch
-    from .raw import NativeBlockBatch
+    from .raw import NativeBlockBatch, TxResult
 
 type ObservationStream = BridgeStream | NormalPeerCapture | NormalNativeSession
 type Capture = BridgeStream | NormalPeerCapture
@@ -39,6 +39,7 @@ class ExpiredReadError(Exception):
 @dataclass(frozen=True, slots=True)
 class OrderedNormalReads:
     session: NormalNativeSession
+    features: BridgeFeature
 
     async def _ordered[T](self, port: int, read: Callable[[], Awaitable[T]]) -> T:
         try:
@@ -56,6 +57,23 @@ class OrderedNormalReads:
             raise ExpiredReadError from None
         await self.session.peers.wait_consumed()
         return batch
+
+    async def discover_subnet(
+        self,
+        port: int,
+        subnet: int,
+        *,
+        timeout: float,
+    ) -> TxResult | None:
+        return await self._ordered(
+            port,
+            lambda: self.session.management.discover_subnet(
+                port,
+                subnet,
+                timeout=timeout,
+                wait_for_edits=True,
+            ),
+        )
 
     async def read_block_group(
         self,
@@ -132,5 +150,5 @@ async def observation(
         ):
             msg = "active Normal observation requires ordered native results"
             raise ProtocolError(msg)
-        return capture, OrderedNormalReads(stream)
+        return capture, OrderedNormalReads(stream, caps.features)
     return stream, stream

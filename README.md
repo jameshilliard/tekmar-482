@@ -826,8 +826,14 @@ keeps I/O observation passive while other requested reads continue.
 **Watch several devices on one connection.** With no `--device`, `watch-native`
 automatically identifies peers that report on its captured ports. Repeat
 `--port` to limit the watch to specific physical lines. It reads identity
-at the observed address, not every possible address, and does not merge
-copies on different ports even when their products and revisions match.
+at the observed address and does not merge copies on different ports even
+when their products and revisions match. When Normal firmware supports
+subnet discovery, a fresh, unambiguous MasterPresent header also prompts
+one bitmap request for identity on that port and subnet. Quiet peers can
+answer without first sending telemetry. A link outcome is not an inventory;
+silence or repeated headers do not restart the scan. A capture gap retires
+the affected scan; new master evidence can start another. Fixed-path, Raw
+and passive watches do not send these automatic subnet probes.
 A node-zero report can supply telemetry but has no addressed block slot.
 Use `--device` instead to explicitly watch a path, even before it speaks.
 Ordinary monitoring never sends a setting update.

@@ -734,19 +734,22 @@ class BridgeManagement(_Management):
         subnet: int,
         *,
         timeout: float = DEFAULT_BLOCK_TIMEOUT,
+        wait_for_edits: bool = False,
     ) -> TxResult | None:
         """Attempt one identity broadcast. Only peer RX identifies respondents."""
         if port not in TN4_PORTS:
             msg = "expected a physical port for discovery"
             raise ValueError(msg)
         key = bytes((port, NativeTargets(subnet).subnet))
-        self._check_edit_idle(port)
-        async with self._normal_events(
-            BridgeMethod.NORMAL_DISCOVER,
-            BridgeFeature.NORMAL_DISCOVER,
-            key,
-            timeout,
-        ) as receive:
+        async with (
+            self._reader(port, wait_for_edits=wait_for_edits),
+            self._normal_events(
+                BridgeMethod.NORMAL_DISCOVER,
+                BridgeFeature.NORMAL_DISCOVER,
+                key,
+                timeout,
+            ) as receive,
+        ):
             return self._link_result(port, await receive())
 
     async def _announce(

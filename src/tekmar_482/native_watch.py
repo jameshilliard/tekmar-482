@@ -24,7 +24,9 @@ from ._observation import (
 )
 from ._snow_watch import SnowRead, SnowWatch
 from .constants import TN4_PORTS
+from .management import BridgeFeature
 from .native import NativeAddress, NativeFrame
+from .native_discovery import NativeProbe
 from .native_plant_registers import PLANT_REGISTERS
 from .native_setpoint import SETPOINT_BLOCKS
 from .native_state import (
@@ -55,7 +57,7 @@ _MASTER_QUERY = NativeStatusQuery(StatusRequest.MASTER)
 _UPDATE_HEADER = 4
 type _Read = int | SnowRead | BlockKey | IoEndpoint
 type _DeviceJob = tuple[NativePath, _Read]
-type _Job = _DeviceJob | _MasterProbe
+type _Job = _DeviceJob | _MasterProbe | _SubnetProbe
 type _ChannelHint = tuple[int, int] | None
 type _ModeHint = tuple[int, _ChannelHint, _ChannelHint]
 
@@ -109,11 +111,18 @@ class NativeWatchResult:
     reads: int
     latest_blocks: tuple[NativeBlockBatch, ...]
     latest_statuses: tuple[NativeStatusBatch, ...]
+    subnet_probes: tuple[NativeProbe, ...]
 
 
 @dataclass(frozen=True, eq=False, slots=True)
 class _MasterProbe:
     port: int
+
+
+@dataclass(frozen=True, eq=False, slots=True)
+class _SubnetProbe:
+    port: int
+    subnet: int
 
 
 class _PortQueue:
@@ -124,6 +133,8 @@ class _PortQueue:
         self.master_probe: _MasterProbe | None = None
         self.master_answer: NativeStatusBatch | None = None
         self.has_master_map = False
+        self.subnet_jobs: dict[int, _SubnetProbe] = {}
+        self.subnet_results: dict[int, NativeProbe] = {}
 
     def add(
         self,
@@ -148,9 +159,20 @@ class _PortQueue:
         self.master_answer = None
         self.has_master_map = False
 
+    def request_subnet(self, subnet: int) -> None:
+        if subnet not in self.subnet_jobs:
+            job = self.subnet_jobs[subnet] = _SubnetProbe(self.port, subnet)
+            self.add(job, urgent=True)
+
+    def reset_subnets(self) -> None:
+        for job in self.subnet_jobs.values():
+            self.jobs.pop(job, None)
+        self.subnet_jobs.clear()
+        self.subnet_results.clear()
+
     def discard(self, path: NativePath) -> None:
         self.jobs = OrderedDict.fromkeys(
-            job for job in self.jobs if isinstance(job, _MasterProbe) or job[0] != path
+            job for job in self.jobs if not isinstance(job, tuple) or job[0] != path
         )
 
     async def take(self) -> _Job:
@@ -229,6 +251,7 @@ class _Watch:
         self.ports = ports
         self.discover = active and paths is None
         self.discover_plant = self.discover and plant_settings
+        self.discover_subnets = False
         self.enrolled: set[NativePath] = set()
         self.stale_after = stale_after
         self.deadlines: OrderedDict[NativePath, float] = OrderedDict()
@@ -301,6 +324,10 @@ class _Watch:
             queue.has_master_map = present
 
     def _observe_plant(self, frame: NativeFrame) -> None:
+        if self.discover_subnets and frame.message_id == MASTER_PRESENT:
+            subnets = self.state.master_subnets(frame.port)
+            if len(subnets) == 1:
+                self.queues[frame.port].request_subnet(subnets[0])
         if not self.discover_plant:
             return
         if frame.message_id in (MASTER_PRESENT, TAKING_ADDRESS) or (
@@ -387,6 +414,7 @@ class _Watch:
         for port, queue in self.queues.items():
             if record.affects(port):
                 queue.reset_master()
+                queue.reset_subnets()
         known = set(changed)
         for path in sorted(known | (self.paths or set()) | self.enrolled):
             if record.affects(path.port):
@@ -545,6 +573,10 @@ class _Watch:
             if isinstance(job, _MasterProbe):
                 await self._probe_master(stream, queue, job, source, timeout)
                 continue
+            if isinstance(job, _SubnetProbe):
+                if isinstance(stream, OrderedNormalReads):
+                    await self._probe_subnet(stream, queue, job, timeout)
+                continue
             path, block = job
             epoch = self.epochs.get(path, 0)
             try:
@@ -596,6 +628,39 @@ class _Watch:
             queue.master_answer = answer
         if answer.tx_result is None and not isinstance(stream, OrderedNormalReads):
             await stream.wait_transmit_idle(job.port)
+
+    async def _probe_subnet(
+        self,
+        stream: OrderedNormalReads,
+        queue: _PortQueue,
+        job: _SubnetProbe,
+        timeout: float,
+    ) -> None:
+        if queue.subnet_jobs.get(job.subnet) is not job:
+            return
+        if self.state.master_subnets(job.port) != (job.subnet,):
+            del queue.subnet_jobs[job.subnet]
+            return
+        try:
+            outcome = await stream.discover_subnet(
+                job.port,
+                job.subnet,
+                timeout=timeout,
+            )
+        except DeferredReadError:
+            if queue.subnet_jobs.get(job.subnet) is job:
+                queue.add(job, urgent=True)
+            return
+        except ExpiredReadError:
+            outcome = None
+        self.count += 1
+        if queue.subnet_jobs.get(job.subnet) is job:
+            # A link result cannot add any devices to observed state.
+            queue.subnet_results[job.subnet] = NativeProbe(
+                job.port,
+                job.subnet,
+                outcome,
+            )
 
     async def _probe_one(
         self,
@@ -706,6 +771,11 @@ async def _run_watch(
         watch.ports,
         source,
     )
+    watch.discover_subnets = (
+        watch.discover
+        and isinstance(reader, OrderedNormalReads)
+        and BridgeFeature.NORMAL_DISCOVER in reader.features
+    )
 
     async def receive() -> None:
         loop = asyncio.get_running_loop()
@@ -774,6 +844,8 @@ async def watch_native(
     Without explicit paths, observe ports selected by the caller or capture.
     Synchronous callbacks may inspect immutable snapshots in the current state.
     Passive mode (source=None) never sends. Use a new watch on each connection.
+    Active Normal watches without explicit paths also probe each observed
+    unambiguous master subnet once when the gateway supports it.
     An optional stale_after timeout marks a silent path unknown without sending.
     Each Normal worker waits for its own occupied slot; an admitted read is
     never replayed after a timeout.
@@ -824,6 +896,9 @@ async def watch_native(
                 for q in watch.queues.values()
                 if q.master_answer is not None
             ),
+        ),
+        tuple(
+            probe for q in watch.queues.values() for probe in q.subnet_results.values()
         ),
     )
 

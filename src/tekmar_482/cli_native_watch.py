@@ -400,6 +400,15 @@ def _watch_summary(
         {
             "completed_reads": result.reads,
             "capture_records_dropped": state.dropped,
+            "subnet_probes": [
+                {
+                    "port": probe.port,
+                    "subnet": probe.subnet,
+                    "tx_status": probe.result.status.name if probe.result else None,
+                    "tx_reason": probe.result.reason if probe.result else None,
+                }
+                for probe in result.subnet_probes
+            ],
             "observed_paths": [asdict(p) for p in state.paths],
             "missing_identities": unidentified,
             "missing_mode_reports": no_mode,
