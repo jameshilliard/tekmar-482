@@ -58,6 +58,17 @@ state, native frames and receiver summaries. See the firmware's
 [frame catalog](https://github.com/jameshilliard/tekmar-482-firmware/blob/master/docs/tn4-frames.md)
 and [binary UART protocol](https://github.com/jameshilliard/tekmar-482-firmware/blob/master/docs/tpck-bridge.md).
 
+`NativeMessage.destination_nodes` lists explicit native destinations for
+block operations and the seven stage demand, purge and override commands.
+An empty tuple means the bitmap selected no nodes; `None` means the message
+doesn't establish a native destination. Group IDs, I/O payload endpoints
+and RH selectors are not assumed to be native node addresses.
+For a stage command, `message.stage_selection` exposes its subnet, selected
+nodes, stage bit and raw output level. To construct (not send) one, use
+`NativeMessage.stage_command(StageCommand.START_PURGE, selection, source=..., priority=...)`
+with a `StageSelection`. The wire node mask has 24 bits, not 31. Neither an
+observed command nor a link ACK is a report of the actual output state.
+
 Discovery reports receive paths, **not a count of physical devices**:
 a plant controller can forward the same identity onto multiple lines.
 An unknown model or a missing reply never promotes a link ACK to an

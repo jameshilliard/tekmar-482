@@ -2,7 +2,7 @@
 
 from collections.abc import Mapping
 from dataclasses import dataclass
-from enum import Enum
+from enum import Enum, IntEnum
 
 from .codec import Fields, Reader, fahrenheit, status_flags, temp
 
@@ -21,6 +21,49 @@ SETUP_SLOTS = {0x33: range(1, 5), 0x34: range(5, 8)}
 
 def subnet_fields(value: int) -> Fields:
     return {"water_subnet": value, "water_bus": value & 7, "water_control": value >> 3}
+
+
+class StageCommand(IntEnum):
+    STAGE_HEAT_DEMAND_REQUEST = 0x35f
+    END_PURGE = 0x397
+    START_PURGE = 0x39f
+    START_OVERRIDE_ON = 0x3a7
+    END_OVERRIDE_OFF = 0x3af
+    END_OVERRIDE_ON = 0x3b7
+    START_OVERRIDE_OFF = 0x3bf
+
+
+@dataclass(frozen=True, slots=True)
+class StageSelection:
+    """483 NodeMaskIn is 24 bits, unlike a BlockRequest's NodeMask32In."""
+
+    subnet: int
+    stage: int
+    output_level: int
+    nodes_mask: int
+
+    def __post_init__(self) -> None:
+        for name, value, width in (("subnet", self.subnet, 8), ("stage", self.stage, 1),
+                                   ("output_level", self.output_level, 7), ("nodes_mask", self.nodes_mask, 24)):
+            if not isinstance(value, int) or not 0 <= value < 1 << width:
+                raise ValueError(f"{name} must be a {width}-bit unsigned integer")
+
+    @classmethod
+    def read(cls, r: Reader) -> "StageSelection":
+        subnet, flags = r.take(2)
+        return cls(subnet, flags >> 7, flags & 0x7f, int.from_bytes(r.take(3), "little"))
+
+    @property
+    def nodes(self) -> tuple[int, ...]:
+        return tuple(i + 1 for i in range(24) if self.nodes_mask & (1 << i))
+
+    @property
+    def payload(self) -> bytes:
+        return bytes((self.subnet, self.stage << 7 | self.output_level)) + self.nodes_mask.to_bytes(3, "little")
+
+    def fields(self) -> Fields:
+        return {"target_subnet": self.subnet, "output_level": self.output_level, "stage": self.stage,
+                "target_nodes_mask": f"0x{self.nodes_mask:06x}"}
 
 
 @dataclass(frozen=True, slots=True)

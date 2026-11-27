@@ -52,6 +52,7 @@ from ._native_payloads.thermostat import (
     HumidityStatus,
     SlabStatus,
 )
+from ._native_payloads.water import StageCommand, StageSelection
 from .constants import TN4_PORTS
 from .units import celsius_to_degh, degh_to_celsius
 
@@ -65,6 +66,9 @@ if TYPE_CHECKING:
 
 _HEADER = 4
 _MAX_PAYLOAD = 63
+_BLOCK_NODE_MASK = 0x1F
+_BLOCK_REQUEST_PREFIX = 7
+_BLOCK_UPDATE_PREFIX = 4
 _REQUEST = 0x2D7
 _UPDATE = 0x2DF
 _REPORT = 0x2E7
@@ -183,6 +187,19 @@ class NativeMessage:
         return cls(query.kind, source, query.payload, priority=0)
 
     @classmethod
+    def stage_command(
+        cls,
+        command: StageCommand,
+        selection: StageSelection,
+        *,
+        source: NativeAddress,
+        priority: int,
+    ) -> Self:
+        """Build one native stage command without sending it or assuming a response."""
+        require_enum(command, StageCommand)
+        return cls(command, source, selection.payload, priority)
+
+    @classmethod
     def scene_report(cls, scene: NativeScene, *, source: NativeAddress) -> Self:
         """Announce a scene to one line at the 483's priority and duration."""
         require_enum(scene, NativeScene)
@@ -283,6 +300,34 @@ class NativeMessage:
         """Return the decoder's native message name, or None for an unknown ID."""
         decoder = DECODERS.get(self.message_id)
         return decoder[0] if decoder is not None else None
+
+    @property
+    def stage_selection(self) -> StageSelection | None:
+        """Stage/purge/override targets, not a report of the device output."""
+        if self.message_id not in StageCommand:
+            return None
+        try:
+            return StageSelection.read(Reader(self.payload))
+        except ShortPayload:
+            return None
+
+    @property
+    def destination_nodes(self) -> tuple[NativeAddress, ...] | None:
+        """Explicit native node targets in wire order, or None if not established."""
+        data = self.payload
+        if self.message_id == _REQUEST and len(data) >= _BLOCK_REQUEST_PREFIX:
+            mask = int.from_bytes(data[3:_BLOCK_REQUEST_PREFIX], "little")
+            return tuple(
+                NativeAddress(data[2], i + 1)
+                for i in range(_BLOCK_NODE_MASK)
+                if mask & (1 << i)
+            )
+        if self.message_id == _UPDATE and len(data) >= _BLOCK_UPDATE_PREFIX:
+            node = data[1] & _BLOCK_NODE_MASK
+            return (NativeAddress(data[0], node),) if node else None
+        if (selection := self.stage_selection) is not None:
+            return tuple(NativeAddress(selection.subnet, n) for n in selection.nodes)
+        return None
 
     @property
     def decoded(self) -> dict[str, str | int | float]:

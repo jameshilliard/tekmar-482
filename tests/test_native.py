@@ -11,11 +11,61 @@ from tekmar_482 import (
     ScheduleProfile,
     SnowmeltBlock,
     SnowmeltSetpoint,
+    StageCommand,
+    StageSelection,
     WeeklyEvent,
 )
 
 
 class NativeTests(unittest.TestCase):
+    def test_stage_controls_round_trip_without_implying_a_device_response(self) -> None:
+        source = NativeAddress(0x12, 27)
+        selection = StageSelection(0xAB, 1, 117, 0x808001)
+        outputs = tuple(NativeAddress(0xAB, n) for n in (1, 16, 24))
+        for kind in StageCommand:
+            msg = NativeMessage.stage_command(
+                kind,
+                selection,
+                source=source,
+                priority=1,
+            )
+            assert msg.payload == bytes.fromhex("ab f5 01 80 80")
+            assert msg.stage_selection == selection
+            assert msg.destination_nodes == outputs
+            assert NativeMessage.from_bytes(msg.to_bytes()) == msg
+        raw = bytes.fromhex("79f126c6 ab f5 01 80 80 ca")
+        extended = NativeMessage.from_bytes(raw)
+        assert extended.message_id == StageCommand.START_PURGE
+        assert extended.source == source and extended.destination_nodes == outputs
+        assert extended.decoded["extension_hex"] == "ca"
+        assert extended.to_bytes() == raw
+        for n in range(5):
+            short = NativeMessage(0x35F, source, extended.payload[:n])
+            assert short.stage_selection is None and short.destination_nodes is None
+        assert NativeMessage(0x39F, source, bytes(5)).destination_nodes == ()
+        assert NativeMessage(0x367, source, bytes(5)).destination_nodes is None
+
+    def test_block_destinations_exclude_padding_and_normalize_node_flags(self) -> None:
+        source = NativeAddress(0, 0)
+        for mid, data, nodes in (
+            (0x2D7, "0000 ab 010000c0", (1, 31)),
+            (0x2D7, "0000 ab 00000080", ()),
+            (0x2DF, "ab e3 0400 01", (3,)),
+        ):
+            msg = NativeMessage(mid, source, bytes.fromhex(data))
+            assert msg.destination_nodes == tuple(NativeAddress(0xAB, n) for n in nodes)
+        for mid, data in (
+            (0x2DF, "ab 20 0400"),
+            (0x2D7, "0000 ab 010000"),
+            (0x2DF, "ab 03 04"),
+            (0x1F4, "ab 03 04"),
+            (0x322, "ab 04000000"),
+        ):
+            assert (
+                NativeMessage(mid, source, bytes.fromhex(data)).destination_nodes
+                is None
+            )
+
     def test_plant_report_matches_whole_pump_selector(self) -> None:
         master = NativeAddress(0x15, 31)
         query = NativeBlockQuery(master, 0x44, selector=129)

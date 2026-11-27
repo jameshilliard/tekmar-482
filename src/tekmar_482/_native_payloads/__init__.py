@@ -27,7 +27,7 @@ from .thermostat import FAN_STATUS, HUMIDITY_STATUS, SLAB_STATUS, FanDuctStatus,
 from .water import (
     BOILER_MAXIMUM, DHW_STATUS, GENERAL_DEMAND, MASTER_PRESENT, MASTER_STATUS, PLANT_LOOP_STATUS,
     RELAY_HEARTBEAT, STAGE_DEMAND, TANK_STATUS, WATER_CYCLE, BoilerMaximum, DhwStatus, GeneralDemand,
-    HeatSource, LoopStatus, RelayHeartbeat, StageDemand, TankStatus, WaterCycle,
+    HeatSource, LoopStatus, RelayHeartbeat, StageCommand, StageDemand, StageSelection, TankStatus, WaterCycle,
 )
 
 
@@ -247,12 +247,6 @@ def octets(*names: str) -> Callable[[Reader], Fields]:
     return read
 
 
-def target_selection(r: Reader) -> Fields:
-    dest, flags = r.take(2)
-    return {"target_subnet": dest, "output_level": flags & 127, "stage": flags >> 7,
-            "target_nodes_mask": f"0x{int.from_bytes(r.take(3), 'little'):06x}"}
-
-
 def snow_request(r: Reader) -> Fields:
     address, count = r.take(2)
     return {"destination_type": address & 7, "destination_id": address >> 3,
@@ -292,7 +286,8 @@ DECODERS: dict[int, tuple[str, Callable[[Reader], Fields]]] = {
     MIXING_PRESENT: ("MixingModulePresent", lambda r: MixingPresent.read(r).fields()),
     MIXING_REPORT: ("MixingModuleReport", lambda r: MixingReport.read(r).fields()),
     MIXING_UPDATE: ("MixingModuleUpdate", lambda r: MixingUpdate.read(r).fields()),
-    0x35f: ("StageHeatDemandRequest", target_selection),
+    **{kind: (kind.name.title().replace("_", ""), lambda r: StageSelection.read(r).fields())
+       for kind in StageCommand},
     GENERAL_DEMAND: ("GeneralDemand", lambda r: GeneralDemand.read(r).fields()),
     0x36a: ("AirGroupMasterConfig", lambda r: bits(r.byte(), ("group", 0, 31), ("no_response_required", 6, 1),
         ("master", 7, 1)) | bits(r.byte(), ("previous_group", 0, 31), ("previous_master", 7, 1))),
@@ -300,12 +295,6 @@ DECODERS: dict[int, tuple[str, Callable[[Reader], Fields]]] = {
     WATER_CYCLE: ("WaterCycleStart", lambda r: WaterCycle(r.byte()).fields()),
     0x387: ("NetworkTestTime", lambda r: {"additional_time": r.word()}),
     0x38f: ("NetworkTestMode", lambda r: {"test_mode": r.byte(), "expected_duration": r.word()}),
-    0x397: ("EndPurge", target_selection),
-    0x39f: ("StartPurge", target_selection),
-    0x3a7: ("StartOverrideOn", target_selection),
-    0x3af: ("EndOverrideOff", target_selection),
-    0x3b7: ("EndOverrideOn", target_selection),
-    0x3bf: ("StartOverrideOff", target_selection),
     PLANT_LOOP_STATUS: ("PlantLoopStatus", lambda r: LoopStatus.read(r, master=False).fields()),
     0x3e7: ("TakingAddress", lambda r: {"previous_subnet": r.byte()} | bits(
         r.byte(), ("previous_node", 0, 31), ("locked", 5, 1))),
