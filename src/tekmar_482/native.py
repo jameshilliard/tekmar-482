@@ -45,6 +45,7 @@ from ._native_payloads.schedules import (
 )
 from ._native_payloads.service import (
     CALIBRATION_MODE,
+    CYCLE_LENGTH_REQUEST,
     NETWORK_TEST_MODE,
     NETWORK_TEST_TIME,
 )
@@ -215,6 +216,19 @@ class NativeMessage:
     ) -> Self:
         """Encode the reported wire mode value; do not assume a device supports it."""
         return cls(CALIBRATION_MODE, source, bytes([_uint(mode, 8)]), priority)
+
+    @classmethod
+    def cycle_length_request(
+        cls,
+        air_group_id: int,
+        requested_length_raw: int,
+        *,
+        source: NativeAddress,
+        priority: int,
+    ) -> Self:
+        """Build a cycle request with an air-group ID, not a destination node."""
+        payload = bytes((_uint(air_group_id, 8), _uint(requested_length_raw, 8)))
+        return cls(CYCLE_LENGTH_REQUEST, source, payload, priority)
 
     @classmethod
     def network_test_mode(

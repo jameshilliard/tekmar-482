@@ -371,10 +371,11 @@ class FirmwareInteropTests(unittest.IsolatedAsyncioTestCase):
         script = (
             (0, "687431c1 03", ()),
             (1, "b57431c3 cffe63", ()),
+            (2, "b3f431c2 0320", ()),
             (3, "b87431c2 3412", ()),
             (4, "b8f431c3 025634", ()),
         )
-        async with _gateway(script) as manager, manager.trace((0, 1, 3, 4)) as trace:
+        async with _gateway(script) as manager, manager.trace() as trace:
             outcomes = await asyncio.gather(
                 *(
                     manager.send_service_frame(

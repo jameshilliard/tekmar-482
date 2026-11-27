@@ -21,7 +21,7 @@ from .plant import MIXING_PRESENT, MIXING_REPORT, MIXING_UPDATE, PLANT_OUTPUT, M
 from .products import corrected_identification, identify_product
 from .scenes import SCENE_RESPONSE_FIELDS, SceneResponse
 from .schedules import DAY_NAMES, SCHEDULE_STATUS, SINGLE_WEEK, DailyEvents, ScheduleBinding, ScheduleCycle, ScheduleEvent, ScheduleStatus
-from .service import CALIBRATION_MODE, NETWORK_TEST_MODE, NETWORK_TEST_TIME
+from .service import CALIBRATION_MODE, CYCLE_LENGTH_REQUEST, NETWORK_TEST_MODE, NETWORK_TEST_TIME
 from .setpoint import SETPOINT_STATUS, SetpointStatus
 from .snowmelt import SNOW_REPORT, SNOW_REQUEST, SnowmeltApplication, SnowmeltReport
 from .thermostat import FAN_STATUS, HUMIDITY_STATUS, SLAB_STATUS, FanDuctStatus, HumidityStatus, SlabStatus
@@ -319,7 +319,7 @@ DECODERS: dict[int, tuple[str, Callable[[Reader], Fields]]] = {
     0x2df: ("BlockUpdate", block_update),
     0x2e7: ("BlockReport", block_report),
     BOILER_MAXIMUM: ("MaximumBoilerPercent", lambda r: BoilerMaximum(r.byte()).fields()),
-    0x33f: ("CycleLengthRequest", lambda r: {"air_group_id": r.byte(), "requested_length": r.byte()}),
+    CYCLE_LENGTH_REQUEST: ("CycleLengthRequest", lambda r: {"air_group_id": r.byte(), "requested_length": r.byte()}),
     STAGE_DEMAND: ("StageHeatDemand", lambda r: StageDemand.read(r).fields()),
     AIR_MEMBER: ("AirGroupMemberStatus", lambda r: AirStatus.read(r, master=False).fields()),
     RELAY_HEARTBEAT: ("RelayStatusHeartbeat", lambda r: RelayHeartbeat(r.byte()).fields()),

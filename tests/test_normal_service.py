@@ -18,6 +18,7 @@ _CAP = "0101f04b54"
 _SUPPORT = "0401f04b54020005bffe01"
 _SOURCE = NativeAddress(0x43, 7)
 _CALIBRATION = "687431c103"
+_CYCLE = "b3f431c20320"
 _MODE = "b8f431c3025634"
 _TIME = "b87431c23412"
 _MIXING = "b57431c3cffe63"
@@ -30,6 +31,11 @@ class ServiceFrameTests(unittest.TestCase):
                 NativeMessage.calibration_mode(3, source=_SOURCE, priority=1),
                 _CALIBRATION,
                 {"mode": 3},
+            ),
+            (
+                NativeMessage.cycle_length_request(3, 0x20, source=_SOURCE, priority=2),
+                _CYCLE,
+                {"air_group_id": 3, "requested_length": 32},
             ),
             (
                 NativeMessage.network_test_mode(2, 0x3456, source=_SOURCE, priority=2),
@@ -76,6 +82,14 @@ class ServiceFrameTests(unittest.TestCase):
             NativeMessage.network_test_mode(2, -1, source=_SOURCE, priority=0)
         with self.assertRaises(ValueError):
             NativeMessage.network_test_time(65536, source=_SOURCE, priority=0)
+        for group, length in ((-1, 32), (256, 32), (3, -1), (3, 256)):
+            with self.assertRaises(ValueError):
+                NativeMessage.cycle_length_request(
+                    group,
+                    length,
+                    source=_SOURCE,
+                    priority=2,
+                )
         with self.assertRaises(ValueError):
             NativeMessage.mixing_module_update(
                 source=_SOURCE,
@@ -101,6 +115,8 @@ class NormalServiceTests(unittest.IsolatedAsyncioTestCase):
                 (5, NativeMessage.from_bytes(bytes.fromhex(_MODE))),
                 (3, extended),
                 (3, NativeMessage(0x287, _SOURCE, b"")),
+                (3, NativeMessage(0x33F, _SOURCE, b"\x03")),
+                (3, NativeMessage(0x33F, _SOURCE, b"\x03\x20\xcc")),
                 (3, NativeMessage(0x2DF, _SOURCE, bytes.fromhex("4307030001"))),
             ):
                 with (
@@ -131,14 +147,21 @@ class NormalServiceTests(unittest.IsolatedAsyncioTestCase):
             ("ff", None),
         ):
             with self.subTest(terminal=terminal):
-                key = f"03{_MODE}"
+                key = f"03{_CYCLE}"
                 script = Script(
                     (_CAP, _SUPPORT),
                     (f"0016f04b54{key}", f"0316f04b54{key} 0216f04b5403{terminal}"),
                 )
                 async with Tekmar482Client(script) as client:
+                    frame = NativeMessage.cycle_length_request(
+                        3,
+                        0x20,
+                        source=_SOURCE,
+                        priority=2,
+                    )
+                    assert frame.destination_nodes is None
                     outcome = await BridgeManagement(client).send_service_frame(
                         3,
-                        NativeMessage.from_bytes(bytes.fromhex(_MODE)),
+                        frame,
                     )
                     assert outcome == expected and not script.rows
