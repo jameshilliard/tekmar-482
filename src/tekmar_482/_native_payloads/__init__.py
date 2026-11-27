@@ -2,7 +2,7 @@
 
 from collections.abc import Callable
 
-from .climate import AIR_MASTER, AIR_MEMBER, AirStatus, ThermostatMode
+from .climate import AIR_GROUP_CONFIG, AIR_MASTER, AIR_MEMBER, AirGroupConfiguration, AirStatus, ThermostatMode
 from .codec import Fields, Reader, SETBACK, ShortPayload, temp
 from .faults import NETWORK_ERROR, NetworkFault
 from .io import IO_CHANGE, IO_DISCOVER, IO_DISCOVERY, IO_REPLY, IO_REQUEST, IoReport
@@ -300,8 +300,7 @@ DECODERS: dict[int, tuple[str, Callable[[Reader], Fields]]] = {
     **{kind: (kind.name.title().replace("_", ""), lambda r: StageSelection.read(r).fields())
        for kind in StageCommand},
     GENERAL_DEMAND: ("GeneralDemand", lambda r: GeneralDemand.read(r).fields()),
-    0x36a: ("AirGroupMasterConfig", lambda r: bits(r.byte(), ("group", 0, 31), ("no_response_required", 6, 1),
-        ("master", 7, 1)) | bits(r.byte(), ("previous_group", 0, 31), ("previous_master", 7, 1))),
+    AIR_GROUP_CONFIG: ("AirGroupMasterConfig", lambda r: AirGroupConfiguration.read(r).fields()),
     AIR_MASTER: ("AirGroupMasterStatus", lambda r: AirStatus.read(r, master=True).fields()),
     WATER_CYCLE: ("WaterCycleStart", lambda r: WaterCycle(r.byte()).fields()),
     NETWORK_TEST_TIME: ("NetworkTestTime", lambda r: {"additional_time": r.word()}),

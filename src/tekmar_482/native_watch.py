@@ -450,6 +450,13 @@ class _Watch:
                         and self.state.block(path, block) is None
                     ):
                         self._queue(path, block)
+            elif (
+                (group := current.air_group_configuration) is not None
+                and group.role_changed(before.air_group_configuration)
+                and HEATING_SETUP in current.setup.product.candidate_blocks
+            ):
+                self.latest.pop((path, HEATING_SETUP), None)
+                self._queue(path, HEATING_SETUP)
             elif current.air is not None and (
                 before.air is None or _mode_hint(before.air) != _mode_hint(current.air)
             ):

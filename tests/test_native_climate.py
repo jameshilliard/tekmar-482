@@ -101,6 +101,31 @@ class StateTests(unittest.TestCase):
         assert reading["mode_raw"] == 250 and reading["mode"] is None
         assert reading["air_timestamp_ms"] == 1
 
+    def test_air_group_configuration_is_separate_from_confirmed_setup(self) -> None:
+        state = NativeState()
+        state.observe(identity())
+        state.observe(block(3, bytes.fromhex("07 01 04 03")))
+        report = frame(0x36A, bytes.fromhex("e5 a3 99"))
+        config = report.air_group_configuration
+        assert config is not None and config.no_response_required
+        assert config.role == (5, True) and config.previous_role == (3, True)
+        assert report.decoded["extension_hex"] == "99"
+        assert state.observe(report) == (_PATH,)
+        assert state.air_group_configuration(_PATH) == config
+        (current,) = state.thermostats
+        assert (
+            current.setup.air_group_id == 3
+            and current.setup.mode is ThermostatMode.HEAT
+        )
+        assert current.air is None
+        assert climate_fields(current)["air_group_configuration"] == config.fields()
+        assert state.block_revision(_PATH, (3, None)) == 1
+        state.observe(frame(0x36A, bytes.fromhex("85 83")))
+        assert not state.observe(frame(0x36A, bytes.fromhex("85")))
+        assert state.block_revision(_PATH, (3, None)) == 1
+        state.observe(CaptureGap(1))
+        assert state.air_group_configuration(_PATH) is None
+
     def test_selectors_paths_and_identity_replacement(self) -> None:
         state = NativeState()
         other = NativePath(2, _PATH.subnet, _PATH.node)
@@ -185,6 +210,47 @@ class ClimateSessionTests(unittest.IsolatedAsyncioTestCase):
                 change = await self.changes.get()
                 if predicate(change):
                     return change
+
+    async def test_air_group_change_retires_an_older_setup_read(self) -> None:
+        task = asyncio.create_task(
+            watch_climate(
+                self.stream,
+                [_PATH],
+                duration=0.35,
+                on_change=self.changes.put_nowait,
+            ),
+        )
+        await self.sent(0x2D7, 0)
+        self.ack()
+        self.rx(identity())
+        await self.sent(0x2D7, 3)
+        self.ack()
+        self.rx(block(3, bytes.fromhex("07 01 04 03")))
+        await self.changed(
+            lambda change: bool(
+                change.current and change.current.setup.air_group_id == 3,
+            ),
+        )
+        self.rx(frame(0x36A, bytes.fromhex("84 83")))
+        await self.sent(0x2D7, 3)
+        self.ack()
+        self.rx(frame(0x36A, bytes.fromhex("85 84")))
+        self.rx(block(3, bytes.fromhex("07 02 04 04")))
+        await self.sent(0x2D7, 3)
+        self.ack()
+        self.rx(block(3, bytes.fromhex("07 01 04 05")))
+        # Same role, despite changes to flags outside the role.
+        self.rx(frame(0x36A, bytes.fromhex("e5 a4 99")))
+        result = await task
+        (current,) = result.thermostats
+        assert (
+            current.setup.air_group_id == 5
+            and current.setup.mode is ThermostatMode.HEAT
+        )
+        assert result.reads == 4 and self.tx.empty()
+        while not self.changes.empty():
+            change = self.changes.get_nowait()
+            assert change.current is not None and change.current.setup.air_group_id != 4
 
     async def test_change_during_read_gets_one_followup_and_no_timer_poll(self) -> None:
         task = asyncio.create_task(

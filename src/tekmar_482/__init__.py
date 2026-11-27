@@ -3,6 +3,7 @@
 from ._bridge_diagnostics import ErrorReason, ErrorSource
 from ._native_payloads import SnowmeltBlock
 from ._native_payloads.climate import (
+    AirGroupConfiguration,
     AirReading,
     AirStatus,
     AirTarget,
@@ -440,6 +441,7 @@ __all__ = [
     "AddressFields",
     "AddressSetbackFields",
     "AddressSetbackPayload",
+    "AirGroupConfiguration",
     "AirReading",
     "AirStatus",
     "AirTarget",

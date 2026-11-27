@@ -510,6 +510,14 @@ A quiet device can have a confirmed mode but no observed demand. A finite
 active watch lists unanswered blocks and exits with status 1 if a selected
 path never reported its configured mode.
 
+AirGroupMasterConfig announcements are exposed separately from stored
+thermostat configuration. `NativeFrame.air_group_configuration` and
+`state.air_group_configuration(path)` retain the reported current and
+previous roles. A different group or master flag prompts an addressed
+HeatingSetup read in an active watch. It does not overwrite the configured
+mode or group before readback. Identical roles do not start polling, and
+an in-flight read from before the change cannot confirm the new setup.
+
 The callback receives a `ClimateChange` with a `NativePath` and immutable
 current state, or `None` on invalidation. It runs on the event loop and must
 not block. Use `source=None` (CLI: `--passive`) to send no requests; omitting

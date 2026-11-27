@@ -14,6 +14,7 @@ from ._native_payloads import (
     SnowmeltBlock,
     decode_payload,
 )
+from ._native_payloads.climate import AIR_GROUP_CONFIG, AirGroupConfiguration
 from ._native_payloads.codec import Reader, ShortPayload
 from ._native_payloads.faults import NETWORK_ERROR, NetworkFault
 from ._native_payloads.io import IO_CHANGE, IO_DISCOVERY, IO_REPLY, IoReport
@@ -475,6 +476,11 @@ class NativeFrame:
     @property
     def schedule_status(self) -> ScheduleStatus | None:
         return self._read_payload(SCHEDULE_STATUS, ScheduleStatus.read)
+
+    @property
+    def air_group_configuration(self) -> AirGroupConfiguration | None:
+        """The peer's announced role, independent of addressed thermostat setup."""
+        return self._read_payload(AIR_GROUP_CONFIG, AirGroupConfiguration.read)
 
     @property
     def plant_output(self) -> PlantOutput | None:

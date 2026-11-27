@@ -210,6 +210,9 @@ def climate_fields(device: NativeClimate) -> dict[str, object]:
         ],
         "heating_cph": setup.heating_cph,
         "configured_air_group": setup.air_group_id,
+        "air_group_configuration": device.air_group_configuration.fields()
+        if device.air_group_configuration is not None
+        else None,
         "cooling_stages": setup.cooling_stages,
         "enabled_heat_pumps": setup.enabled_heat_pumps,
         "air_timestamp_ms": device.air_timestamp_ms,

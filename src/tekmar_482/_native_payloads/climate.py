@@ -8,6 +8,7 @@ from .codec import SETBACK, Fields, Reader, fahrenheit, temp
 from .products import NativeProduct
 from .thermostat import ThermostatTarget
 
+AIR_GROUP_CONFIG = 0x36a
 AIR_MEMBER = 0x36f
 AIR_MASTER = 0x377
 HEATING_SETUP = 0x03
@@ -99,6 +100,41 @@ class ThermostatConfiguration:
                 or mode is ThermostatMode.OFF and model not in ("527", "537")
                 or mode is ThermostatMode.VENT and model in ("530", "540")
                 or mode is ThermostatMode.EMERGENCY and model == "557")
+
+
+@dataclass(frozen=True, slots=True)
+class AirGroupConfiguration:
+    """Current and previous air-group roles in one peer announcement."""
+
+    flags: int
+    previous_flags: int
+
+    @classmethod
+    def read(cls, r: Reader) -> "AirGroupConfiguration":
+        return cls(r.byte(), r.byte())
+
+    @property
+    def role(self) -> tuple[int, bool]:
+        return self.flags & 31, bool(self.flags & 128)
+
+    @property
+    def previous_role(self) -> tuple[int, bool]:
+        return self.previous_flags & 31, bool(self.previous_flags & 128)
+
+    @property
+    def no_response_required(self) -> bool:
+        return bool(self.flags & 64)
+
+    def role_changed(self, previous: "AirGroupConfiguration | None") -> bool:
+        before = previous.role if previous is not None else self.previous_role
+        return self.role != before
+
+    def fields(self) -> Fields:
+        group, master = self.role
+        previous_group, previous_master = self.previous_role
+        return {"group": group, "master": int(master), "previous_group": previous_group,
+                "previous_master": int(previous_master),
+                "no_response_required": int(self.no_response_required)}
 
 
 @dataclass(frozen=True, slots=True)

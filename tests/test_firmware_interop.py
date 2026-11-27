@@ -543,6 +543,51 @@ class FirmwareInteropTests(unittest.IsolatedAsyncioTestCase):
             assert modes == [ThermostatMode.OFF, ThermostatMode.HEAT]
             watch.cancel()
 
+    async def test_air_group_announcement_refreshes_setup_via_firmware(self) -> None:
+        info = "6e723149 00003f 8e9a01 c60402"
+        script = (
+            _block(3, "23 10000000", "0000", info),
+            _block(3, "23 10000000", "0300", "6e723146 030007 010403"),
+            (
+                3,
+                "6d70000b 0000 23 10000000 00000000",
+                ("76a23142 8583", "76a23142 e5a3", info),
+            ),
+            (3, "6d700007 0300 23 10000000", ("6e723146 030007 010405",)),
+        )
+        path = NativePath(3, _THERMOSTAT.subnet, _THERMOSTAT.node)
+        observations: list[tuple[int | None, tuple[int, bool]]] = []
+        confirmed = asyncio.Event()
+
+        def observe(updated: NativePath, state: NativeState) -> None:
+            if (
+                updated == path
+                and (device := state.climate(path))
+                and (role := device.air_group_configuration)
+            ):
+                group = device.setup.air_group_id
+                observations.append((group, role.role))
+                if group == 5:
+                    confirmed.set()
+
+        async with (
+            _gateway(script) as manager,
+            manager.native_session([3]) as capture,
+            asyncio.TaskGroup() as tasks,
+        ):
+            watch = tasks.create_task(
+                watch_native(capture, source=None, on_change=observe),
+            )
+            identify = NativeBlockQuery(_THERMOSTAT, 0)
+            await manager.read_block(3, identify)
+            await manager.read_block(3, NativeBlockQuery(_THERMOSTAT, 3))
+            await manager.read_block(3, identify)
+            async with asyncio.timeout(5):
+                await confirmed.wait()
+            assert observations[0] == (3, (5, True))
+            assert observations[-1] == (5, (5, True))
+            watch.cancel()
+
     async def test_thermostat_mode_target_and_weekend_schedule(self) -> None:
         def read(block: str, reply: str) -> Exchange:
             return _block(3, "23 10000000", block, reply)

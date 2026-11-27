@@ -8,8 +8,10 @@ from typing import TYPE_CHECKING, Self
 
 from ._native_payloads import BLOCK_SELECTORS
 from ._native_payloads.climate import (
+    AIR_GROUP_CONFIG,
     AIR_MASTER,
     AIR_MEMBER,
+    HEATING_SETUP,
     MODE_BLOCKS,
     AirGroupTargets,
     AirStatus,
@@ -55,6 +57,7 @@ from .water_topology import water_systems
 if TYPE_CHECKING:
     from collections.abc import Iterable
 
+    from ._native_payloads.climate import AirGroupConfiguration
     from ._native_payloads.faults import NetworkFault
     from ._native_payloads.line import LineValue
     from ._water_monitor import WaterSource
@@ -135,6 +138,7 @@ class NativeClimate:
     sensors: ThermostatSensors
     adjustments: ThermostatAdjustments
     air_timestamp_ms: int | None = field(compare=False)
+    air_group_configuration: AirGroupConfiguration | None = None
 
 
 @dataclass(slots=True)
@@ -148,6 +152,8 @@ class _Peer:
     air: AirStatus | None = None
     active_air_target: AirTarget | None = None
     air_frame: NativeFrame | None = None
+    air_group_configuration: AirGroupConfiguration | None = None
+    heating_setup_revision: int = 0
     snow: SnowmeltChannels = field(default_factory=SnowmeltChannels)
     calendar: ScheduleBook = field(default_factory=ScheduleBook)
     outputs: AdjustmentState = field(default_factory=AdjustmentState)
@@ -178,6 +184,7 @@ class _Peer:
             sensors,
             self.outputs.snapshot(product, sensors, fields),
             self.air_frame.timestamp_ms if self.air_frame else None,
+            self.air_group_configuration,
         )
 
 
@@ -447,6 +454,8 @@ class NativeState:
         peer = self._peers.get(path)
         if peer is None:
             return 0
+        if key == (HEATING_SETUP, None):
+            return peer.heating_setup_revision
         if key[0] in SETPOINT_BLOCKS:
             return peer.setpoint.revisions.get(key[0], 0)
         if key[0] in ADJUSTMENT_BLOCKS or key[0] in SENSOR_BLOCKS:
@@ -476,6 +485,10 @@ class NativeState:
 
     def air_status(self, path: NativePath) -> AirStatus | None:
         return peer.air if (peer := self._peers.get(path)) else None
+
+    def air_group_configuration(self, path: NativePath) -> AirGroupConfiguration | None:
+        """Return the peer's latest role announcement, not its stored assignment."""
+        return peer.air_group_configuration if (peer := self._peers.get(path)) else None
 
     def identity(self, path: NativePath) -> NativeIdentity | None:
         return peer.identity if (peer := self._peers.get(path)) else None
@@ -685,6 +698,8 @@ class NativeState:
             return self._observe_air(path, record)
         if self._selected is not None and path not in self._selected:
             return ()
+        if record.message_id == AIR_GROUP_CONFIG:
+            return self._observe_air_group_configuration(path, record)
         changed_water = self._water.observe(record)
         if changed_water and record.message_id == MASTER_PRESENT:
             self._unanswered_master_ports.discard(path.port)
@@ -726,6 +741,21 @@ class NativeState:
             snow = self._peers[path].snow
             return (path,) if snow.update(record, address, report) else ()
         return (path,) if changed_water else ()
+
+    def _observe_air_group_configuration(
+        self,
+        path: NativePath,
+        record: NativeFrame,
+    ) -> tuple[NativePath, ...]:
+        config = record.air_group_configuration
+        if config is None:
+            return ()
+        peer = self._peers[path]
+        previous = peer.air_group_configuration
+        peer.air_group_configuration = config
+        if config.role_changed(previous):
+            peer.heating_setup_revision += 1
+        return (path,) if config != previous else ()
 
     def _observe_air(
         self,
