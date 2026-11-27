@@ -307,14 +307,15 @@ class PlantSessionTests(unittest.IsolatedAsyncioTestCase):
 
     async def serve_reconfiguration(self) -> set[tuple[int, int]]:
         assert await self.query() == (0, 0)
-        self.rx(identity(_274))
         self.ack()
+        self.rx(identity(_274))
         seen = set()
         rotated = False
         while True:
             b, s = await self.query()
             assert (b, s) not in seen
             seen.add((b, s))
+            self.ack()
             if b == 0x35:
                 self.rx(block(b, b"\x03\x01\x01"))
             elif (b, s) == (0x43, 0):
@@ -325,7 +326,6 @@ class PlantSessionTests(unittest.IsolatedAsyncioTestCase):
             elif (b, s) == (0x43, 1):
                 assert rotated
                 self.rx(block(b, bytes.fromhex("07 01 5623")))
-                self.ack()
                 return seen
             else:
                 self.rx(
@@ -336,7 +336,6 @@ class PlantSessionTests(unittest.IsolatedAsyncioTestCase):
                         else bytes(1),
                     ),
                 )
-            self.ack()
 
     async def test_active_watch_rejects_late_output_bank_replies(self) -> None:
         all_frames: list[CaptureRecord] = []
@@ -383,11 +382,11 @@ class PlantSessionTests(unittest.IsolatedAsyncioTestCase):
                     read_water(self.stream, [TEST_PATH.port], duration=0.12),
                 )
                 assert (await self.sent()).message_id == 0x3F7
+                self.ack()
                 self.rx(frame(0x3FF, bytes([TEST_PATH.subnet])))
-                self.ack()
                 assert await self.query() == (0, 0)
-                self.rx(identity(_402))
                 self.ack()
+                self.rx(identity(_402))
                 await waiting.wait()
                 result = await task
         assert len(result.block_reads) == 1 and self.tx.empty()
@@ -400,8 +399,8 @@ class PlantSessionTests(unittest.IsolatedAsyncioTestCase):
             read_water(self.stream, [TEST_PATH.port], duration=0.32, timeout=0.04),
         )
         assert (await self.sent()).message_id == 0x3F7
-        self.rx(frame(0x3FF, bytes([TEST_PATH.subnet])))
         self.ack()
+        self.rx(frame(0x3FF, bytes([TEST_PATH.subnet])))
         await self.serve_reconfiguration()
         self.rx(frame(0x24F, _STAGED))
         result = await task
@@ -465,11 +464,11 @@ class PlantSessionTests(unittest.IsolatedAsyncioTestCase):
             read_water(self.stream, [TEST_PATH.port], duration=0.2, timeout=0.1),
         )
         assert (await self.sent()).message_id == 0x3F7
+        self.ack()
         self.rx(frame(0x3FF, bytes([TEST_PATH.subnet])))
-        self.ack()
         assert await self.query() == (0, 0)
-        self.rx(identity(_402))
         self.ack()
+        self.rx(identity(_402))
         expected = {
             (b, 0) for b in (0x22, 0x23, 0x3C, 0x41, 0x43, 0x44, 0x4B, 0x4C, 0x4E, 0x50)
         } | {(0x44, 129)}
@@ -482,8 +481,8 @@ class PlantSessionTests(unittest.IsolatedAsyncioTestCase):
                 data = bytes([1, 0])
             else:
                 data = bytes(1)
-            self.rx(block(b, data))
             self.ack()
+            self.rx(block(b, data))
         result = await task
         assert not expected and self.tx.empty()
         ((path, settings),) = result.plant_configurations

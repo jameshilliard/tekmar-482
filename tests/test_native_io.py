@@ -230,10 +230,10 @@ class IoExchangeTests(unittest.IsolatedAsyncioTestCase):
         self.rx(value(7, 0, path=master))
         assert (await self.send()).message_id == 0x1F6
         self.rx(value(7, 1, path=master))
+        self.ack()
         self.rx(discover(7, 1, path=master))
         async with asyncio.timeout(1):
             await paused.wait()
-        self.ack()
         self.rx(value(7, 0, path=master))
         release.set()
         result = await task
@@ -259,8 +259,8 @@ class IoExchangeTests(unittest.IsolatedAsyncioTestCase):
             assert msg.message_id == 0x1F6 and msg.payload == bytes(
                 [endpoint.subnet, endpoint.node],
             )
-            self.rx(discover(7, 1, endpoint=endpoint))
             self.ack()
+            self.rx(discover(7, 1, endpoint=endpoint))
         snapshot = await task
         assert [d.endpoint for _, d in snapshot.io_directories] == sorted([END, OTHER])
         assert all(s.answered for s in snapshot.statuses) and self.tx.empty()
@@ -296,8 +296,8 @@ class IoExchangeTests(unittest.IsolatedAsyncioTestCase):
         self.rx(identity(0x123456))
         self.rx(value(7, 0))
         assert (await self.send()).payload == b"\x43\xa5"
-        self.rx(discover(7, 1))
         self.ack()
+        self.rx(discover(7, 1))
         async with asyncio.timeout(1):
             await ready.wait()
         self.rx(value(7, 0))
@@ -323,8 +323,8 @@ class IoExchangeTests(unittest.IsolatedAsyncioTestCase):
         assert device.address.node == 0 and device.io_endpoints == {END}
         task = asyncio.create_task(read_native_snapshot(self.stream, inv.devices))
         assert (await self.send()).message_id == 0x1F6
-        self.rx(discover(15, 1, path=master))
         self.ack()
+        self.rx(discover(15, 1, path=master))
         snapshot = await task
         assert not snapshot.blocks and snapshot.statuses[0].answered
         assert snapshot.io_directories[0][0] == master

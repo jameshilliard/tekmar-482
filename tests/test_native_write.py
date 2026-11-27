@@ -137,8 +137,8 @@ class NativeWriteTests(unittest.IsolatedAsyncioTestCase):
         self.result(TxStatus.FAILED, FailureReason.NO_ACK)
         await self.expect_read()
         self.report(_BODY, port=2)
-        self.report(bytes.fromhex("3101"), support=0x11)
         self.result(TxStatus.ACK)
+        self.report(bytes.fromhex("3101"), support=0x11)
         result = await task
         assert result.status is NativeWriteStatus.CONFIRMED
         assert result.tx_result == TxResult(1, TxStatus.FAILED, FailureReason.NO_ACK)
@@ -189,8 +189,10 @@ class NativeWriteTests(unittest.IsolatedAsyncioTestCase):
                 await self.expect_update()
                 self.result(TxStatus.FAILED, reason)
                 await self.expect_read()
-                self.report(_BODY)
+                # A preceding announcement cannot confirm the write.
+                self.report(_PATCHED)
                 self.result(TxStatus.ACK)
+                self.report(_BODY)
                 result = await task
                 assert result.tx_result == TxResult(1, TxStatus.FAILED, reason)
                 assert result.status is NativeWriteStatus.DIFFERENT and self.tx.empty()
@@ -246,9 +248,10 @@ class NativeWriteTests(unittest.IsolatedAsyncioTestCase):
             await self.stream.send(1, _QUERY.request(_HOST))
         other = asyncio.create_task(self.stream.read_block(2, _QUERY, source=_HOST))
         await self.expect_read(2)
-        self.report(_BODY, port=2)
         self.result(TxStatus.ACK, port=2)
-        assert (await other).port == 2
+        self.report(_BODY, port=2)
+        async with asyncio.timeout(2):
+            assert (await other).port == 2
         self.result(TxStatus.ACK)
         await self.baseline(_PATCHED)
         assert (await first).status is NativeWriteStatus.CONFIRMED

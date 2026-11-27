@@ -152,9 +152,10 @@ class NativeBlockBatch:
 class _ReportWaiter:
     collect: Callable[[NativeFrame], bool]
     done: asyncio.Future[None]
+    transmitted: bool = False
 
     def observe(self, frame: NativeFrame) -> None:
-        if not self.done.done() and self.collect(frame):
+        if self.transmitted and not self.done.done() and self.collect(frame):
             self.done.set_result(None)
 
 
@@ -703,6 +704,10 @@ class RawDispatcher:
                 msg = f"unexpected transmit result on port {record.port}"
                 raise ProtocolError(msg)
             if not future.done():
+                # Arm at wire dispatch, not when the sending coroutine resumes:
+                # a single serial read can contain both the result and a reply.
+                if (waiter := self._waiters.get(record.port)) is not None:
+                    waiter.transmitted = record.completed_frame
                 future.set_result(record)
             self._tx_changed[record.port].set()
         else:

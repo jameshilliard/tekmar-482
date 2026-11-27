@@ -447,7 +447,7 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
                         (serialize(Packet(1, b"\x01\x01" + update)), ack),
                         (
                             serialize(Packet(1, b"\x01\x01" + request)),
-                            capture(clamped) + ack,
+                            ack + capture(clamped),
                         ),
                     ),
                 )
@@ -580,7 +580,7 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
             for outgoing, incoming in (
                 (management(2, 0, b"\x01"), management(2, 3, b"\x01")),
                 (management(9, 0, b"\0"), management(9, 3, b"\0")),
-                (request, response + serialize(Packet(1, bytes([2, 3, 0])))),
+                (request, serialize(Packet(1, bytes([2, 3, 0]))) + response),
                 (management(2, 0, b"\0"), management(2, 3, b"\0")),
             ):
                 assert await reader.readexactly(len(outgoing)) == outgoing
@@ -658,8 +658,8 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
                 (management(9, 0, b"\x12"), management(9, 3, b"\x12")),
                 (
                     serialize(Packet(1, b"\x01\x04" + request)),
-                    serialize(Packet(1, bytes.fromhex("00040a000000") + report))
-                    + serialize(Packet(1, b"\x02\x04\0")),
+                    serialize(Packet(1, b"\x02\x04\0"))
+                    + serialize(Packet(1, bytes.fromhex("00040a000000") + report)),
                 ),
                 (management(2, 0, b"\0"), management(2, 3, b"\0")),
             ):
@@ -770,7 +770,7 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
                         [
                             mode,
                             ack,
-                            (request(0, 64), rx_identity + result),
+                            (request(0, 64), result + rx_identity),
                             (request(0x77, 64), result + rx_other),
                         ],
                     )

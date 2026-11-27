@@ -653,6 +653,11 @@ and a link ACK without a report never constitute a complete answer.
 Partial data are available even when the CLI exits with status 1. These
 commands do not change device settings or enable a snowmelt group.
 
+After a master query, use the responding frame's source for addressed
+register reads, not the boiler subnet in its payload. In Raw mode, frames
+received before the request's completed TxResult remain available to
+passive listeners but cannot satisfy an active read or confirm a write.
+
 **Read native I/O channels.** I/O discovery, explicit channel replies and
 unsolicited changes are separate from block reads. For example, with
 reporter `0x12:3` on port 2 and I/O payload address `0x43:0xa5`:

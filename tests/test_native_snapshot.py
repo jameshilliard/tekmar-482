@@ -39,8 +39,8 @@ class NativeSnapshotTests(unittest.IsolatedAsyncioTestCase):
                 bytes([key, 5, 0]) for key in reversed(msg.payload[2:])
             )
             body = NativeMessage(0x17E, NativeAddress(0x16, 7), payload).to_bytes()
-            self.stream.feed(Packet(1, bytes([0, port, 0, 0, 0, 0]) + body))
             self.stream.feed(Packet(1, bytes([2, port, TxStatus.ACK])))
+            self.stream.feed(Packet(1, bytes([0, port, 0, 0, 0, 0]) + body))
             return
         assert msg.message_id == 0x2D7
         block = int.from_bytes(msg.payload[:2], "little")
@@ -50,6 +50,7 @@ class NativeSnapshotTests(unittest.IsolatedAsyncioTestCase):
         self.requests.append((port, subnet, block, selector, mask))
         if port in self.stalled:
             return
+        self.stream.feed(Packet(1, bytes([2, port, TxStatus.ACK])))
         for n, (product, j_number) in self.identities.items():
             if not mask & (1 << (n - 1)):
                 continue
@@ -73,7 +74,6 @@ class NativeSnapshotTests(unittest.IsolatedAsyncioTestCase):
             source = NativeAddress(subnet, n | 32)
             body = NativeMessage(0x2E7, source, msg.payload[:2] + fields).to_bytes()
             self.stream.feed(Packet(1, bytes([0, port, 0, 0, 0, 0]) + body))
-        self.stream.feed(Packet(1, bytes([2, port, TxStatus.ACK])))
 
     async def test_group_plans_model_and_observed_instances_per_peer(self) -> None:
         self.identities = dict.fromkeys((2, 7), (104103, 1206))

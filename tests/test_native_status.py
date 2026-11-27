@@ -61,6 +61,8 @@ class NativeStatusTests(unittest.IsolatedAsyncioTestCase):
             self.stream.read_status(2, _SNOW, source=_HOST, peer=_PEER),
         )
         assert (await self.sent()).to_bytes() == bytes.fromhex("17f00006 110423221922")
+        self.capture(0x17E, "19 03 230001 220002 190003")
+        self.result(TxStatus.FAILED, FailureReason.NO_ACK)
         self.capture(0x17E, "19 01 230001", port=1)
         self.capture(0x17E, "19 01 230001", peer=NativeAddress(_PEER.subnet, 5))
         self.capture(
@@ -71,7 +73,6 @@ class NativeStatusTests(unittest.IsolatedAsyncioTestCase):
         self.capture(0x17E, "19 02 230001")  # Truncated declared pair count.
         self.capture(0x17E, "19 01 990001 230001")  # Extension is not a pair.
         first = self.capture(0x17E, "19 02 220101 220201")
-        self.result(TxStatus.FAILED, FailureReason.NO_ACK)
         updated = self.capture(0x17E, "19 01 220301")
         last = self.capture(
             0x17E,
@@ -88,6 +89,20 @@ class NativeStatusTests(unittest.IsolatedAsyncioTestCase):
             != first.decoded["pair1_slab_temperature_raw"]
         )
         assert await self.stream.read() == stale
+
+    async def test_pretransmit_announcement_cannot_select_a_wildcard_peer(self) -> None:
+        query = NativeStatusQuery.gateway_access()
+        task = asyncio.create_task(self.stream.read_status(2, query, source=_HOST))
+        await self.sent()
+        prior = self.capture(0x200, "00", peer=NativeAddress(_PEER.subnet, 7))
+        self.result(TxStatus.ACK)
+        reply = self.capture(0x200, "02")
+        async with asyncio.timeout(2):
+            batch = await task
+        assert batch.answered and batch.peer == _PEER
+        assert batch.reports == (reply,)
+        assert await self.stream.read() == prior
+        assert await self.stream.read() == reply
 
     async def test_gateway_access_requires_report_not_query_echo(self) -> None:
         query = NativeStatusQuery.gateway_access()
@@ -112,12 +127,13 @@ class NativeStatusTests(unittest.IsolatedAsyncioTestCase):
                 self.stream.read_status(2, _SNOW, source=_HOST, timeout=0.03),
             )
             await self.sent()
-            self.capture(0x17E, "19 01 220301")
             if terminal:
                 self.result(TxStatus.ACK)
+            self.capture(0x17E, "19 01 220301")
             batch = await task
             assert not batch.answered and not batch.complete
-            assert batch.missing_keys == (0x23, 0x19)
+            missing = (0x23, 0x19) if terminal else (0x23, 0x22, 0x19)
+            assert batch.missing_keys == missing
             assert (batch.tx_result is not None) is terminal
         with self.assertRaisesRegex(ProtocolError, "send already in progress"):
             await self.stream.read_status(2, _CLOCK, source=_HOST)

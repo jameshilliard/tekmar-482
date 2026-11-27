@@ -35,7 +35,7 @@ class RawTests(unittest.IsolatedAsyncioTestCase):
     def deliver(self, *data: int) -> None:
         self.rx.put_nowait(Packet(1, bytes(data)))
 
-    async def test_group_accepts_each_selected_node_once_even_before_tx_result(
+    async def test_group_accepts_each_selected_node_once_after_tx_result(
         self,
     ) -> None:
         host = NativeAddress(0, 0)
@@ -52,6 +52,9 @@ class RawTests(unittest.IsolatedAsyncioTestCase):
                 self.stream.read_block_group(3, query, source=host),
             )
             assert await self.tx.get() == bytes((1, 3)) + query.request(host).to_bytes()
+            # Same address and selector, but earlier bus traffic.
+            report(3, 1, b"\x07\x81\x11\0")
+            self.deliver(2, 3, TxStatus.FAILED, FailureReason.NO_ACK)
             report(3, 0, b"\x07\x81\x01\0")
             report(3, 2, b"\x07\x81\x01\0")
             report(4, 3, b"\x07\x81\x01\0")
@@ -60,7 +63,6 @@ class RawTests(unittest.IsolatedAsyncioTestCase):
             report(3, 3, b"\x07\x80\x01\0")
             report(3, 3, b"\0")
             report(3, 35, b"\x07\x81\x06\0")
-            self.deliver(2, 3, TxStatus.FAILED, FailureReason.NO_ACK)
             batch = await task
             assert batch.tx_result == TxResult(3, TxStatus.FAILED, FailureReason.NO_ACK)
             assert not batch.missing_nodes
@@ -68,7 +70,7 @@ class RawTests(unittest.IsolatedAsyncioTestCase):
                 (1, 4),
                 (35, 6),
             ]
-            assert await self.stream.read() == CaptureGap(6)
+            assert await self.stream.read() == CaptureGap(7)
             assert self.tx.empty()
 
     async def test_group_deadline_distinguishes_missing_peer_from_missing_tx(
@@ -90,8 +92,11 @@ class RawTests(unittest.IsolatedAsyncioTestCase):
                 assert batch.tx_result == (
                     None if lost_tx else TxResult(0, TxStatus.ACK)
                 )
-                assert batch.missing_nodes == (1,)
-                assert batch.reports[0].decoded["support_mask"] == "0x00"
+                assert batch.missing_nodes == ((1, 2) if lost_tx else (1,))
+                if lost_tx:
+                    assert not batch.reports
+                else:
+                    assert batch.reports[0].decoded["support_mask"] == "0x00"
             with self.assertRaisesRegex(ProtocolError, "send already in progress"):
                 await self.stream.send(0, query.request(host))
             self.stream.feed(Packet(1, bytes((2, 0, TxStatus.ACK))))
@@ -112,9 +117,9 @@ class RawTests(unittest.IsolatedAsyncioTestCase):
             other = asyncio.create_task(self.stream.read_block(2, query, source=host))
             await self.tx.get()
             self.deliver(2, 1, 0)
-            self.deliver(0, 2, 1, 0, 0, 0, *body)
             # No link ACK; an actual matching report still counts.
             self.deliver(2, 2, 2, 1)
+            self.deliver(0, 2, 1, 0, 0, 0, *body)
             assert await other == NativeFrame(2, 1, body)
             assert not first.done()
             self.deliver(0, 1, 2, 0, 0, 0, *body[:-2], 1, 4)  # Different sensor.
