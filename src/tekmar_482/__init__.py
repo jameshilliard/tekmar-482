@@ -293,6 +293,12 @@ from .native_targets import (
     RoomLimitTable,
     ThermostatAdjustments,
 )
+from .native_thermostat_equipment import (
+    AirFilterUsage,
+    ThermostatEquipment,
+    ThermostatOutputRuntime,
+    ThermostatRelayStatus,
+)
 from .native_watch import (
     ClimateChange,
     ClimateWatchResult,
@@ -446,6 +452,7 @@ __all__ = [
     "AddressFields",
     "AddressSetbackFields",
     "AddressSetbackPayload",
+    "AirFilterUsage",
     "AirGroupConfiguration",
     "AirReading",
     "AirStatus",
@@ -703,7 +710,10 @@ __all__ = [
     "ThermostatAdjustments",
     "ThermostatConfiguration",
     "ThermostatData",
+    "ThermostatEquipment",
     "ThermostatMode",
+    "ThermostatOutputRuntime",
+    "ThermostatRelayStatus",
     "ThermostatRuntime",
     "ThermostatSensorMonitor",
     "ThermostatSensors",

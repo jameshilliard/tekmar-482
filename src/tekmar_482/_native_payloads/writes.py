@@ -4,7 +4,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from enum import Enum, IntEnum, auto
 
-from .layouts import H_UNAVAILABLE, MULTI_WEEK
+from .layouts import H_UNAVAILABLE, MULTI_WEEK, RELAY_RUNTIME_BLOCKS, TERMINAL_RUNTIME_BLOCKS
 from .scenes import SCENE_RESPONSE_FIELDS, SceneResponse
 from .schedules import DailyEvents, ScheduleBinding, ScheduleCycle, ScheduleProfile, SINGLE_WEEK, SETUP_BLOCK
 
@@ -176,7 +176,7 @@ _LAYOUTS = {
                   F.TEMPORARY_SCENE_7, F.TEMPORARY_SCENE_8, F.SCENES_ENABLED),
     0x0f: _Layout(6, _slots(_SCHEDULE)),  # Writer emits zero for the sixth byte.
     **dict.fromkeys(range(0x10, 0x14), _layout(*_DAYS)),
-    **dict.fromkeys((*range(0x1c, 0x22), 0x4c, *range(0x99, 0xa3)), _layout(F.HOURS, width=2)),
+    **dict.fromkeys((*RELAY_RUNTIME_BLOCKS, 0x4c, *TERMINAL_RUNTIME_BLOCKS), _layout(F.HOURS, width=2)),
     0x24: _layout(F.MODE, *_SETBACKS, F.DHW_SENSOR_USAGE, F.DHW_BOILER_COUNT),
     0x25: _layout(F.MODE, *_SETBACKS),
     0x26: _layout(F.APPLICATION_MODE, F.MODE_CONFIGURATION, F.RUN_MODE_CONFIGURATION, F.RELAY_TWO_SAMPLING,

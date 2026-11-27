@@ -514,6 +514,40 @@ class FirmwareInteropTests(unittest.IsolatedAsyncioTestCase):
             fan = thermostat.adjustments.fan_setup
             assert fan and fan.delay_raw == 7 and fan.purge_raw is None
 
+    async def test_thermostat_monitor_blocks_through_normal_firmware(self) -> None:
+        script = tuple(
+            _block(3, "23 10000000", block, report)
+            for block, report in (
+                ("0000", "6e723149 00003f 8e9a01 c60403"),
+                ("0a00", "6e723146 0a000d 81 3412"),
+                ("1b00", "6e723147 1b0017 01000002"),
+                ("9900", "6e723145 990003 7856"),
+                ("9a00", "6e723145 9a0003 0000"),
+                ("a800", "6e723144 a80001 00"),
+            )
+        )
+        async with _gateway(script) as manager:
+            batches = [
+                await manager.read_block_group(3, NativeBlockQuery(_THERMOSTAT, b))
+                for b in (0, 0x0A, 0x1B, 0x99, 0x9A, 0xA8)
+            ]
+            assert all(not batch.missing_nodes for batch in batches)
+            (thermostat,) = NativeSnapshot(tuple(batches), ()).thermostats
+            assert thermostat.adjustments.onboard_humidity_enabled is False
+            assert thermostat.adjustments.humidity is None
+            equipment = thermostat.equipment
+            assert (
+                equipment.filter_usage
+                and equipment.filter_usage.value.interval_raw is None
+            )
+            assert equipment.filter_usage.value.elapsed_raw == 0x1234
+            assert equipment.relay_status and equipment.relay_status.value.fan1 == 2
+            assert equipment.relay_status.value.fan2 is None
+            assert [(r.block.value, r.hours) for r in equipment.runtimes] == [
+                (0x99, 0x5678),
+                (0x9A, 0),
+            ]
+
     async def test_watch_resumes_busy_wire_after_an_abandoned_firmware_read(
         self,
     ) -> None:

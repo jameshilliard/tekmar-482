@@ -7,7 +7,8 @@ from enum import IntEnum
 from typing import TYPE_CHECKING
 
 from ._native_payloads.climate import EXTRA_CLIMATE_SETUP
-from ._native_payloads.layouts import SETPOINT_FIELDS
+from ._native_payloads.codec import integer_field
+from ._native_payloads.layouts import ONBOARD_HUMIDITY_SETUP, SETPOINT_FIELDS
 from ._native_payloads.sensors import (
     ROOM_STATS,
     SensorRole,
@@ -38,7 +39,14 @@ if TYPE_CHECKING:
 
 type _Blocks = dict[tuple[int, int | None], NativeFrame]
 _INPUT_ONE = SensorSlot.EXTERNAL_1.block
-_SOURCE_GATES = (FAN_SETUP, HUMIDITY_SETUP, SENSOR_SETUP, _INPUT_ONE)
+_SOURCE_GATES = (
+    FAN_SETUP,
+    HUMIDITY_SETUP,
+    ONBOARD_HUMIDITY_SETUP,
+    SENSOR_SETUP,
+    _INPUT_ONE,
+)
+_ONBOARD_HUMIDITY_FIELD = "onboard_humidity_sensor_enabled"
 _RH = (ThermostatTarget.HUMIDIFY, ThermostatTarget.DEHUMIDIFY)
 _LEGACY_FLOOR = frozenset(("528", "538"))
 
@@ -86,10 +94,17 @@ class ThermostatAdjustments:
     floor_configured: bool | None
     fan_setup: FanSetup | None
     humidity_setup: HumiditySetup | None
+    onboard_humidity_raw: int | None
     fan: OutputSample[FanDuctStatus] | None
     slab: OutputSample[SlabStatus] | None
     humidity: OutputSample[HumidityStatus] | None
     missing_blocks: tuple[int, ...]
+
+    @property
+    def onboard_humidity_enabled(self) -> bool | None:
+        """Whether the internal sensor is selected, not whether it is reporting."""
+        raw = self.onboard_humidity_raw
+        return bool(raw) if raw in (0, 1) else None
 
     def table(self, target: ThermostatTarget) -> TargetTable | None:
         require_enum(target, ThermostatTarget)
@@ -143,6 +158,8 @@ class AdjustmentState:
         if block == HUMIDITY_SETUP:
             for target in _RH:
                 self._expire(target, blocks)
+        elif block == ONBOARD_HUMIDITY_SETUP:
+            self.humidity = None
         elif block == FAN_SETUP:
             self._expire(ThermostatTarget.FAN, blocks)
         elif block == SENSOR_SETUP:
@@ -164,6 +181,11 @@ class AdjustmentState:
             for target in _RH:
                 if before.enabled(target) != after.enabled(target):
                     self._expire(target, blocks)
+        elif block == ONBOARD_HUMIDITY_SETUP:
+            if old.decoded.get(_ONBOARD_HUMIDITY_FIELD) != new.decoded.get(
+                _ONBOARD_HUMIDITY_FIELD,
+            ):
+                self.humidity = None
         elif block == FAN_SETUP:
             old_fan, new_fan = (FanSetup.from_report(f.decoded) for f in (old, new))
             if (old_fan.stages_raw, old_fan.ventilation_raw) != (
@@ -278,6 +300,7 @@ class AdjustmentState:
             for b in (
                 FAN_SETUP,
                 HUMIDITY_SETUP,
+                ONBOARD_HUMIDITY_SETUP,
                 SENSOR_SETUP,
                 *RoomLimit,
                 *EXTRA_CLIMATE_SETUP,
@@ -318,6 +341,10 @@ class AdjustmentState:
             floor,
             fan,
             rh,
+            integer_field(
+                fields.get(ONBOARD_HUMIDITY_SETUP, {}),
+                _ONBOARD_HUMIDITY_FIELD,
+            ),
             self.fan,
             self.slab,
             self.humidity,

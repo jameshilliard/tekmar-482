@@ -27,6 +27,7 @@ if TYPE_CHECKING:
     from .native_state import NativeClimate
     from .native_status import NativeStatusBatch
     from .native_targets import ThermostatAdjustments
+    from .native_thermostat_equipment import ThermostatEquipment
     from .native_watch import ClimateChange
     from .native_water import WaterSource
     from .raw import BridgeStream
@@ -233,6 +234,7 @@ def climate_fields(device: NativeClimate) -> dict[str, object]:
         if target is not None
         else None,
         "adjustments": adjustment_fields(device.adjustments),
+        "equipment": equipment_fields(device.equipment),
         "sensors": _sensor_values(device.sensors),
     }
 
@@ -249,6 +251,8 @@ def adjustment_fields(settings: ThermostatAdjustments) -> dict[str, object]:
         "dehumidify_enabled": rh.enabled(ThermostatTarget.DEHUMIDIFY)
         if rh is not None
         else None,
+        "onboard_humidity_raw": settings.onboard_humidity_raw,
+        "onboard_humidity_enabled": settings.onboard_humidity_enabled,
         "tables": {
             t.target.name.lower(): {
                 "block": t.target.value,
@@ -279,6 +283,32 @@ def adjustment_fields(settings: ThermostatAdjustments) -> dict[str, object]:
             if f is not None
         },
         "missing_blocks": settings.missing_blocks,
+    }
+
+
+def equipment_fields(equipment: ThermostatEquipment) -> dict[str, object]:
+    relays, air_filter = equipment.relay_status, equipment.filter_usage
+    return {
+        "relays": {**asdict(relays.value), "received_ms": relays.frame.timestamp_ms}
+        if relays is not None
+        else None,
+        "filter": {
+            **asdict(air_filter.value),
+            "received_ms": air_filter.frame.timestamp_ms,
+        }
+        if air_filter is not None
+        else None,
+        "runtimes": [
+            {
+                "block": r.block.value,
+                "register": r.block.name.lower(),
+                "selector": r.selector,
+                "raw": r.raw,
+                "hours": r.hours,
+                "received_ms": r.frame.timestamp_ms,
+            }
+            for r in equipment.runtimes
+        ],
     }
 
 

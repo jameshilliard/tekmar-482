@@ -52,6 +52,7 @@ from .native_schedule import ScheduleDirectory, SystemSchedule
 from .native_setpoint import SETPOINT_BLOCKS, NativeSetpointControl, SetpointBook
 from .native_snowmelt import NativeSnowmelt, SnowmeltChannels, SnowmeltConfiguration
 from .native_targets import ADJUSTMENT_BLOCKS, AdjustmentState, ThermostatAdjustments
+from .native_thermostat_equipment import OUTPUT_RUNTIME_BLOCKS, ThermostatEquipment
 from .raw import CaptureGap
 from .water_topology import water_systems
 
@@ -138,6 +139,7 @@ class NativeClimate:
     active_air_target: AirTarget | None
     sensors: ThermostatSensors
     adjustments: ThermostatAdjustments
+    equipment: ThermostatEquipment
     air_timestamp_ms: int | None = field(compare=False)
     air_group_configuration: AirGroupConfiguration | None = None
 
@@ -184,6 +186,7 @@ class _Peer:
             self.active_air_target,
             sensors,
             self.outputs.snapshot(product, sensors, fields),
+            ThermostatEquipment.from_reports(self.blocks, self.plant.reports.values()),
             self.air_frame.timestamp_ms if self.air_frame else None,
             self.air_group_configuration,
         )
@@ -615,6 +618,7 @@ class NativeState:
             and block not in ADJUSTMENT_BLOCKS
             and block not in PLANT_REGISTERS
             and block not in SETPOINT_BLOCKS
+            and block not in OUTPUT_RUNTIME_BLOCKS
         ) or "truncated" in frame.decoded:
             return ()
         target = NativePath(frame.port, data[0], data[1] & _NODE)
@@ -625,6 +629,8 @@ class NativeState:
         if block in SETPOINT_BLOCKS:
             peer.setpoint.invalidate(block)
             return (target,)
+        if block in OUTPUT_RUNTIME_BLOCKS:
+            return (target,) if peer.blocks.pop((block, None), None) is not None else ()
         if block in PLANT_REGISTERS:
             spec = BLOCK_SELECTORS.get(block)
             selector = data[_UPDATE_HEADER] & spec[1] if spec else None

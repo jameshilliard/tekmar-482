@@ -544,6 +544,15 @@ configured stage or floor-cooling flag does not report a live output.
 `watch-native` can read the cataloged stage and floor-cooling blocks once
 after identification; `--no-thermostat-targets` skips those extra reads.
 
+`read-device` also reads cataloged equipment monitors. `NativeClimate.equipment`
+keeps the last relay-status readback, filter interval and elapsed time, and
+individual runtime registers with their source frames. A stage counter and a
+terminal counter are separate, even when both refer to the same equipment.
+Do not sum them or infer a current relay state from a counter. The live watch
+retains equipment reports it observes but does not poll these registers.
+`adjustments.onboard_humidity_enabled` is a separate read of sensor selection,
+not proof of a live sample or of enabled humidification or dehumidification.
+
 ### Thermostat sensors
 
 ```bash

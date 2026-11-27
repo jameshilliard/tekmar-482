@@ -5,6 +5,11 @@ from enum import IntEnum
 SETPOINT_FIELDS = ("wake", "unoccupied", "occupied", "sleep", "away")
 MULTI_WEEK = range(0x38, 0x3c)
 H_UNAVAILABLE = (0x4000, 0x8000, 0xc000, 0xffff)
+FILTER_DATA = 0x0a
+RELAY_STATUS = 0x1b
+RELAY_RUNTIME_BLOCKS = range(0x1c, 0x22)
+TERMINAL_RUNTIME_BLOCKS = range(0x99, 0xa3)
+ONBOARD_HUMIDITY_SETUP = 0xa8
 
 
 class LinkCounterBlock(IntEnum):
@@ -79,6 +84,9 @@ _SENSOR = (("sensor_configuration", 1), ("current_value_raw", 2),
 _PID = (("proportional_coefficient", 2), ("integral_coefficient", 2),
         ("derivative_coefficient", 2), ("inhibit_time", 1))
 _EXCHANGE = _octets("mode") + _setbacks("exchange_target")
+_RELAYS = ("heat_stage1", "heat_stage2", "cool_stage1", "cool_stage2", "fan1", "fan2")
+_TERMINAL_RUNTIMES = ("w1_heat", "w1_cool", "w2_heat", "w2_cool", "y1_heat", "y1_cool",
+                      "y2_heat", "y2_cool", "humidification", "dehumidification")
 
 FIXED_BLOCKS: dict[int, FixedLayout] = {
     0x01: _octets("stage1_terminal_raw", "stage1_pump_flags", "stage2_terminal_raw",
@@ -89,7 +97,7 @@ FIXED_BLOCKS: dict[int, FixedLayout] = {
                   "cooling_cph", "heat_cool_interlock", "heat_cool_priority"),
     0x08: _octets("fan_stage_flags", "fan_ventilation_flags", "minimum_heating_coil_temp_raw",
                   "maximum_cooling_coil_temp_raw", "fan_delay", "fan_purge", "heating_purge", "cooling_purge"),
-    0x0a: (("filter_replacement_interval", 2), ("time_since_filter_replacement", 2)),
+    FILTER_DATA: (("filter_replacement_interval", 2), ("time_since_filter_replacement", 2)),
     0x0b: _octets("shutdown_source") + _setbacks("warm_weather_shutdown"),
     0x0c: _setbacks("cold_weather_shutdown"),
     0x0e: _octets("away_period", "hold_period", "permanent_scene_1", "permanent_scene_4",
@@ -97,10 +105,9 @@ FIXED_BLOCKS: dict[int, FixedLayout] = {
     0x14: _octets("access_level", "units", "backlight", "time_format", "dst_mode", "exercise_enable"),
     0x15: (("average_room_temp", 2), ("minimum_room_temp", 2), ("maximum_room_temp", 2)),
     **dict.fromkeys(range(0x16, 0x1b), _SENSOR),
-    0x1b: _octets("heat_stage1_output", "heat_stage2_output", "cool_stage1_output",
-                  "cool_stage2_output", "fan1_output", "fan2_output"),
-    **{i: ((f"{relay}_accumulated_time", 2),) for i, relay in enumerate(
-        ("heat_stage1", "heat_stage2", "cool_stage1", "cool_stage2", "fan1", "fan2"), 0x1c)},
+    RELAY_STATUS: _octets(*(f"{relay}_output" for relay in _RELAYS)),
+    **{block: ((f"{relay}_accumulated_time", 2),)
+       for block, relay in zip(RELAY_RUNTIME_BLOCKS, _RELAYS, strict=True)},
     0x22: _octets("mix_output_mode", "mix_actuation_rate"),
     0x23: _octets("boiler_cycle_length", "boiler_differential_raw", "fire_delay", "modulation_speed",
                   "minimum_modulation_percent", "maximum_modulation_percent", "stage_delay", "turndown_ratio"),
@@ -183,13 +190,11 @@ FIXED_BLOCKS: dict[int, FixedLayout] = {
     0x96: _octets("plant_heat_cool_mode"),
     0x97: _octets("available_heat_pumps", "enabled_heat_pumps"),
     0x98: (("heat_pump_number", 1), ("heat_pump_hours", 2)),
-    **{i: ((f"{output}_hours", 2),) for i, output in enumerate((
-        "w1_heat", "w1_cool", "w2_heat", "w2_cool", "y1_heat", "y1_cool",
-        "y2_heat", "y2_cool", "humidification", "dehumidification",
-    ), 0x99)},
+    **{block: ((f"{output}_hours", 2),)
+       for block, output in zip(TERMINAL_RUNTIME_BLOCKS, _TERMINAL_RUNTIMES, strict=True)},
     0xa6: _octets("heat_pump_cycles"),
     0xa7: _octets("cool_purge_minutes"),
-    0xa8: _octets("onboard_humidity_sensor_enabled"),
+    ONBOARD_HUMIDITY_SETUP: _octets("onboard_humidity_sensor_enabled"),
     0xa9: _setbacks("balance_point"),
     0xaa: _octets("balance_point_schedule_id"),
     0xab: _octets("w1_warm_weather_shutdown_raw"),

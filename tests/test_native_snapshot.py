@@ -8,6 +8,7 @@ from tekmar_482 import (
     NativeIdentity,
     NativeInventory,
     NativeMessage,
+    NativeSnapshot,
     Packet,
     TxStatus,
     read_native_devices,
@@ -129,6 +130,32 @@ class NativeSnapshotTests(unittest.IsolatedAsyncioTestCase):
             (4, 0x21, 0x49, 0, 1),
             (4, 0x21, 0x49, 7, 8),
         ]
+
+    async def test_553_snapshot_queries_verified_monitor_registers(self) -> None:
+        self.identities = {2: (105102, 1222)}
+        self.block_fields = {
+            0x0A: bytes.fromhex("0f 9001 0400"),
+            0x1B: bytes.fromhex("17 01000001"),
+            0x99: bytes.fromhex("03 7856"),
+            0xA8: bytes.fromhex("01 01"),
+        }
+        device = NativeDevice(3, NativeAddress(0x27, 2))
+        async with self.stream.receiving(self.rx.get), asyncio.timeout(2):
+            batches = await read_native_devices(self.stream, [device])
+        requested = {b for _, _, b, _, _ in self.requests}
+        assert {0x0A, 0x1B, *range(0x99, 0x9F), 0xA1, 0xA2, 0xA8} <= requested
+        assert not {0x1C, 0x9F, 0xA0}.intersection(requested)
+        (climate,) = NativeSnapshot(batches, ()).thermostats
+        assert climate.adjustments.onboard_humidity_enabled is True
+        relay = climate.equipment.relay_status
+        assert relay and relay.value.heat_stage1 == 1 and relay.value.fan2 is None
+        air_filter = climate.equipment.filter_usage
+        assert air_filter and air_filter.value.interval_raw == 400
+        assert [
+            (r.block.value, r.hours)
+            for r in climate.equipment.runtimes
+            if r.hours is not None
+        ] == [(0x99, 0x5678)]
 
     async def test_unknown_model_and_reused_address_do_not_inherit_candidates(
         self,
