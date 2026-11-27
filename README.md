@@ -1415,3 +1415,17 @@ uv run ruff check --fix src tests
 uv run mypy src tests
 uv run python -m unittest
 ```
+
+CI also runs the Python client over loopback TCP against the pinned production
+ARM image. The emulator checks the physical tN4 port and wire bytes against
+synthetic peers. This exercises unsolicited mode reports, guarded writes,
+weekly schedules, snowmelt control and status, and plant and I/O queries
+without a gateway or live device changes. On Linux with Rust and Arm binutils
+installed:
+
+```bash
+git submodule update --init
+make -C firmware image
+TEKMAR_TEST_FLASH_IMAGE=firmware/target/thumbv4t-none-eabi/release/tekmar-482-firmware.bin \
+    uv run python -m unittest -v tests.test_firmware_interop
+```

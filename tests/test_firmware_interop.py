@@ -1,0 +1,384 @@
+"""Exercise the public client against the pinned production ARM firmware."""
+
+from __future__ import annotations
+
+import asyncio
+import json
+import os
+import shutil
+import signal
+import unittest
+from calendar import Day
+from contextlib import asynccontextmanager, suppress
+from datetime import time
+from pathlib import Path
+from typing import TYPE_CHECKING
+
+from tekmar_482 import (
+    BridgeClient,
+    BridgeManagement,
+    GatewayEndpoint,
+    IoDirectory,
+    NativeAddress,
+    NativeBlockQuery,
+    NativeField,
+    NativePath,
+    NativeSnapshot,
+    NativeState,
+    NativeStatusQuery,
+    NativeWriteStatus,
+    ScheduleChange,
+    ScheduleEvent,
+    ScheduleTarget,
+    SnowmeltGroupStatus,
+    SnowmeltKey,
+    SnowmeltOperatingState,
+    SnowmeltOperation,
+    TargetSlot,
+    ThermostatMode,
+    ThermostatTarget,
+    ThermostatTargetChange,
+    TxStatus,
+    WaterDetection,
+    read_weekly_schedule,
+    watch_native,
+)
+
+if TYPE_CHECKING:
+    from collections.abc import AsyncIterator, Sequence
+
+type Exchange = tuple[int, str, tuple[str, ...]]
+_IMAGE = os.environ.get("TEKMAR_TEST_FLASH_IMAGE")
+_EMULATOR = Path(__file__).resolve().parents[1] / "firmware" / "tests" / "smoke.py"
+
+
+async def _uart_step(
+    incoming: asyncio.StreamReader,
+    outgoing: asyncio.StreamWriter,
+    program: asyncio.StreamReader,
+    control: asyncio.StreamWriter,
+) -> None:
+    while True:
+        try:
+            async with asyncio.timeout(0.002):
+                data = await incoming.read(4096)
+            if not data:
+                return
+        except TimeoutError:
+            data = b""  # Advance bus timers while the client awaits a reply.
+        control.write(data.hex().encode("ascii") + b"\n")
+        await control.drain()
+        row = await program.readline()
+        if not row:
+            msg = "firmware emulator stopped before the client closed the UART"
+            raise RuntimeError(msg)
+        reply = bytes.fromhex(row.decode("ascii"))
+        if reply:
+            outgoing.write(reply)
+            await outgoing.drain()
+
+
+@asynccontextmanager
+async def _connected(
+    program: asyncio.StreamReader,
+    control: asyncio.StreamWriter,
+) -> AsyncIterator[BridgeManagement]:
+    accepted: asyncio.Queue[tuple[asyncio.StreamReader, asyncio.StreamWriter]] = (
+        asyncio.Queue()
+    )
+
+    def accept(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        accepted.put_nowait((reader, writer))
+
+    async def serve() -> None:
+        reader, writer = await accepted.get()
+        try:
+            await _uart_step(reader, writer, program, control)
+        finally:
+            writer.close()
+            await writer.wait_closed()
+
+    server = await asyncio.start_server(accept, "127.0.0.1", 0)
+    endpoint = GatewayEndpoint.tcp("127.0.0.1", server.sockets[0].getsockname()[1])
+    async with server, asyncio.TaskGroup() as tasks:
+        tasks.create_task(serve())
+        async with endpoint.connect() as wire:
+            gateway = BridgeClient(wire)
+            await gateway.identify()
+            async with gateway.normal(select_mode=False) as client:
+                yield BridgeManagement(client)
+
+
+@asynccontextmanager
+async def _gateway(script: Sequence[Exchange]) -> AsyncIterator[BridgeManagement]:
+    uv = shutil.which("uv")
+    assert uv is not None and _IMAGE is not None
+    process = await asyncio.create_subprocess_exec(
+        uv,
+        "run",
+        "--script",
+        str(_EMULATOR),
+        "--client-port",
+        _IMAGE,
+        stdin=asyncio.subprocess.PIPE,
+        stdout=asyncio.subprocess.PIPE,
+        start_new_session=True,
+    )
+    try:
+        program, control = process.stdout, process.stdin
+        assert program is not None and control is not None
+        async with asyncio.timeout(60):
+            control.write(json.dumps(script).encode("ascii") + b"\n")
+            await control.drain()
+            assert await program.readline() == b"\n", "emulator did not boot"
+            async with _connected(program, control) as manager:
+                yield manager
+            control.close()
+            await control.wait_closed()
+            assert await process.wait() == 0, "firmware bus script did not complete"
+    finally:
+        if process.stdin is not None:
+            process.stdin.close()
+        if process.returncode is None:
+            # uv starts a child that inherits the emulator's control pipes.
+            with suppress(ProcessLookupError):
+                os.killpg(process.pid, signal.SIGKILL)
+            await process.wait()
+
+
+def _block(
+    port: int,
+    route: str,
+    block: str,
+    reply: str,
+    selector: str = "00",
+) -> Exchange:
+    return port, f"6d70000b {block} {route} {selector}000000", (reply,)
+
+
+_THERMOSTAT = NativeAddress(0x23, 5)
+_SNOW = NativeAddress(0x14, 3)
+_PLANT = NativeAddress(0x2A, 8)
+_SETPOINT = NativeAddress(0x31, 7)
+
+
+@unittest.skipUnless(_IMAGE, "set TEKMAR_TEST_FLASH_IMAGE to run the ARM interop suite")
+class FirmwareInteropTests(unittest.IsolatedAsyncioTestCase):
+    async def test_passive_watch_publishes_unsolicited_mode_without_querying_it(
+        self,
+    ) -> None:
+        request = "6d70000b 0000 23 10000000 00000000"
+        identity = "6e723149 00003f 8e9a01 c60402"
+        script = (
+            (3, request, (identity,)),
+            (
+                3,
+                request,
+                (
+                    "6e723146 030007 000409",
+                    "6e723146 030007 010409",
+                    identity,
+                ),
+            ),
+        )
+        path = NativePath(3, _THERMOSTAT.subnet, _THERMOSTAT.node)
+        modes: list[ThermostatMode] = []
+        changed = asyncio.Event()
+
+        def observe(updated: NativePath, state: NativeState) -> None:
+            assert updated == path
+            if (climate := state.climate(path)) and climate.setup.mode is not None:
+                modes.append(climate.setup.mode)
+                if climate.setup.mode is ThermostatMode.HEAT:
+                    changed.set()
+
+        async with (
+            _gateway(script) as manager,
+            manager.native_session([3]) as capture,
+            asyncio.TaskGroup() as tasks,
+        ):
+            watch = tasks.create_task(
+                watch_native(capture, source=None, on_change=observe),
+            )
+            # A second identity exchange lets the peer publish its mode changes
+            # before replying, without competing with autonomous discovery.
+            await manager.read_block(3, NativeBlockQuery(_THERMOSTAT, 0))
+            await manager.read_block(3, NativeBlockQuery(_THERMOSTAT, 0))
+            async with asyncio.timeout(5):
+                await changed.wait()
+            assert modes == [ThermostatMode.OFF, ThermostatMode.HEAT]
+            watch.cancel()
+
+    async def test_thermostat_mode_target_and_weekend_schedule(self) -> None:
+        def read(block: str, reply: str) -> Exchange:
+            return _block(3, "23 10000000", block, reply)
+
+        identify = read("0000", "6e723149 00003f 8e9a01 c60402")
+        off = read("0300", "6e723146 030007 000409")
+        heat = read("0300", "6e723146 030007 010409")
+        target = read("0500", "6e723148 05001f 2a212a211e")
+        retained = "6e723148 05001f 2d212a211e"
+        cycle = read("0f00", "6e723146 0f000d 010101")
+        weekend = read("1300", "6e72314a 13007f 0306090c0f1215")
+        script = (
+            identify,
+            off,
+            off,
+            (3, "6df00007 2305 0300 010409", ()),
+            # Firmware independently refreshes the legacy ModeSetting cache.
+            (3, "6d700007 0300 23 10000000", heat[2]),
+            heat,
+            identify,
+            target,
+            target,
+            (3, "6df00009 2305 0500 2e212a211e", ()),
+            # The thermostat retained a different value despite ACKing the write.
+            read("0500", retained),
+            identify,
+            cycle,
+            weekend,
+            weekend,
+            (3, "6df0000b 2305 1300 0306090c0f3030", ()),
+            read("1300", "6e723145 130060 3030"),  # Compact Sat/Sun readback.
+            identify,
+            cycle,
+            read("1000", "6e72314a 10007f 2a2a2a2a2a3636"),
+            read("1300", "6e72314a 13007f 0306090c0f3030"),
+        )
+        async with _gateway(script) as manager:
+            mode = await manager.write_thermostat_mode(
+                3,
+                _THERMOSTAT,
+                ThermostatMode.HEAT,
+                preview=False,
+            )
+            assert mode.status is NativeWriteStatus.CONFIRMED
+            assert mode.readback is not None
+            assert mode.readback.require_report().decoded["mode_setting"] == 1
+            value = await manager.write_thermostat_target(
+                3,
+                _THERMOSTAT,
+                ThermostatTargetChange(ThermostatTarget.HEAT, TargetSlot.WAKE, 23),
+                preview=False,
+            )
+            assert value.tx_result and value.tx_result.status is TxStatus.ACK
+            assert value.status is NativeWriteStatus.DIFFERENT
+            assert value.readback is not None
+            assert value.readback.require_report().body == bytes.fromhex(retained)
+            row = await manager.write_schedule_time(
+                3,
+                ScheduleTarget(_THERMOSTAT),
+                ScheduleChange(ScheduleEvent.UNOCCUPIED, Day.SUNDAY, time(8)),
+                preview=False,
+            )
+            assert row.status is NativeWriteStatus.CONFIRMED
+            week = await read_weekly_schedule(
+                manager,
+                3,
+                ScheduleTarget(_THERMOSTAT),
+                source=NativeAddress(0, 0),
+            )
+            assert week.table_complete
+            occupied, unoccupied = week.rows
+            assert occupied.display_event is ScheduleEvent.OCCUPIED
+            assert unoccupied.display_event is ScheduleEvent.UNOCCUPIED
+            assert unoccupied.days == (3, 6, 9, 12, 15, 48, 48)
+
+    async def test_snowmelt_uses_configured_zone_and_separate_group(self) -> None:
+        def read(block: str, reply: str) -> Exchange:
+            return _block(2, "14 04000000", block, reply)
+
+        app = read("d000", "6e7140c5 d00003 0302")
+        zone = read("c000", "6e7140c4 c00001 03")
+        script = (
+            read("0000", "6e7140c9 00003f 499d01 ca0402"),
+            app,
+            zone,
+            read("c200", "6e7140c4 c20001 04"),
+            read("c300", "6e7140c4 c30001 06"),
+            (2, "21f00002 0401", ()),
+            (2, "17f00003 11011b", ("57e140c5 19011b0304",)),
+            app,
+            zone,
+            (
+                2,
+                "17f00004 11021922",
+                ("57e140c5 210122ff05", "57e140c5 1901190200", "57e140c5 1901220006"),
+            ),
+        )
+        async with _gateway(script) as manager:
+            result = await manager.set_snowmelt_group(
+                2,
+                _SNOW,
+                SnowmeltOperation.MELT,
+                enabled=True,
+                expected_group=4,
+                preview=False,
+            )
+            assert (result.group, result.zone) == (4, 3)
+            assert result.status is SnowmeltGroupStatus.STATE_REPORTED
+            assert result.observed_state is SnowmeltOperatingState.MELTING
+            reading = await manager.read_snowmelt_status(2, _SNOW, keys=b"\x19\x22")
+            assert reading.answered and len(reading.reports) == 2
+            assert all(report.message.source == _SNOW for report in reading.reports)
+            water = reading.snowmelt_pair(SnowmeltKey.WATER_DETECTION)
+            slab = reading.snowmelt_pair(SnowmeltKey.SLAB_TEMPERATURE)
+            assert water and water.water_detection is WaterDetection.DRY
+            assert slab and slab.raw == 0x600
+
+    async def test_indexed_plant_io_and_setpoint_use_independent_ports(self) -> None:
+        old = _block(1, "31 40000000", "2c00", "6e7311cb 2c00ff 2006 1006 0000 0007")
+        script = (
+            _block(4, "2a 80000000", "0000", "6e72a209 00003f a79601 b60402"),
+            _block(4, "2a 80000000", "4400", "6e72a206 440007 81 4523", "81"),
+            (
+                4,
+                "1f600002 43a5",
+                (
+                    "5f52a20d 43a5e702 410042caff00 08 3412",
+                    "5f52a20e 43a5a302 580059350000 01 0100 e4",
+                ),
+            ),
+            _block(1, "31 40000000", "0000", "6e7311c9 00003f ee8a01 760402"),
+            old,
+            old,
+            (1, "6df0000c 3107 2c00 3406 1006 0000 0007", ()),
+            _block(1, "31 40000000", "2c00", "6e7311cb 2c00ff 3406 1006 0000 0007"),
+        )
+        async with _gateway(script) as manager:
+
+            async def change_setpoint() -> None:
+                await manager.read_block(1, NativeBlockQuery(_SETPOINT, 0))
+                edit = await manager.write_block(
+                    1,
+                    NativeBlockQuery(_SETPOINT, 0x2C),
+                    {NativeField.WAKE_OCCUPIED: 0x634},
+                    preview=False,
+                )
+                assert edit.status is NativeWriteStatus.CONFIRMED
+                assert edit.readback is not None and edit.readback.port == 1
+
+            product, _ = await asyncio.gather(
+                manager.read_block_group(4, NativeBlockQuery(_PLANT, 0)),
+                change_setpoint(),
+            )
+            pump = await manager.read_block_group(
+                4,
+                NativeBlockQuery(_PLANT, 0x44, 0x81),
+            )
+            directory = await manager.read_status(
+                4,
+                NativeStatusQuery.io(0x43, 0xA5),
+                peer=_PLANT,
+            )
+            state = NativeSnapshot((product, pump), (directory,)).observed_state()
+            plant = state.plant_registers(NativePath(4, _PLANT.subnet, _PLANT.node))
+            assert plant is not None
+            assert [(r.selector, r.hours) for r in plant.runtimes] == [(0x81, 0x2345)]
+            book = IoDirectory.from_batch(directory)
+            assert book.complete and book.advertised_count == 2
+            assert [(c.sample.channel, c.sample.value) for c in book.channels] == [
+                (0xA3, 1),
+                (0xE7, 0x1234),
+            ]
+            assert book.channels[0].frame.decoded["extension_hex"] == "e4"

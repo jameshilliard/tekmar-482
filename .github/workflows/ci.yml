@@ -31,3 +31,20 @@ jobs:
 
       - name: Test
         run: uv run python -m unittest
+
+  firmware-interop:
+    name: Production firmware interop
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          submodules: true
+      - uses: astral-sh/setup-uv@v8.2.0
+      - name: Install Arm binutils
+        run: sudo apt-get update && sudo apt-get install -y binutils-arm-none-eabi
+      - name: Build the pinned flash image
+        run: TEKMAR_BUILD_REVISION=$(git -C firmware rev-parse HEAD) make -C firmware image
+      - name: Exercise the client against the ARM image
+        env:
+          TEKMAR_TEST_FLASH_IMAGE: firmware/target/thumbv4t-none-eabi/release/tekmar-482-firmware.bin
+        run: uv run --locked --python 3.14 python -m unittest -v tests.test_firmware_interop
