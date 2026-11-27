@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass, field, replace
+from functools import partial
 from typing import TYPE_CHECKING
 
 from ._native_payloads import SnowmeltBlock
@@ -13,6 +14,7 @@ from ._native_payloads.queries import NativeStatusQuery, StatusRequest
 from .constants import DEFAULT_BLOCK_TIMEOUT, TN4_PORTS
 from .native import NativeAddress, NativeBlockQuery, NativeTargets
 from .native_discovery import NativeInventory
+from .native_io import recover_io_directory
 from .native_schedule import ScheduleDirectory
 from .native_sensors import ThermostatSensorMonitor
 from .native_state import NativePath, NativeState
@@ -23,7 +25,8 @@ if TYPE_CHECKING:
 
     from ._native_payloads.products import NativeProduct
     from .native_discovery import NativeDevice
-    from .native_io import IoDirectory
+    from .native_identity import NativeIdentity
+    from .native_io import IoDirectory, IoDirectoryRead
     from .native_plant_registers import PlantRegisters
     from .native_sensors import SensorObservation
     from .native_setpoint import NativeSetpointControl
@@ -39,6 +42,7 @@ _HOST = NativeAddress(0, 0)
 class NativeSnapshot:
     blocks: tuple[NativeBlockBatch, ...]
     statuses: tuple[NativeStatusBatch, ...]
+    io_reads: tuple[IoDirectoryRead, ...] = ()
 
     @property
     def schedule_directory(self) -> ScheduleDirectory:
@@ -77,11 +81,17 @@ class NativeSnapshot:
         for batch in self.blocks:
             for frame in batch.reports:
                 state.observe(frame)
+        io_by_discovery = {read.discovery: read for read in self.io_reads}
         for status in self.statuses:
             if status.query.kind is StatusRequest.IO_DISCOVERY and status.peer:
                 path = NativePath(status.port, status.peer.subnet, status.peer.node)
                 before = state.io_directory(path, IoEndpoint(*status.query.payload))
-                state.reconcile_io(status, before=before)
+                io = io_by_discovery.get(status)
+                state.reconcile_io(
+                    status,
+                    before=before,
+                    supplemental=io.supplemental if io else (),
+                )
                 continue
             for frame in status.reports:
                 state.observe(frame)
@@ -273,12 +283,19 @@ async def read_native_devices(
         await asyncio.gather(*tasks, return_exceptions=True)
 
 
+@dataclass(frozen=True, slots=True)
+class _StatusQuery:
+    peer: NativeAddress | None
+    query: NativeStatusQuery
+    identity: NativeIdentity | None = None
+
+
 def _status_queries(
     batches: Iterable[NativeBlockBatch],
     devices: Iterable[NativeDevice],
     *,
     include_line_status: bool,
-) -> dict[int, list[tuple[NativeAddress | None, NativeStatusQuery]]]:
+) -> dict[int, list[_StatusQuery]]:
     state = NativeState()
     inventory = NativeInventory(devices)
     busy: set[int] = set()
@@ -305,23 +322,31 @@ def _status_queries(
                 state.observe(frame)
                 if batch.query.block_id == 0:
                     inventory.observe(frame)
-    ports: dict[int, list[tuple[NativeAddress | None, NativeStatusQuery]]] = {}
+    ports: dict[int, list[_StatusQuery]] = {}
     for device in state.snowmelt_devices:
         if (
             device.path.port not in busy
             and (query := device.status_query()) is not None
         ):
-            ports.setdefault(device.path.port, []).append((device.path.address, query))
+            ports.setdefault(device.path.port, []).append(
+                _StatusQuery(device.path.address, query),
+            )
     for peer in inventory.devices:
         if peer.io_endpoints and peer.port not in busy:
+            path = NativePath(peer.port, peer.address.subnet, peer.address.node)
+            identity = state.identity(path)
             ports.setdefault(peer.port, []).extend(
-                (peer.address, NativeStatusQuery.io(e.subnet, e.node))
+                _StatusQuery(
+                    peer.address,
+                    NativeStatusQuery.io(e.subnet, e.node),
+                    identity,
+                )
                 for e in sorted(peer.io_endpoints)
             )
     if include_line_status:
         for port in active - busy:
             ports.setdefault(port, []).extend(
-                (None, NativeStatusQuery(kind))
+                _StatusQuery(None, NativeStatusQuery(kind))
                 for kind in (
                     StatusRequest.MASTER,
                     StatusRequest.OUTDOOR,
@@ -330,7 +355,7 @@ def _status_queries(
                     StatusRequest.ZONE_SYNC,
                 )
             )
-            ports[port].append((None, NativeStatusQuery.gateway_access()))
+            ports[port].append(_StatusQuery(None, NativeStatusQuery.gateway_access()))
     return ports
 
 
@@ -358,10 +383,12 @@ async def read_native_snapshot(
 
     async def sample(
         port: int,
-        queries: list[tuple[NativeAddress | None, NativeStatusQuery]],
-    ) -> list[NativeStatusBatch]:
-        batches = []
-        for peer, query in queries:
+        queries: list[_StatusQuery],
+    ) -> tuple[list[NativeStatusBatch], list[IoDirectoryRead]]:
+        async def read(
+            peer: NativeAddress | None,
+            query: NativeStatusQuery,
+        ) -> NativeStatusBatch:
             batch = await stream.read_status(
                 port,
                 query,
@@ -369,21 +396,35 @@ async def read_native_snapshot(
                 peer=peer,
                 timeout=timeout,
             )
-            batches.append(batch)
             if on_status is not None:
                 on_status(batch)
+            return batch
+
+        batches = []
+        io_reads = []
+        for plan in queries:
+            request = partial(read, plan.peer)
+            batch = await request(plan.query)
+            batches.append(batch)
             if batch.transmit_pending:
                 break
-        return batches
+            if plan.query.kind is StatusRequest.IO_DISCOVERY:
+                io = await recover_io_directory(batch, request, identity=plan.identity)
+                io_reads.append(io)
+                if io.supplemental and io.supplemental[-1].transmit_pending:
+                    break
+        return batches, io_reads
 
     ports = _status_queries(blocks, devices, include_line_status=include_line_status)
     tasks = [
         asyncio.create_task(sample(p, queries)) for p, queries in sorted(ports.items())
     ]
     try:
+        results = await asyncio.gather(*tasks)
         return NativeSnapshot(
             blocks,
-            tuple(b for answers in await asyncio.gather(*tasks) for b in answers),
+            tuple(b for batches, _ in results for b in batches),
+            tuple(io for _, reads in results for io in reads),
         )
     finally:
         for task in tasks:

@@ -20,6 +20,7 @@ from tekmar_482 import (
     BridgeManagement,
     GatewayEndpoint,
     IoDirectory,
+    IoEndpoint,
     NativeAddress,
     NativeBlockQuery,
     NativeField,
@@ -57,6 +58,7 @@ from tekmar_482 import (
     TraceTx,
     TxStatus,
     WaterDetection,
+    read_io_directory,
     read_weekly_schedule,
     watch_native,
 )
@@ -185,6 +187,34 @@ _SETPOINT = NativeAddress(0x31, 7)
 
 @unittest.skipUnless(_IMAGE, "set TEKMAR_TEST_FLASH_IMAGE to run the ARM interop suite")
 class FirmwareInteropTests(unittest.IsolatedAsyncioTestCase):
+    async def test_io_recovery_requests_only_the_missing_channel_in_normal_mode(
+        self,
+    ) -> None:
+        script = (
+            (
+                3,
+                "1f600002 2305",
+                tuple(
+                    f"1f52314d 2305 {ch:02x}06 533100000000 01 0100" for ch in range(5)
+                ),
+            ),
+            (3, "1f400003 230505", ("1f323146 2305 05 00 0000",)),
+        )
+        async with _gateway(script) as manager:
+            read = await read_io_directory(
+                manager,
+                3,
+                IoEndpoint(0x23, 5),
+                peer=_THERMOSTAT,
+                identity=NativeIdentity(105102, 1222, 1, 1),
+            )
+            assert not read.discovery.answered
+            assert read.discovery.covered == set(range(5))
+            (channel,) = read.supplemental
+            assert channel.answered and channel.covered == {5}
+            assert read.directory.complete
+            assert read.directory.channels[-1].sample.label is None
+
     async def test_io_discovery_collects_a_reply_train_longer_than_ten_seconds(
         self,
     ) -> None:

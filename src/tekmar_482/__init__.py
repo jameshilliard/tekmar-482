@@ -209,7 +209,7 @@ from .native_discovery import (
     discover_native,
 )
 from .native_identity import NativeIdentity, NativeIdentityMismatchError
-from .native_io import IoChannel, IoDirectory
+from .native_io import IoChannel, IoDirectory, IoDirectoryRead, read_io_directory
 from .native_line import (
     BroadcastIssue,
     BroadcastResult,
@@ -514,6 +514,7 @@ __all__ = [
     "InventoryDrainTimeoutError",
     "IoChannel",
     "IoDirectory",
+    "IoDirectoryRead",
     "IoEndpoint",
     "IoReport",
     "IoType",
@@ -766,6 +767,7 @@ __all__ = [
     "method_name",
     "method_spec",
     "open_gateway",
+    "read_io_directory",
     "read_native_devices",
     "read_native_snapshot",
     "read_snowmelt_status",

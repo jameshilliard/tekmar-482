@@ -27,6 +27,7 @@ from .constants import TN4_PORTS
 from .management import BridgeFeature
 from .native import NativeAddress, NativeFrame
 from .native_discovery import NativeProbe
+from .native_io import recover_io_directory
 from .native_plant_registers import PLANT_REGISTERS
 from .native_setpoint import SETPOINT_BLOCKS
 from .native_state import (
@@ -47,7 +48,7 @@ if TYPE_CHECKING:
     from ._observation import ObservationStream
     from .native import BlockKey
     from .native_identity import NativeIdentity
-    from .native_io import IoDirectory
+    from .native_io import IoDirectory, IoDirectoryRead
     from .native_state import NativeClimate
     from .native_status import NativeStatusBatch
     from .raw import BridgeStream, CaptureRecord, NativeBlockBatch, TxResult
@@ -204,10 +205,8 @@ class _Watch:
         self.current: dict[NativePath, NativeClimate] = {}
         self.identities: dict[NativePath, NativeIdentity] = {}
         self.latest: dict[tuple[NativePath, int], NativeBlockBatch] = {}
-        self.statuses: dict[
-            tuple[NativePath, SnowRead | IoEndpoint],
-            NativeStatusBatch,
-        ] = {}
+        self.statuses: dict[tuple[NativePath, SnowRead], NativeStatusBatch] = {}
+        self.io_reads: dict[tuple[NativePath, IoEndpoint], IoDirectoryRead] = {}
         self.io_discovery = io_discovery and active
         self.io_pending: set[tuple[NativePath, IoEndpoint]] = set()
         self.capture_index = 0
@@ -298,6 +297,7 @@ class _Watch:
             }
             self.io_pending = {k for k in self.io_pending if k[0] != path}
             self.statuses = {k: b for k, b in self.statuses.items() if k[0] != path}
+            self.io_reads = {k: r for k, r in self.io_reads.items() if k[0] != path}
 
     def _enroll(self, path: NativePath) -> None:
         if path not in self.enrolled:
@@ -485,7 +485,7 @@ class _Watch:
             if io is not None:
                 key = (path, io.endpoint)
                 if key not in self.io_pending and (
-                    key not in self.statuses
+                    key not in self.io_reads
                     or old_io is None
                     or not old_io.describes(io)
                 ):
@@ -533,6 +533,18 @@ class _Watch:
                 self.retry_hints[path, block] = hint
                 self._queue(path, block)
 
+    async def _wait_io_evidence(
+        self,
+        path: NativePath,
+        epoch: int,
+        answer: NativeStatusBatch,
+    ) -> bool:
+        last = max((f.capture_index for f in answer.reports), default=0)
+        while last > self.capture_index and epoch == self.epochs.get(path, 0):
+            self.capture_advanced.clear()
+            await self.capture_advanced.wait()
+        return epoch == self.epochs.get(path, 0)
+
     async def _read_io(
         self,
         stream: BridgeStream | OrderedNormalReads,
@@ -542,26 +554,54 @@ class _Watch:
         source: NativeAddress,
         timeout: float,
     ) -> TxResult | None:
+        async def request(query: NativeStatusQuery) -> NativeStatusBatch:
+            return await stream.read_status(
+                path.port,
+                query,
+                source=source,
+                peer=path.address,
+                timeout=timeout,
+                wait_for_edits=True,
+            )
+
+        async def supplemental(query: NativeStatusQuery) -> NativeStatusBatch | None:
+            if epoch != self.epochs.get(path, 0):
+                return None
+            try:
+                batch = await request(query)
+            except DeferredReadError:
+                return None  # Don't replay the already admitted directory.
+            except ExpiredReadError:
+                self.count += 1
+                return None
+            self.count += 1
+            await self._wait_io_evidence(path, epoch, batch)
+            return batch
+
         endpoint = before.endpoint
-        answer = await stream.read_status(
-            path.port,
-            NativeStatusQuery.io(endpoint.subnet, endpoint.node),
-            source=source,
-            peer=path.address,
-            timeout=timeout,
-            wait_for_edits=True,
+        answer = await request(NativeStatusQuery.io(endpoint.subnet, endpoint.node))
+        if not await self._wait_io_evidence(path, epoch, answer):
+            return answer.tx_result
+        previous = self.io_reads.get((path, endpoint))
+        read = await recover_io_directory(
+            answer,
+            supplemental,
+            before=previous.directory if previous else before,
+            identity=self.state.identity(path),
         )
-        # Apply directory membership only after capture consumed the evidence.
-        last = max((f.capture_index for f in answer.reports), default=0)
-        while last > self.capture_index and epoch == self.epochs.get(path, 0):
-            self.capture_advanced.clear()
-            await self.capture_advanced.wait()
         if epoch == self.epochs.get(path, 0):
             self.io_pending.discard((path, endpoint))
-            self.statuses[path, endpoint] = answer
-            if self.state.reconcile_io(answer, before=before) and self.on_native:
+            self.io_reads[path, endpoint] = read
+            changed = self.state.reconcile_io(
+                answer,
+                before=before,
+                supplemental=read.supplemental,
+            )
+            if changed and self.on_native:
                 self.on_native(path, self.state)
-        return answer.tx_result
+        return (
+            read.supplemental[-1].tx_result if read.supplemental else answer.tx_result
+        )
 
     async def probe(
         self,
@@ -898,6 +938,11 @@ async def watch_native(
         ),
         (
             *watch.statuses.values(),
+            *(
+                b
+                for read in watch.io_reads.values()
+                for b in (read.discovery, *read.supplemental)
+            ),
             *(
                 q.master_answer
                 for q in watch.queues.values()

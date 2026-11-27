@@ -36,7 +36,7 @@ from .native_calendar import (
     schedule_profile,
 )
 from .native_identity import NativeIdentity
-from .native_io import IoBook, IoDirectory
+from .native_io import IoBook, IoDirectory, IoDirectoryRead
 from .native_plant_registers import (
     PLANT_REGISTERS,
     PlantRegisterBook,
@@ -247,6 +247,7 @@ class NativeState:
         batch: NativeStatusBatch,
         *,
         before: IoDirectory | None,
+        supplemental: tuple[NativeStatusBatch, ...] = (),
     ) -> bool:
         """Merge a completed exchange against the snapshot taken before sending."""
         if batch.query.kind is not StatusRequest.IO_DISCOVERY:
@@ -264,7 +265,7 @@ class NativeState:
         books = self._peers[path].io
         book = books.setdefault(endpoint, IoBook(endpoint))
         old = book.snapshot()
-        book.reconcile(batch, before)
+        book.reconcile(IoDirectoryRead(batch, supplemental), before)
         return book.snapshot() != old
 
     def plant_registers(self, path: NativePath) -> PlantRegisters | None:

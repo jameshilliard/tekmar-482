@@ -889,8 +889,22 @@ I/O channel write.
 
 An active `watch-native` discovers the first time it sees an I/O endpoint
 and can rediscover when a later report supplies a new channel, type or count.
-It does not poll or scan guessed channel numbers. `--no-io-discovery`
+For a partial directory, it can send one explicit read per missing ID from
+a previously complete directory on that route, or from a known model's
+local terminal layout when the advertised count and observed IDs agree.
+Each missing ID must reply on the same port, reporter and payload endpoint.
+The host does not infer IDs from a count alone, reissue the directory, or
+drop old channels based on a supplemented result. `--no-io-discovery`
 keeps I/O observation passive while other requested reads continue.
+
+`read_native_snapshot` applies the same recovery after a matching identity
+read. For a single endpoint, call `read_io_directory(reader, port, endpoint,
+peer=address, identity=identity)` with a confirmed identity, or supply a
+previously complete `before=` directory. The returned `IoDirectoryRead`
+keeps the original discovery and individual follow-ups separate. A direct
+reply can complete channel coverage, but does not supply a discovery label
+or per-channel count. Unknown labels stay unknown; a live watch can retain
+a previously reported label for the same channel type.
 
 **Watch several devices on one connection.** With no `--device`, `watch-native`
 automatically identifies peers that report on its captured ports. Repeat
