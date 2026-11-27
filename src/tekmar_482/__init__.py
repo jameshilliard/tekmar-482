@@ -164,6 +164,9 @@ from .management import (
     BridgeManagement,
     BridgeMode,
     ErrorReporting,
+    LinkServiceTiming,
+    PortTransmitTiming,
+    TransmitTimingMiss,
 )
 from .models import (
     AvailableInfo,
@@ -516,6 +519,7 @@ __all__ = [
     "IoType",
     "LineBroadcast",
     "LineReportKind",
+    "LinkServiceTiming",
     "LoopAssignment",
     "LoopKind",
     "LoopSetupSlot",
@@ -586,6 +590,7 @@ __all__ = [
     "PortError",
     "PortErrorReason",
     "PortTraffic",
+    "PortTransmitTiming",
     "ProtocolError",
     "PumpElectricOutput",
     "RawTcpTpckTransport",
@@ -696,6 +701,7 @@ __all__ = [
     "TraceStep",
     "TraceTx",
     "TrafficCounters",
+    "TransmitTimingMiss",
     "TransportError",
     "TrpcCommand",
     "TrpcFieldMap",

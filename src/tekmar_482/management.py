@@ -10,7 +10,14 @@ from enum import IntEnum, IntFlag
 from math import isfinite
 from typing import TYPE_CHECKING, Self
 
-from ._bridge_diagnostics import ERROR_REPORTING_METHOD, TRACE_STATE, WIRE_VERSION
+from ._bridge_diagnostics import (
+    ERROR_REPORTING_METHOD,
+    LINK_SERVICE_TIMING,
+    LINK_TIMING_METHOD,
+    PORT_TRANSMIT_TIMING,
+    TRACE_STATE,
+    WIRE_VERSION,
+)
 from ._native_payloads.line import (
     CLOCK_REPORT,
     GROUP_UPDATE,
@@ -113,6 +120,7 @@ class BridgeFeature(IntFlag):
     ORDERED_TRACE_GAPS = 2048
     NORMAL_DISCOVER = 4096
     ORDERED_NATIVE_RESULTS = 8192
+    LINK_TIMING = 16384
 
 
 class BridgeMethod(IntEnum):
@@ -135,6 +143,7 @@ class BridgeMethod(IntEnum):
     NORMAL_BLOCK_EDIT = 0x544BF011
     NORMAL_ANNOUNCE = 0x544BF012
     NORMAL_DISCOVER = 0x544BF013
+    LINK_TIMING = LINK_TIMING_METHOD
 
 
 _PORT_OPERATIONS = frozenset(
@@ -210,6 +219,34 @@ class BridgeCapabilities:
                 return cls(version, BridgeMode(mode), ports, BridgeFeature(flags))
         msg = f"invalid binary bridge capabilities: {data.hex()}"
         raise ProtocolError(msg)
+
+
+@dataclass(frozen=True, slots=True)
+class LinkServiceTiming:
+    """Longest cooperative service pass and phase durations since boot, in us."""
+
+    max_pass_us: int
+    max_receive_us: int
+    max_line_us: int
+    max_host_us: int
+
+
+@dataclass(frozen=True, slots=True)
+class TransmitTimingMiss:
+    """Last missed TX deadline, with a wrapping gateway uptime timestamp."""
+
+    poll_gap_us: int
+    lateness_us: int
+    timestamp_ms: int
+
+
+@dataclass(frozen=True, slots=True)
+class PortTransmitTiming:
+    """Maximum active TX polling gap and most recent miss on a physical port."""
+
+    port: int
+    max_poll_gap_us: int
+    last_miss: TransmitTimingMiss | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -397,6 +434,42 @@ class BridgeManagement(_Management):
             msg = "gateway does not implement traffic counters"
             raise ProtocolError(msg)
         return reply.extra
+
+    async def _timing_request(self, body: bytes = b"") -> bytes:
+        reply = await self._exchange(
+            _ExtensionCommand(
+                TrpcService.REQUEST,
+                BridgeMethod.LINK_TIMING,
+                payload=body,
+            ),
+        )
+        if reply.method_id != BridgeMethod.LINK_TIMING:
+            msg = "gateway does not implement link timing diagnostics"
+            raise ProtocolError(msg)
+        return reply.extra
+
+    async def link_service_timing(self) -> LinkServiceTiming:
+        """Read boot-lifetime service maxima without sending on tN4."""
+        values = unpack_diagnostic(LINK_SERVICE_TIMING, await self._timing_request())
+        return LinkServiceTiming(*values)
+
+    async def port_transmit_timing(self, port: int) -> PortTransmitTiming:
+        """Read the active TX poll gap and last miss for one physical port."""
+        if port not in TN4_PORTS:
+            msg = f"invalid tN4 port: {port}"
+            raise ValueError(msg)
+        p, maximum, gap, late, ms = unpack_diagnostic(
+            PORT_TRANSMIT_TIMING,
+            await self._timing_request(bytes([port])),
+        )
+        if p != port or gap > maximum or (not late and (gap or ms)):
+            msg = "invalid port transmit timing response"
+            raise ProtocolError(msg)
+        return PortTransmitTiming(
+            p,
+            maximum,
+            TransmitTimingMiss(gap, late, ms) if late else None,
+        )
 
     async def build_revision(self) -> str:
         reply = await self._exchange(TrpcCommand.request(BridgeMethod.BUILD))

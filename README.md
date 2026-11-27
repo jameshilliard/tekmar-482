@@ -1548,12 +1548,20 @@ The package installs a `tekmar-482` command:
 
 ```bash
 tekmar-482 gateway-info --tcp 192.0.2.10:3001
+tekmar-482 timing --tcp 192.0.2.10:3001 --json
 tekmar-482 discover --tcp 192.0.2.10:3001 --json
 tekmar-482 dump --tcp 192.0.2.10:3001 --json
 tekmar-482 dump --serial /dev/serial/by-id/usb-adapter
 tekmar-482 monitor --tcp 192.0.2.10:3001
 tekmar-482 --vendor request DeviceType address=1001 --tcp 192.0.2.10:3001 --json
 ```
+
+On custom firmware advertising `LINK_TIMING`, `timing` reports the
+longest gateway service phases and each port's last missed transmit
+deadline. Use repeatable `--port` to limit the per-port results. The
+equivalent Python reads are `BridgeManagement.link_service_timing()`
+and `port_transmit_timing(port)`. They work without changing modes,
+enabling trace, or sending on tN4.
 
 Generic request/response calls and CLI requests awaiting a reply match the
 address, setpoint group, and setback slot when the method echoes those fields.

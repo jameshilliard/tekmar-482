@@ -16,6 +16,7 @@ from typing import TYPE_CHECKING
 
 from tekmar_482 import (
     BridgeClient,
+    BridgeFeature,
     BridgeManagement,
     GatewayEndpoint,
     IoDirectory,
@@ -178,6 +179,19 @@ _SETPOINT = NativeAddress(0x31, 7)
 
 @unittest.skipUnless(_IMAGE, "set TEKMAR_TEST_FLASH_IMAGE to run the ARM interop suite")
 class FirmwareInteropTests(unittest.IsolatedAsyncioTestCase):
+    async def test_link_timing_reads_from_the_production_image(self) -> None:
+        async with _gateway(()) as manager:
+            caps = await manager.capabilities()
+            assert caps is not None and caps.features & BridgeFeature.LINK_TIMING
+            service = await manager.link_service_timing()
+            assert service.max_pass_us >= service.max_receive_us > 0
+            assert service.max_line_us > 0
+            for port in range(caps.ports):
+                sample = await manager.port_transmit_timing(port)
+                assert sample.port == port
+                assert sample.max_poll_gap_us > 0  # Cold-start discovery.
+                assert sample.last_miss is None
+
     async def test_watch_reads_cataloged_thermostat_input_samples(self) -> None:
         script = tuple(
             _block(3, "23 10000000", block, report)

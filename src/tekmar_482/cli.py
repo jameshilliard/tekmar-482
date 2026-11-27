@@ -378,6 +378,12 @@ def _add_gateway_commands(
                 action="store_true",
                 help="already in unsynchronized ROM ISP",
             )
+    timing = subparsers.add_parser(
+        "timing",
+        parents=[common],
+        help="read service-loop and per-port transmit timing without changing mode",
+    )
+    timing.add_argument("--port", type=int, choices=TN4_PORTS, action="append")
 
 
 def _add_block_commands(
@@ -817,6 +823,18 @@ async def _native(args: argparse.Namespace, stdout: TextIO) -> int:
             emit({"timers_mask_timestamps": await bridge.probe(duration=args.duration)})
         elif args.command == "errors":
             await run_errors(bridge, args, emit)
+        elif args.command == "timing":
+            async with bridge.normal(select_mode=False) as client:
+                management = BridgeManagement(client)
+                emit(
+                    {
+                        "service": asdict(await management.link_service_timing()),
+                        "ports": [
+                            asdict(await management.port_transmit_timing(port))
+                            for port in dict.fromkeys(args.port or TN4_PORTS)
+                        ],
+                    },
+                )
         elif args.command == "trace-normal" or (
             args.command == "request" and args.trace_port
         ):
