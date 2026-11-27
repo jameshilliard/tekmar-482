@@ -126,7 +126,7 @@ class ScheduleConfiguration:
         )
 
 
-async def _configuration(
+async def read_schedule_configuration(
     read: _Read,
     target: ScheduleTarget,
     profile: ScheduleProfile,
@@ -152,17 +152,13 @@ def _from_setup(
     fields = setup.decoded
     binding: int | None
     if target.system is not None:
-        binding = (
-            target.system + 1
-            if fields.get("master_flag") == 1
-            else ScheduleBinding.NONE.value
-        )
-    elif target.channel is ScheduleChannel.COOL and (
-        "cooling_schedule_id" in fields or not profile.shares_heating_schedule
-    ):
-        binding = _integer(fields, "cooling_schedule_id")
+        master = _integer(fields, "master_flag")
+        binding = target.system + 1 if master == 1 else 0 if master == 0 else None
     else:
-        binding = _integer(fields, "heating_schedule_id")
+        binding = _integer(
+            fields,
+            schedule_binding_field(target, profile, fields).label,
+        )
     return ScheduleConfiguration(
         target,
         profile,
@@ -171,6 +167,18 @@ def _from_setup(
         _integer(fields, "schedule_cycling_rate"),
         _integer(fields, "num_daily_events"),
     )
+
+
+def schedule_binding_field(
+    target: ScheduleTarget,
+    profile: ScheduleProfile,
+    fields: Mapping[str, object],
+) -> NativeField:
+    if target.channel is ScheduleChannel.COOL and (
+        "cooling_schedule_id" in fields or not profile.shares_heating_schedule
+    ):
+        return NativeField.COOLING_SCHEDULE_ID
+    return NativeField.HEATING_SCHEDULE_ID
 
 
 @dataclass(frozen=True, slots=True)
@@ -445,7 +453,7 @@ async def read_weekly_schedule(
 
     identity = (await read(NativeBlockQuery(target.address, 0))).require_report()
     profile = ScheduleProfile.from_identification(identity.decoded)
-    config, setup = await _configuration(read, target, profile)
+    config, setup = await read_schedule_configuration(read, target, profile)
     rows = []
     for event in config.active_events:
         query = target.query(event)
@@ -470,7 +478,7 @@ async def edit_schedule_time(
 ) -> NativeWriteResult:
     fields = await editor.identification(target.address)
     profile = ScheduleProfile.from_identification(fields)
-    config, setup = await _configuration(editor.read, target, profile)
+    config, setup = await read_schedule_configuration(editor.read, target, profile)
     count, cycle = config.daily_events, config.cycle
     if config.binding is None or not config.binding.owns_table:
         msg = "this device is not an identified owner of the requested schedule"

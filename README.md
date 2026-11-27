@@ -682,6 +682,39 @@ Use setup block `0x0f` to assign a capable device its own zone schedule
 editing event times; the client refuses setup rewrites that could silently
 demote a master. See the [native schedule reference](https://github.com/jameshilliard/tekmar-482-firmware/blob/master/docs/tn4-frames.md#weekly-schedules).
 
+Use `configure-schedule` to change an assignment or format, optionally with
+one or more event times in the resulting format. For example, preview
+starting a local two-event schedule on an identified device:
+
+```bash
+tekmar-482 configure-schedule 2 0x12 3 --binding zone --cycle seven_day \
+  --events 2 --time occupied monday 07:30 --time unoccupied monday 22:00 \
+  --tcp 192.0.2.10:3001 --json
+```
+
+Apply that preview only after checking the scope and existing times. Add
+`--expect-binding none --confirm` if the device is currently off. Other
+assignments include `member_2` and `master_2`. Changing an assignment does
+not select an owner automatically or alter another device's assignment.
+`--channel` selects which assignment byte to edit on devices with separate
+heat and cool assignments; it does not select a different stored calendar.
+
+The operation requires fresh, supported rows before activating a schedule.
+It preserves times you did not specify and refuses to merge conflicting
+days without an explicit replacement. The format edit is last for a local
+table. For an already-owned 033 slot, use `--system 1` through `--system 4`
+to edit the format on all four indexed rows, preserving the selector and
+master bit. Remote enabling or disabling of timer slots is not established.
+
+In Python use `await manager.configure_schedule(port, target,
+ScheduleSetupChange(binding=ScheduleBinding.ZONE, times=(change,)))`.
+Preview is the default. Pass `preview=False` and `expected_binding` to
+apply; Raw additionally takes `source=`. The client rechecks its baseline,
+and Normal firmware also guards each write. A fresh matching readback, not
+a link ACK, verifies a step. tN4 has no atomic multi-block update. A failure
+stops the plan and returns the completed or attempted steps and remaining
+unsent blocks. The client does not roll back or replay an edit.
+
 ### Setpoint controllers
 
 Select the application and the exact stored field to edit a 161 or 162:

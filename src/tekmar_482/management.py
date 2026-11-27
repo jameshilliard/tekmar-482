@@ -33,6 +33,7 @@ from .error_reports import ALL_SOURCES, ErrorReports, GatewayErrorCounter, sourc
 from .exceptions import ConnectionClosedError, ProtocolError, TekmarError
 from .native import NativeAddress, NativeTargets
 from .native_schedule import edit_schedule_time
+from .native_schedule_setup import edit_schedule_setup
 from .native_setpoint import edit_setpoint_target
 from .native_snow_control import apply_snowmelt_group, edit_snowmelt_setpoint
 from .native_status import StatusCollector, snowmelt_status_query
@@ -56,12 +57,14 @@ if TYPE_CHECKING:
     from ._native_payloads.climate import ThermostatMode
     from ._native_payloads.layouts import SnowmeltBlock
     from ._native_payloads.queries import NativeStatusQuery
+    from ._native_payloads.schedules import ScheduleBinding
     from ._native_payloads.snowmelt import SnowmeltApplication
     from ._native_payloads.writes import NativeField
     from .client import Tekmar482Client
     from .native import NativeBlockQuery, NativeFrame, NativeMessage
     from .native_identity import NativeIdentity
     from .native_schedule import ScheduleChange, ScheduleTarget
+    from .native_schedule_setup import ScheduleSetupChange, ScheduleSetupResult
     from .native_setpoint import SetpointTargetChange
     from .native_snow_control import SnowmeltGroupResult, SnowmeltOperation
     from .native_state import NativePath
@@ -640,6 +643,31 @@ class BridgeManagement(_Management):
             expected_identity=expected_identity,
         ) as editor:
             return await edit_schedule_time(editor, target, change, preview=preview)
+
+    async def configure_schedule(
+        self,
+        port: int,
+        target: ScheduleTarget,
+        change: ScheduleSetupChange,
+        *,
+        expected_binding: ScheduleBinding | None = None,
+        expected_identity: NativeIdentity | None = None,
+        timeout: float = DEFAULT_BLOCK_TIMEOUT,
+        preview: bool = True,
+    ) -> ScheduleSetupResult:
+        """Prepare or apply a weekly schedule without leaving Normal mode."""
+        async with self._block_editor(
+            port,
+            timeout,
+            expected_identity=expected_identity,
+        ) as editor:
+            return await edit_schedule_setup(
+                editor,
+                target,
+                change,
+                expected_binding=expected_binding,
+                preview=preview,
+            )
 
     async def read_status(
         self,

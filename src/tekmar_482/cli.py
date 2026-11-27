@@ -42,8 +42,11 @@ from .cli_native_watch import (
 )
 from .cli_schedule import (
     add_schedule_commands,
+    expected_schedule_binding,
     schedule_change,
+    schedule_configuration_fields,
     schedule_fields,
+    schedule_setup_change,
     schedule_target,
 )
 from .cli_status import (
@@ -73,6 +76,7 @@ from .native_discovery import NativeDevice, discover_native
 from .native_io import IoDirectory
 from .native_scene import scene_response_fields
 from .native_schedule import read_weekly_schedule
+from .native_schedule_setup import ScheduleSetupResult
 from .native_sensors import read_thermostat_sensors
 from .native_setpoint import SetpointSlot, SetpointTargetChange
 from .native_snapshot import read_native_snapshot
@@ -133,6 +137,7 @@ _BLOCK_EDITS = frozenset(
         "set-thermostat-target",
         "scene-response",
         "write-schedule",
+        "configure-schedule",
     },
 )
 
@@ -731,6 +736,13 @@ def _endpoint(args: argparse.Namespace) -> GatewayEndpoint:
 
 
 def _validate_native_args(args: argparse.Namespace) -> None:
+    if (
+        args.command == "configure-schedule"
+        and args.confirm
+        and args.expect_binding is None
+    ):
+        msg = "applying a schedule change requires --expect-binding and --confirm"
+        raise CliError(msg)
     if args.command == "watch-native" and args.shared_network and not args.ports:
         msg = "--shared-network requires explicitly selected --port values"
         raise CliError(msg)
@@ -1105,7 +1117,18 @@ async def _native_block_edit(
     else:
         async with bridge.normal(select_mode=False) as client:
             result = await _run_block_edit(BridgeManagement(client), args)
-    emit(_write_fields(result))
+    if isinstance(result, ScheduleSetupResult):
+        emit(
+            {
+                "status": result.status.value,
+                "before": schedule_configuration_fields(result.before),
+                "steps": [_write_fields(step) for step in result.steps],
+                "remaining": [_write_fields(step) for step in result.remaining],
+                "problem": result.problem,
+            },
+        )
+    else:
+        emit(_write_fields(result))
     return int(
         result.status
         not in {
@@ -1119,8 +1142,25 @@ async def _native_block_edit(
 async def _run_block_edit(
     link: BridgeManagement | BridgeStream,
     args: argparse.Namespace,
-) -> NativeWriteResult:
+) -> NativeWriteResult | ScheduleSetupResult:
     address = NativeAddress(args.subnet, args.node)
+    if args.command == "configure-schedule":
+        configure = (
+            link.configure_schedule
+            if isinstance(link, BridgeManagement)
+            else partial(
+                link.configure_schedule,
+                source=NativeAddress(args.source_subnet, args.source_node),
+            )
+        )
+        return await configure(
+            args.port,
+            schedule_target(address, args),
+            schedule_setup_change(args),
+            expected_binding=expected_schedule_binding(args),
+            timeout=args.timeout,
+            preview=not args.confirm,
+        )
     if isinstance(link, BridgeManagement):
         mode, target = link.write_thermostat_mode, link.write_thermostat_target
         schedule, block = link.write_schedule_time, link.write_block

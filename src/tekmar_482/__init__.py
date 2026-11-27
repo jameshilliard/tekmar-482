@@ -242,6 +242,7 @@ from .native_schedule import (
     SystemSchedule,
     read_weekly_schedule,
 )
+from .native_schedule_setup import ScheduleSetupChange, ScheduleSetupResult
 from .native_sensors import (
     SensorObservation,
     SensorRead,
@@ -613,6 +614,8 @@ __all__ = [
     "ScheduleEvent",
     "ScheduleProfile",
     "ScheduleRow",
+    "ScheduleSetupChange",
+    "ScheduleSetupResult",
     "ScheduleSignal",
     "ScheduleStatus",
     "ScheduleTarget",

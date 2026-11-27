@@ -29,8 +29,11 @@ from tekmar_482 import (
     NativeState,
     NativeStatusQuery,
     NativeWriteStatus,
+    ScheduleBinding,
     ScheduleChange,
+    ScheduleCycle,
     ScheduleEvent,
+    ScheduleSetupChange,
     ScheduleTarget,
     SetpointApplication,
     SetpointSlot,
@@ -414,6 +417,98 @@ class FirmwareInteropTests(unittest.IsolatedAsyncioTestCase):
             assert result.tx_result is None and result.readback is None
             report = await manager.read_block(port, NativeBlockQuery(moved, 0))
             assert report.message.source == moved
+
+    async def test_schedule_setup_stages_a_row_then_enables_a_553(self) -> None:
+        def read(block: str, answer: str) -> Exchange:
+            return _block(3, "23 10000000", block, answer)
+
+        identify = read("0000", "6e723149 00003f 8e9a01 c60402")
+        setup = read("0f00", "6e723148 0f001d 00ed030100")
+        wake = read("1000", "6e72314a 10007f 0306090c0f1215")
+        sleep = read("1300", "6e72314a 13007f 30303030303030")
+        script = (
+            identify,
+            setup,
+            wake,
+            sleep,
+            identify,
+            setup,
+            wake,
+            wake,
+            (3, "6df0000b 2305 1000 2d06090c0f1215", ()),
+            read("1000", "6e723144 100001 2d"),
+            setup,
+            setup,
+            (3, "6df0000a 2305 0f00 01ed03010000", ()),
+            read("0f00", "6e723148 0f001d 01ed030100"),
+        )
+        async with _gateway(script) as manager:
+            result = await manager.configure_schedule(
+                3,
+                ScheduleTarget(_THERMOSTAT),
+                ScheduleSetupChange(
+                    binding=ScheduleBinding.ZONE,
+                    times=(
+                        ScheduleChange(ScheduleEvent.OCCUPIED, Day.MONDAY, time(7, 30)),
+                    ),
+                ),
+                expected_binding=ScheduleBinding.NONE,
+                expected_identity=NativeIdentity(105102, 1222, 2, None),
+                preview=False,
+            )
+            assert not result.remaining and result.status is NativeWriteStatus.CONFIRMED
+            assert all(
+                s.guard_result and s.guard_result.completed_frame for s in result.steps
+            )
+            assert [s.proposed.payload[2:4].hex() for s in result.steps] == [
+                "1000",
+                "0f00",
+            ]
+
+    async def test_timer_format_preserves_index_and_master_in_all_four_rows(
+        self,
+    ) -> None:
+        timer = NativeAddress(0x45, 5)
+        identity = _block(3, "45 10000000", "0000", "6e745149 00003f ef8a01 950402")
+
+        def row(block: str, header: str) -> Exchange:
+            return _block(
+                3,
+                "45 10000000",
+                block,
+                f"6e74514b {block}ff {header} 2a2a2a2a2a2a2a",
+                "02",
+            )
+
+        wake = row("3800", "7a")
+        script = [
+            identity,
+            wake,
+            *(row(b, "7a") for b in ("3900", "3a00", "3b00")),
+            identity,
+            wake,
+        ]
+        for b in ("3900", "3a00", "3b00", "3800"):
+            before = row(b, "7a")
+            script.extend(
+                (
+                    before,
+                    before,
+                    (3, f"6df0000c 4505 {b} 5a2a2a2a2a2a2a2a", ()),
+                    row(b, "5a"),
+                ),
+            )
+        async with _gateway(script) as manager:
+            result = await manager.configure_schedule(
+                3,
+                ScheduleTarget(timer, system=3),
+                ScheduleSetupChange(cycle=ScheduleCycle.FIVE_TWO),
+                expected_binding=ScheduleBinding.MASTER_3,
+                preview=False,
+            )
+            assert result.status is NativeWriteStatus.CONFIRMED and not result.remaining
+            assert len(result.steps) == 4
+            assert all(s.proposed.payload[4] == 0x5A for s in result.steps)
 
     async def test_indexed_timer_edit_uses_its_resolved_owner(self) -> None:
         local = NativePath(3, 0x45, 5)

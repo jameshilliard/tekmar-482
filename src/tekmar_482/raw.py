@@ -15,6 +15,7 @@ from .constants import TN4_PORTS
 from .exceptions import ConnectionClosedError, ProtocolError, TekmarError
 from .native import NativeFrame, NativeMessage
 from .native_schedule import edit_schedule_time
+from .native_schedule_setup import edit_schedule_setup
 from .native_setpoint import edit_setpoint_target
 from .native_snow_control import apply_snowmelt_group, edit_snowmelt_setpoint
 from .native_status import StatusCollector
@@ -28,12 +29,14 @@ if TYPE_CHECKING:
     from ._native_payloads.climate import ThermostatMode
     from ._native_payloads.layouts import SnowmeltBlock
     from ._native_payloads.queries import NativeStatusQuery
+    from ._native_payloads.schedules import ScheduleBinding
     from ._native_payloads.snowmelt import SnowmeltApplication
     from ._native_payloads.writes import NativeField
     from .management import ErrorReporting
     from .native import NativeAddress, NativeBlockQuery, NativeTargets
     from .native_identity import NativeIdentity
     from .native_schedule import ScheduleChange, ScheduleTarget
+    from .native_schedule_setup import ScheduleSetupChange, ScheduleSetupResult
     from .native_setpoint import SetpointTargetChange
     from .native_snow_control import SnowmeltGroupResult, SnowmeltOperation
     from .native_status import NativeStatusBatch
@@ -426,6 +429,18 @@ class BridgeStream(NativeReader, Protocol):
         timeout: float = 20,
         preview: bool = False,
     ) -> NativeWriteResult: ...
+    async def configure_schedule(
+        self,
+        port: int,
+        target: ScheduleTarget,
+        change: ScheduleSetupChange,
+        *,
+        source: NativeAddress,
+        expected_binding: ScheduleBinding | None = None,
+        expected_identity: NativeIdentity | None = None,
+        timeout: float = 20,
+        preview: bool = True,
+    ) -> ScheduleSetupResult: ...
 
 
 class RawDispatcher:
@@ -742,6 +757,34 @@ class RawDispatcher:
             expected_identity=expected_identity,
         ) as editor:
             return await edit_schedule_time(editor, target, change, preview=preview)
+
+    async def configure_schedule(
+        self,
+        port: int,
+        target: ScheduleTarget,
+        change: ScheduleSetupChange,
+        *,
+        source: NativeAddress,
+        expected_binding: ScheduleBinding | None = None,
+        expected_identity: NativeIdentity | None = None,
+        timeout: float = 20,
+        preview: bool = True,
+    ) -> ScheduleSetupResult:
+        """Prepare or apply a weekly schedule using addressed Raw transactions."""
+        async with self._editor(
+            port,
+            target.address,
+            source,
+            timeout,
+            expected_identity=expected_identity,
+        ) as editor:
+            return await edit_schedule_setup(
+                editor,
+                target,
+                change,
+                expected_binding=expected_binding,
+                preview=preview,
+            )
 
     @asynccontextmanager
     async def _editor(
