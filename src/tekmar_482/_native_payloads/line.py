@@ -171,7 +171,8 @@ class GroupReport:
 
     def fields(self) -> Fields:
         return {"group_id": self.group, "flags_raw": self.flags, "requested_enable": int(self.requested),
-                "actual_enable": int(self.actual)}
+                "requested_reserved": (self.flags >> 1) & 7,
+                "actual_enable": int(self.actual), "actual_reserved": self.flags >> 5}
 
 
 class ZoneTargetMode(IntEnum):
@@ -223,7 +224,7 @@ class GatewayAccess:
         return bool(self.flags & 2)
 
     def fields(self) -> Fields:
-        return {"request": int(self.request), "access_open": int(self.access_open)}
+        return {"request": int(self.request), "access_open": int(self.access_open), "reserved": self.flags >> 2}
 
 
 @dataclass(frozen=True, slots=True)
@@ -239,7 +240,7 @@ class NetworkLock:
         return bool(self.flags & 2)
 
     def fields(self) -> Fields:
-        return {"access_lock": int(self.access_lock), "address_lock": int(self.address_lock)}
+        return {"access_lock": int(self.access_lock), "address_lock": int(self.address_lock), "reserved": self.flags >> 2}
 
 
 @dataclass(frozen=True, slots=True)
@@ -251,7 +252,9 @@ class WarmWeatherShutdown:
         return tuple(slot for slot in TargetSlot if self.flags & (1 << slot))
 
     def fields(self) -> Fields:
-        return {name: (self.flags >> i) & 1 for i, name in enumerate(SETPOINT_FIELDS)}
+        fields: Fields = {name: (self.flags >> i) & 1 for i, name in enumerate(SETPOINT_FIELDS)}
+        fields["reserved"] = self.flags >> 5
+        return fields
 
 
 @dataclass(frozen=True, slots=True)
