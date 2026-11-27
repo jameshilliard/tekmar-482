@@ -33,6 +33,24 @@ def _frame(
 
 
 class MonitorTests(unittest.TestCase):
+    def test_master_presence_without_slots_does_not_clear_previous_data(self) -> None:
+        monitor = WaterMonitor()
+        beacon = _frame(0x3FF, b"")
+        assert monitor.observe(beacon)
+        (bare,) = monitor.sources
+        assert bare.address == _LOCAL and bare.assignment is None
+        assert not bare.topology.announced and not bare.has_measurements
+        assert not monitor.observe(beacon)
+        assert monitor.observe(_frame(0x3FF, b"\x25"))
+        assert monitor.observe(_frame(0x3CF, _BASE))
+        (known,) = monitor.sources
+        assert known.assignment and known.has_measurements
+        assert not monitor.observe(beacon) and monitor.sources == (known,)
+        assert monitor.observe(_frame(0x3FF, b"\0"))
+        (unassigned,) = monitor.sources
+        assert unassigned.topology.announced == (0,)
+        assert unassigned.assignment is None and not unassigned.has_measurements
+
     def test_two_ports_repeat_both_statuses_but_own_different_loops(self) -> None:
         monitor = WaterMonitor()
         for port, local in ((1, _OTHER), (3, _LOCAL)):
@@ -150,7 +168,7 @@ class WaterReadTests(unittest.IsolatedAsyncioTestCase):
                 assert out[:2] == bytes([1, port])
                 assert NativeMessage.from_bytes(out[2:]).message_id == 0x3F7
                 self.stream.feed(Packet(1, bytes([2, port, 0])))
-                self.feed(0x3FF, b"\x25", port)
+                self.feed(0x3FF, b"" if port == 1 else b"\x25", port)
             for _ in range(2):
                 request = await self.tx.get()
                 port = request[1]
@@ -185,6 +203,7 @@ class WaterReadTests(unittest.IsolatedAsyncioTestCase):
         ]
         assert [s.port for s in sample.sources] == [1, 3]
         assert [s.has_measurements for s in sample.sources] == [False, True]
+        assert sample.sources[0].assignment is None
         assert (
             sample.sources[1].assignment
             and sample.sources[1].assignment.kind is LoopKind.TANK

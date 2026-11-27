@@ -182,7 +182,9 @@ class WaterMonitor:
     @staticmethod
     def _water(source: WaterSource, frame: NativeFrame) -> WaterSource | None:
         data = frame.message.payload
-        if frame.message_id == MASTER_PRESENT and data:
+        if frame.message_id == MASTER_PRESENT:
+            if not data:
+                return source
             return source.with_topology(
                 replace(source.topology, announced=tuple(data[:_ANNOUNCED_SLOTS])),
             )

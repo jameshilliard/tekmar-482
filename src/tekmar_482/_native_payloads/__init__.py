@@ -60,8 +60,10 @@ CONTROL_SETUP = ("application_mode", "mode_configuration", "run_mode_configurati
 _PACKED_OCTETS = {
     "fan_stage_flags": (("fan_operation_type", 0, 3), ("fan_heat_stage1", 2, 3),
                         ("fan_heat_stage2", 4, 3), ("fan_cool_stage1", 6, 3)),
-    "fan_ventilation_flags": (("fan_cool_stage2", 0, 3), ("ventilation_mode", 2, 3)),
-    "water_temperature_flags": (("boiler_flag", 0, 1), ("mix_flag", 1, 1), ("tank_flag", 2, 1)),
+    "fan_ventilation_flags": (("fan_cool_stage2", 0, 3), ("ventilation_mode", 2, 3),
+                              ("fan_ventilation_reserved", 4, 15)),
+    "water_temperature_flags": (("boiler_flag", 0, 1), ("mix_flag", 1, 1), ("tank_flag", 2, 1),
+                                ("water_temperature_reserved", 3, 31)),
 }
 
 
@@ -264,6 +266,8 @@ def bits(value: int, *fields: tuple[str, int, int]) -> Fields:
 
 
 def master_present(r: Reader) -> Fields:
+    if not r.remaining:
+        return {}  # The 482 also accepts the header alone as proof of presence.
     fields: Fields = {"boiler_subnet": r.byte()}
     for n in range(1, min(7, len(r.remaining)) + 1):
         fields[f"mix{n}_subnet"] = r.byte()
