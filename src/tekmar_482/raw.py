@@ -9,11 +9,12 @@ from dataclasses import dataclass
 from enum import IntEnum
 from typing import TYPE_CHECKING, Protocol
 
+from ._capture import CaptureEvent, InvalidCapture, InvalidReason, StampedRecord
 from ._native_payloads.queries import StatusRequest
 from ._native_payloads.writes import BlockPatch
 from .constants import TN4_PORTS
 from .exceptions import ConnectionClosedError, ProtocolError, TekmarError
-from .native import NativeFrame, NativeMessage
+from .native import NativeFrame, NativeMessage, native_body_size
 from .native_schedule import edit_schedule_time
 from .native_schedule_setup import edit_schedule_setup
 from .native_setpoint import edit_setpoint_target
@@ -45,10 +46,28 @@ if TYPE_CHECKING:
     from .packet import Packet
     from .traffic import TrafficCounters
 
-_HEADER = 4
 _RAW_HEADER = 2
-_RX_HEADER = 6
-_INVALID_HEADER = 9
+
+__all__ = [
+    "BridgeStream",
+    "CaptureGap",
+    "CaptureRecord",
+    "FailureReason",
+    "InvalidCapture",
+    "InvalidReason",
+    "NativeBlockBatch",
+    "NativePortBusyError",
+    "NativeReader",
+    "NativeTransmitError",
+    "PortDiagnostic",
+    "PortError",
+    "PortErrorReason",
+    "RawDispatcher",
+    "RejectReason",
+    "TxResult",
+    "TxStatus",
+    "decode_raw_packet",
+]
 
 
 class TxStatus(IntEnum):
@@ -76,18 +95,9 @@ class PortErrorReason(IntEnum):
     INVALID_PORT = 2
 
 
-class InvalidReason(IntEnum):
-    STUFFING = 1
-    CRC = 2
-    CRC_DELIMITER = 3
-    BAD_END = 4
-
-
-class _Service(IntEnum):
-    NATIVE = 0
+class _Reply(IntEnum):
     TX_RESULT = 2
     PORT_ERROR = 3
-    RX_INVALID = 4
 
 
 def _reason[E: IntEnum](enum: type[E], value: int) -> E | int:
@@ -199,28 +209,6 @@ class PortDiagnostic:
 
 
 @dataclass(frozen=True, slots=True)
-class InvalidCapture:
-    port: int
-    timestamp_ms: int
-    reason: InvalidReason | int
-    bit_count: int
-    bits: bytes
-
-    @classmethod
-    def from_detail(cls, port: int, stamp: int, detail: bytes) -> InvalidCapture | None:
-        """Decode the shared Raw and Normal invalid-frame evidence."""
-        if len(detail) < _INVALID_HEADER - _RX_HEADER:
-            return None
-        count = int.from_bytes(detail[1:3], "little")
-        bits = detail[3:]
-        if len(bits) != (count + 7) // 8 or (
-            count % 8 and bits[-1] & ((1 << (8 - count % 8)) - 1)
-        ):
-            return None
-        return cls(port, stamp, _reason(InvalidReason, detail[0]), count, bits)
-
-
-@dataclass(frozen=True, slots=True)
 class CaptureGap:
     """Missing capture records before the next observation (host backlog by default)."""
 
@@ -235,50 +223,26 @@ type _Record = NativeFrame | InvalidCapture | PortError
 type CaptureRecord = _Record | CaptureGap
 
 
-def _valid_body(body: bytes) -> bool:
-    return len(body) >= _HEADER and body[3] & 63 == len(body) - _HEADER
-
-
 def decode_raw_packet(packet: Packet, capture_index: int = 0) -> _Record | TxResult:
     """Decode a gateway-to-host Raw packet without consuming a live stream."""
     data = packet.data
     if packet.type == TYPE_TN4 and len(data) >= _RAW_HEADER:
         kind, port = data[:2]
-        if kind == _Service.PORT_ERROR and len(data) == _RAW_HEADER + 1:
+        if kind == _Reply.PORT_ERROR and len(data) == _RAW_HEADER + 1:
             # InvalidPort echoes even a port number outside the physical range.
             return PortError(port, _reason(PortErrorReason, data[2]))
-        if port in TN4_PORTS:
-            if kind == _Service.NATIVE and _valid_body(data[_RX_HEADER:]):
-                return NativeFrame(
-                    port,
-                    int.from_bytes(data[2:6], "little"),
-                    data[6:],
-                    capture_index=capture_index,
-                )
-            if kind == _Service.TX_RESULT:
-                match tuple(data[2:]):
-                    case (TxStatus.ACK,):
-                        return TxResult(port, TxStatus.ACK)
-                    case (TxStatus.REJECTED, why):
-                        return TxResult(
-                            port,
-                            TxStatus.REJECTED,
-                            _reason(RejectReason, why),
-                        )
-                    case (TxStatus.FAILED, why):
-                        return TxResult(
-                            port,
-                            TxStatus.FAILED,
-                            _reason(FailureReason, why),
-                        )
-            if kind == _Service.RX_INVALID and len(data) >= _INVALID_HEADER:
-                capture = InvalidCapture.from_detail(
-                    port,
-                    int.from_bytes(data[2:6], "little"),
-                    data[_RX_HEADER:],
-                )
-                if capture is not None:
-                    return capture
+        if kind == _Reply.TX_RESULT and port in TN4_PORTS:
+            match tuple(data[2:]):
+                case (TxStatus.ACK,):
+                    return TxResult(port, TxStatus.ACK)
+                case (TxStatus.REJECTED, why):
+                    return TxResult(port, TxStatus.REJECTED, _reason(RejectReason, why))
+                case (TxStatus.FAILED, why):
+                    return TxResult(port, TxStatus.FAILED, _reason(FailureReason, why))
+        elif (record := StampedRecord.read(data)) is not None and (
+            capture := record.received(capture_index)
+        ) is not None:
+            return capture
     msg = "unexpected raw packet type, service, port or payload length"
     raise ProtocolError(msg)
 
@@ -526,7 +490,7 @@ class RawDispatcher:
         self._check_active()
         if isinstance(body, NativeMessage):
             body = body.to_bytes()
-        if port not in TN4_PORTS or not _valid_body(body):
+        if port not in TN4_PORTS or len(body) != native_body_size(body):
             msg = "expected a physical port and complete native frame"
             raise ValueError(msg)
         if port in self._pending:
@@ -535,7 +499,7 @@ class RawDispatcher:
         future: asyncio.Future[TxResult] = asyncio.get_running_loop().create_future()
         self._pending[port] = future
         try:
-            await self._write(bytes((_Service.NATIVE, port)) + bytes(4) + body)
+            await self._write(bytes((CaptureEvent.NATIVE, port)) + bytes(4) + body)
             return await future
         except Exception as err:
             self.fail(err)

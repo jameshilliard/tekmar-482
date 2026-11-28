@@ -85,7 +85,7 @@ if TYPE_CHECKING:
     from .raw import NativeBlockBatch, TxResult
 
 _CAPABILITY_BYTES = 4
-_ROM_HANDOFF_WIRE_VERSION = 2
+_ROM_HANDOFF_WIRE_VERSIONS = frozenset({2, 3})
 _LINK_RESULT_BYTES = 2  # physical port and link outcome
 _BUSY = b"\x01"
 _GATEWAY_SOURCE = NativeAddress(0, 0)
@@ -225,9 +225,9 @@ class BridgeCapabilities:
             version, mode, ports = data[:3]
             flags = int.from_bytes(data[3:], "little")
             if mode in BridgeMode and ports == len(TN4_PORTS):
-                # Version 2 shares the ROM handoff, not the Raw transport.
+                # These versions share the ROM handoff, not the capture records.
                 if version != WIRE_VERSION and not (
-                    for_update and version == _ROM_HANDOFF_WIRE_VERSION
+                    for_update and version in _ROM_HANDOFF_WIRE_VERSIONS
                 ):
                     msg = (
                         f"unsupported custom bridge wire version {version}; "

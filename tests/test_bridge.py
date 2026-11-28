@@ -21,6 +21,7 @@ from tekmar_482 import (
     NativeFrame,
     Packet,
     ProtocolError,
+    RxFlag,
     StockFirmwareError,
     Tekmar482Client,
     TxResult,
@@ -75,7 +76,7 @@ def management(method: int, service: int, body: bytes = b"") -> bytes:
     )
 
 
-RAW_CAPABILITIES = management(1, 4, bytes([3, 0, 5, 3]))
+RAW_CAPABILITIES = management(1, 4, bytes([4, 0, 5, 3]))
 
 
 def raw_wire(data: bytes) -> bytes:
@@ -137,7 +138,7 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         ]
 
     async def test_reconnect_learns_raw_header_before_reading_past_caps(self) -> None:
-        record = Packet(1, bytes(6) + bytes.fromhex("1230002b ca352f") + bytes(40))
+        record = Packet(1, bytes(6) + bytes.fromhex("1230002a ca352f") + bytes(40))
         capture = raw_wire(record.data)
         assert capture[:3] == bytes.fromhex("ca3501")
 
@@ -150,7 +151,7 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
             # Ignore a bad captured checksum before identification.
             writer.write(
                 b"\xca\x01\x01\x00\xff\x35"
-                + management(1, 4, bytes([3, 1, 5, 3]))
+                + management(1, 4, bytes([4, 1, 5, 3]))
                 + capture,
             )
             build = management(4, 1)
@@ -332,8 +333,8 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_raw_exit_drains_a_result_before_reusing_link(self) -> None:
         sent = asyncio.Event()
-        body = bytes.fromhex("12300025 ca352f") + bytes(34)
-        raw_frame = raw_wire(bytes(6) + body)
+        body = bytes.fromhex("12300024 ca352f") + bytes(33)
+        raw_frame = raw_wire(bytes(6) + body + b"\x01")
         assert raw_frame[:3] == bytes.fromhex("ca2f01")
 
         async def app(
@@ -376,7 +377,11 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
             bridge = BridgeClient(wire)
             await bridge.identify()
             async with bridge.stream(diagnostics=False) as stream:
-                assert await stream.read() == NativeFrame(0, 0, body)
+                sample = await stream.read()
+                assert isinstance(sample, NativeFrame)
+                assert (
+                    sample == NativeFrame(0, 0, body) and sample.rx_flags == RxFlag.ACK
+                )
                 pending = asyncio.create_task(stream.send(1, body))
                 await sent.wait()
                 waiting = asyncio.create_task(stream.read())
@@ -1138,13 +1143,15 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
     async def test_different_build_auto_programs_and_verifies_boot(self) -> None:
         await self.check_auto_program("f" * 40)
 
-    async def test_version_two_raw_application_can_upgrade_without_a_button(
+    async def test_older_raw_applications_can_upgrade_without_a_button(
         self,
     ) -> None:
-        await self.check_auto_program(
-            "f" * 40,
-            capabilities=management(1, 4, bytes([2, 1, 5, 3])),
-        )
+        for version in (2, 3):
+            with self.subTest(version=version):
+                await self.check_auto_program(
+                    "f" * 40,
+                    capabilities=management(1, 4, bytes([version, 1, 5, 3])),
+                )
 
     async def test_unversioned_build_auto_programs_and_verifies_boot(self) -> None:
         await self.check_auto_program("unversioned")

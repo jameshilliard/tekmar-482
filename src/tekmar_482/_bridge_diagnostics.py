@@ -3,7 +3,7 @@
 from enum import IntEnum
 from struct import Struct
 
-WIRE_VERSION = 3
+WIRE_VERSION = 4
 PANEL = Struct("<2I2Q3I")
 CAPTURE_COUNTERS = Struct("<2I5Q5I")
 PORT_DROPS = Struct("<BQQ")

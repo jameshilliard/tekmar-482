@@ -8,6 +8,7 @@ from tekmar_482 import (
     BridgeManagement,
     ConnectionClosedError,
     GatewayTraceGap,
+    NativeFrame,
     NormalTrace,
     NormalTraceState,
     ProtocolError,
@@ -21,7 +22,13 @@ from tekmar_482 import (
 )
 from tekmar_482.cli import build_parser, run
 from tekmar_482.packet import Packet
-from tekmar_482.raw import CaptureGap, FailureReason, InvalidCapture, InvalidReason
+from tekmar_482.raw import (
+    CaptureGap,
+    FailureReason,
+    InvalidCapture,
+    InvalidReason,
+    decode_raw_packet,
+)
 from tekmar_482.tpck import serialize
 
 from .test_bridge import listen, management
@@ -39,17 +46,25 @@ class NormalTraceTests(unittest.IsolatedAsyncioTestCase):
                 packet=Packet(0xD0, bytes.fromhex(data)),
             ).decoded
 
-        rx = decode("00 02 01000000 03 76f00608 00032b0a06000000")
+        capture = "00 02 01000000 76f00608 00032b0a06000000 03"
+        rx = decode(capture)
         assert isinstance(rx, TraceRx) and rx.flags == RxFlag.ACK | RxFlag.EARLY_START
         assert rx.frame.port == 2 and rx.frame.timestamp_ms == 1
         assert rx.frame.message_id == 0x36F
-        tx = decode("01 00 ffffffff 03 02 6d700007 03000000008000")
+        raw = decode_raw_packet(Packet(1, bytes.fromhex(capture)))
+        assert isinstance(raw, NativeFrame)
+        assert raw == rx.frame and raw.rx_flags == rx.flags
+        base = decode_raw_packet(Packet(1, bytes.fromhex(capture)[:-1]))
+        assert isinstance(base, NativeFrame) and base == raw and base.rx_flags is None
+        tx = decode("01 00 ffffffff 6d700007 03000000008000 03 02")
         assert isinstance(tx, TraceTx) and tx.origin is TraceOrigin.PROBE
         assert tx.failure is FailureReason.ARBITRATION_LOST
         assert tx.frame.message_id == 0x2D7 and tx.frame.timestamp_ms == 0xFFFFFFFF
-        ack = decode("01 00 00000000 01 00 61f00002 0c01")
+        ack = decode("01 00 00000000 61f00002 0c01 01 00")
         assert isinstance(ack, TraceTx) and ack.failure is None
-        assert decode("04 03 02000000 02 0900 8080") == InvalidCapture(
+        invalid = "04 03 02000000 02 0900 8080"
+        assert decode(invalid) == decode_raw_packet(Packet(1, bytes.fromhex(invalid)))
+        assert decode(invalid) == InvalidCapture(
             3,
             2,
             InvalidReason.CRC,
@@ -59,7 +74,10 @@ class NormalTraceTests(unittest.IsolatedAsyncioTestCase):
         assert decode("05 15 ffffffffffffffff") == GatewayTraceGap((1 << 64) - 1, 0x15)
         for data in (
             "00",
-            "00 05 00000000 00 76f00600",
+            "00 05 00000000 76f00600 00",
+            capture[:-3],
+            capture + " 00",
+            "00 02 01000000 03 76f00608 00032b0a06000000",  # Retired prefix flags.
             "ff 00 00000000",
             "04 03 02000000 02 0900 80",
             "04 03 02000000 02 0900 8081",
@@ -69,7 +87,7 @@ class NormalTraceTests(unittest.IsolatedAsyncioTestCase):
             "05 01 0000000000000000",
             "05 01 01000000",
             "05 01 010000000000000000",
-            "01 02 00000000 00 00 12300004",
+            "01 02 00000000 12300004 00 00",
         ):
             assert decode(data) is None
 
@@ -88,8 +106,9 @@ class NormalTraceTests(unittest.IsolatedAsyncioTestCase):
     async def test_refuses_stock_old_and_raw_without_changing_modes(self) -> None:
         for caps, reason in (
             ("0400000000", "Normal trace requires"),
-            ("0401f04b5403000503", "Normal trace requires"),
-            ("0401f04b5403010507", "Normal trace requires"),
+            ("0401f04b5404000503", "Normal trace requires"),
+            ("0401f04b5404010507", "Normal trace requires"),
+            ("0401f04b5403000507", "unsupported custom bridge wire version"),
             ("0401f04b5401000507", "unsupported custom bridge wire version"),
         ):
             script = Script(("0101f04b54", caps))
@@ -102,7 +121,7 @@ class NormalTraceTests(unittest.IsolatedAsyncioTestCase):
     async def test_owned_scope_restores_previous_mask_on_cancellation(self) -> None:
         state = "040bf04b5402" + "00" * 40
         script = Script(
-            ("0101f04b54", "0401f04b5403000507"),
+            ("0101f04b54", "0401f04b5404000507"),
             ("010bf04b54", state),
             ("000bf04b5411", "030bf04b5411"),
             ("000bf04b5402", "030bf04b5402"),
@@ -133,7 +152,7 @@ class NormalTraceTests(unittest.IsolatedAsyncioTestCase):
     ) -> None:
         high = 1 << 42
         counters = struct.pack("<5Q", 4, 0, high, 0, 8).hex()
-        caps = ("0101f04b54", "0401f04b5403000507")
+        caps = ("0101f04b54", "0401f04b5404000507")
         script = Script(
             caps,
             ("010bf04b54", "040bf04b5411" + counters),
@@ -154,7 +173,7 @@ class NormalTraceTests(unittest.IsolatedAsyncioTestCase):
         high = 1 << 48
         for last in (9, high * 2):
             script = Script(
-                ("0101f04b54", "0401f04b5403000507"),
+                ("0101f04b54", "0401f04b5404000507"),
                 (
                     "010bf04b54",
                     "040bf04b5400" + struct.pack("<5Q", high, 0, 0, 0, 0).hex(),
@@ -180,7 +199,7 @@ class NormalTraceTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_wide_firmware_rejects_truncated_trace_counters(self) -> None:
         script = Script(
-            ("0101f04b54", "0401f04b5403000507"),
+            ("0101f04b54", "0401f04b5404000507"),
             ("010bf04b54", "040bf04b54" + "00" * 21),
         )
         async with Tekmar482Client(script) as client:
@@ -189,7 +208,7 @@ class NormalTraceTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_reconnect_does_not_restore_a_mask_to_the_new_gateway(self) -> None:
         script = Script(
-            ("0101f04b54", "0401f04b5403000507"),
+            ("0101f04b54", "0401f04b5404000507"),
             ("010bf04b54", "040bf04b54" + "00" * 41),
             ("000bf04b5401", "030bf04b5401"),
         )
@@ -218,20 +237,20 @@ class NormalTraceTests(unittest.IsolatedAsyncioTestCase):
                     return
                 caps = management(1, 1)
                 assert first + await reader.readexactly(len(caps) - 1) == caps
-                caps_reply = management(1, 4, bytes.fromhex("03000507"))
+                caps_reply = management(1, 4, bytes.fromhex("04000507"))
                 writer.write(caps_reply)
                 before = bytes(1) + struct.pack("<5Q", 0, 0, 0xFFFFFFFF, 0, 0)
                 after = bytes(1) + struct.pack("<5Q", 0, 0, 0x100000001, 0, 0)
                 rx = serialize(
                     Packet(
                         0xD0,
-                        bytes.fromhex("00 02 07000000 01 76f00608 00032b0a06000000"),
+                        bytes.fromhex("00 02 07000000 76f00608 00032b0a06000000 01"),
                     ),
                 )
                 tx = serialize(
                     Packet(
                         0xD0,
-                        bytes.fromhex("01 02 08000000 03 00 6d700007 03000000008000"),
+                        bytes.fromhex("01 02 08000000 6d700007 03000000008000 03 00"),
                     ),
                 )
                 report = serialize(Packet(6, bytes.fromhex("023f010000 0100002b")))

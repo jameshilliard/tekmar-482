@@ -5,15 +5,16 @@ from __future__ import annotations
 import asyncio
 from collections import deque
 from dataclasses import dataclass
-from enum import IntEnum, IntFlag
+from enum import IntEnum
 from time import monotonic_ns
 from typing import TYPE_CHECKING, Self
 
+from ._capture import CaptureEvent, InvalidCapture, StampedRecord
 from .constants import TN4_PORTS
 from .exceptions import ConnectionClosedError, ProtocolError
-from .native import NativeFrame
+from .native import NativeFrame, RxFlag
 from .packet import TYPE_NORMAL_TRACE, TYPE_TRPC
-from .raw import CaptureGap, FailureReason, InvalidCapture
+from .raw import CaptureGap, FailureReason
 from .trpc import TrpcPacket
 
 if TYPE_CHECKING:
@@ -22,16 +23,8 @@ if TYPE_CHECKING:
     from .management import BridgeManagement
     from .packet import Packet
 
-_PREFIX = 6
 _TX_DETAILS = 2
 _GAP_BYTES = 10
-
-
-class _Event(IntEnum):
-    RX = 0
-    TX = 1
-    INVALID = 4
-    GAP = 5
 
 
 class TraceOrigin(IntEnum):
@@ -41,11 +34,6 @@ class TraceOrigin(IntEnum):
     PROBE = 3
     STAGE_COMMAND = 4
     SERVICE_FRAME = 5
-
-
-class RxFlag(IntFlag):
-    ACK = 1
-    EARLY_START = 2
 
 
 @dataclass(frozen=True, slots=True)
@@ -86,28 +74,30 @@ def _decode_trace(
     data: bytes,
     capture_index: int = 0,
 ) -> TraceRx | TraceTx | InvalidCapture | GatewayTraceGap | None:
-    if len(data) < _PREFIX:
-        return None
-    kind, port = data[:2]
-    if kind == _Event.GAP:
-        if len(data) != _GAP_BYTES or not 0 < port < 1 << len(TN4_PORTS):
+    if data[:1] == bytes((CaptureEvent.GAP,)):
+        if len(data) != _GAP_BYTES or not 0 < data[1] < 1 << len(TN4_PORTS):
             return None
+        port = data[1]
         count = int.from_bytes(data[2:], "little")
         return GatewayTraceGap(count, port) if count >= port.bit_count() else None
-    if port not in TN4_PORTS:
+    record = StampedRecord.read(data)
+    if record is None:
         return None
-    stamp = int.from_bytes(data[2:_PREFIX], "little")
-    body = data[_PREFIX:]
-    if kind == _Event.INVALID:
-        return InvalidCapture.from_detail(port, stamp, body)
+    if record.event != CaptureEvent.TX_ATTEMPT:
+        sample = record.received(capture_index)
+        if isinstance(sample, NativeFrame):
+            return (
+                TraceRx(sample, sample.rx_flags)
+                if sample.rx_flags is not None
+                else None
+            )
+        return sample
+    body = record.body
     try:
-        if kind == _Event.RX and body:
-            frame = NativeFrame(port, stamp, body[1:], capture_index=capture_index)
-            return TraceRx(frame, RxFlag(body[0]))
-        if kind == _Event.TX and len(body) >= _TX_DETAILS:
-            origin, outcome = body[:2]
+        if len(body) >= _TX_DETAILS:
+            origin, outcome = body[-_TX_DETAILS:]
             return TraceTx(
-                NativeFrame(port, stamp, body[_TX_DETAILS:]),
+                NativeFrame(record.port, record.timestamp_ms, body[:-_TX_DETAILS]),
                 TraceOrigin(origin) if origin in TraceOrigin else origin,
                 FailureReason(outcome) if outcome in FailureReason else outcome or None,
             )

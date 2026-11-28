@@ -38,6 +38,7 @@ if TYPE_CHECKING:
     from .raw import BridgeStream
 
 _DEFAULT_BAUD = 9600
+_LITERAL_RAW_SINCE = 3
 _RAW_EXTENSIONS = 1
 _TICK_MASK = 0xFFFFFFFF
 
@@ -154,7 +155,7 @@ class BridgeClient:
                     raise ProtocolError(msg)
 
     async def identify(self, *, for_update: bool = False) -> None:
-        """Identify this protocol, or allow the previous version for ROM handoff."""
+        """Identify this protocol; the installer can also use older ROM handoffs."""
         async with self._transaction():
             if self._wire.baudrate != _DEFAULT_BAUD:
                 burst = b"\xca" * max(1, self._wire.baudrate // 1250)
@@ -180,7 +181,9 @@ class BridgeClient:
             self._features = (
                 caps.features if current else caps.features & BridgeFeature.ROM_UPDATE
             )
-            self._parser.literal_header = current and caps.mode is BridgeMode.RAW
+            self._parser.literal_header = (
+                caps.mode is BridgeMode.RAW and caps.wire_version >= _LITERAL_RAW_SINCE
+            )
 
     async def enter_update_mode(self) -> None:
         async with self._transaction():

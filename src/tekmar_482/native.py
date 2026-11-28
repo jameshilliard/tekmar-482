@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field, replace
 from datetime import time
+from enum import IntFlag
 from typing import TYPE_CHECKING, Self
 
 from ._native_payloads import (
@@ -153,6 +154,11 @@ class NativeTargets:
         return self.mask
 
 
+def native_body_size(body: bytes) -> int:
+    """Return the declared native size, or the header size for a short read."""
+    return _HEADER + (body[_HEADER - 1] & _MAX_PAYLOAD if len(body) >= _HEADER else 0)
+
+
 @dataclass(frozen=True, slots=True)
 class NativeMessage:
     message_id: int
@@ -178,7 +184,7 @@ class NativeMessage:
     @classmethod
     def from_bytes(cls, body: bytes) -> Self:
         header = int.from_bytes(body[:_HEADER], "big")
-        if len(body) != _HEADER + (header & _MAX_PAYLOAD):
+        if len(body) != native_body_size(body):
             msg = "native body length does not match its header"
             raise ValueError(msg)
         return cls(
@@ -416,6 +422,11 @@ class NativeMessage:
         return decode_payload(self.message_id, self.payload)
 
 
+class RxFlag(IntFlag):
+    ACK = 1
+    EARLY_START = 2
+
+
 @dataclass(frozen=True, slots=True)
 class NativeFrame:
     port: int
@@ -423,6 +434,8 @@ class NativeFrame:
     body: bytes
     # Connection-local receive order; zero for frames constructed outside a stream.
     capture_index: int = field(default=0, kw_only=True, compare=False, repr=False)
+    # Base captures and synthesized frames do not carry these observations.
+    rx_flags: RxFlag | None = field(default=None, kw_only=True, compare=False)
     message: NativeMessage = field(init=False, repr=False, compare=False)
 
     def __post_init__(self) -> None:

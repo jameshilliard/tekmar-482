@@ -39,14 +39,14 @@ if TYPE_CHECKING:
     from tekmar_482 import NativeState
 
 _CAP = "0101f04b54"
-_SUPPORT = "0401f04b54030005bf2e"  # Ordered active reads without subnet discovery.
+_SUPPORT = "0401f04b54040005bf2e"  # Ordered active reads without subnet discovery.
 _ID = "03354000000000000000"
 _MODE = "03354000000003000000"
 _PLANT = 104103
 
 
 def record(peer: NativeFrame) -> Packet:
-    return trace("00 03 01000000 01 " + peer.body.hex())
+    return trace("00 03 01000000 " + peer.body.hex() + " 01")
 
 
 def end(wire: Wire, peer: NativeFrame) -> None:
@@ -69,7 +69,7 @@ async def admit_read(wire: Wire, keys: set[tuple[int, int]]) -> tuple[int, int]:
 
 def plant_report(wire: Wire, f: NativeFrame, *, traced: bool = True) -> None:
     if traced:
-        wire.queue_packet(trace(f"00 {f.port:02x} 01000000 01 " + f.body.hex()))
+        wire.queue_packet(trace(f"00 {f.port:02x} 01000000 {f.body.hex()} 01"))
     wire.feed(f"020ff04b54 {f.port:02x}0000 01000000 " + f.body.hex())
 
 
@@ -239,7 +239,7 @@ class NormalWatchTests(unittest.IsolatedAsyncioTestCase):
         product = 200003  # An identified product without a known configuration profile.
 
         def announce(f: NativeFrame) -> None:
-            wire.queue_packet(trace(f"00 {f.port:02x} 01000000 01 " + f.body.hex()))
+            wire.queue_packet(trace(f"00 {f.port:02x} 01000000 {f.body.hex()} 01"))
 
         async def gateway() -> None:
             await start(
@@ -464,7 +464,7 @@ class NormalWatchTests(unittest.IsolatedAsyncioTestCase):
         async def gateway() -> None:
             await start(wire, "08")
             await wire.expect(_CAP)
-            wire.feed("0401f04b54030005bf1e")
+            wire.feed("0401f04b54040005bf1e")
             await restore(wire)
 
         async with Tekmar482Client(wire) as client, asyncio.TaskGroup() as tasks:

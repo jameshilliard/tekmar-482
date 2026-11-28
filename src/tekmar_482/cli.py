@@ -75,7 +75,7 @@ from .exceptions import TekmarError
 from .firmware import install_firmware
 from .gateway import open_gateway
 from .management import BridgeManagement
-from .native import NativeAddress, NativeBlockQuery, NativeFrame, NativeTargets
+from .native import NativeAddress, NativeBlockQuery, NativeFrame, NativeTargets, RxFlag
 from .native_discovery import NativeDevice, discover_native
 from .native_io import IoDirectory
 from .native_scene import scene_response_fields
@@ -1473,7 +1473,14 @@ def _capture_fields(frame: CaptureRecord) -> dict[str, object]:
             "bit_count": frame.bit_count,
             "bits": frame.bits.hex(),
         }
-    return _frame_fields(frame)
+    fields = _frame_fields(frame)
+    if frame.rx_flags is not None:
+        fields.update(
+            rx_flags=int(frame.rx_flags),
+            ack=bool(frame.rx_flags & RxFlag.ACK),
+            early_start=bool(frame.rx_flags & RxFlag.EARLY_START),
+        )
+    return fields
 
 
 def _emit_capture_summary(

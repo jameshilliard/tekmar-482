@@ -24,7 +24,7 @@ from .test_management import Script
 from .test_normal_block import Wire
 
 _CAP = "0101f04b54"
-_CAPS = "0401f04b54030005bf06"
+_CAPS = "0401f04b54040005bf06"
 _ADMIT = "0312f04b54"
 _UPDATE = "0012f04b54"
 _END = "0212f04b54"
@@ -53,7 +53,7 @@ class NormalAnnounceTests(unittest.IsolatedAsyncioTestCase):
                 assert not await reader.read()
                 return
             caps = management(1, 1)
-            support = management(1, 4, bytes.fromhex("030005bf06"))
+            support = management(1, 4, bytes.fromhex("040005bf06"))
             assert first + await reader.readexactly(len(caps) - 1) == caps
             writer.write(support)
             for port in (2, 3):
@@ -144,7 +144,7 @@ class NormalAnnounceTests(unittest.IsolatedAsyncioTestCase):
         self,
     ) -> None:
         cmd = LineBroadcast.network_init((2,))
-        for caps in ("0401f04b54030005bf01", "0401f04b54030105bf03", "0400000000"):
+        for caps in ("0401f04b54040005bf01", "0401f04b54040105bf03", "0400000000"):
             script = Script((_CAP, caps))
             async with Tekmar482Client(script) as client:
                 manager = BridgeManagement(client)

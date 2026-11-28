@@ -25,7 +25,7 @@ from tekmar_482.packet import Packet
 from .test_management import Script
 from .test_normal_block import Wire
 
-_CAPS = "0401f04b54030005bf0e"
+_CAPS = "0401f04b54040005bf0e"
 _IDENTITY = "6e7161c8 00001f 0d8e01 7904"
 _STATUS = "7d7161c2 8fe1"
 
@@ -40,16 +40,16 @@ async def start(wire: Wire, mask: str) -> None:
     await wire.expect("010bf04b54")
     wire.feed("040bf04b5410" + "00" * 40)
     await wire.expect("000bf04b54" + mask)
-    wire.queue_packet(trace("00 04 00000000 00 " + _STATUS))
+    wire.queue_packet(trace("00 04 00000000" + _STATUS + " 00"))
     wire.feed("030bf04b54" + mask)
 
 
 async def restore(wire: Wire, *, tail: bool = False) -> None:
     await wire.expect("000bf04b5410")
     if tail:
-        wire.queue_packet(trace("00 02 03000000 00 " + _STATUS))
+        wire.queue_packet(trace("00 02 03000000" + _STATUS + " 00"))
     wire.feed("030bf04b5410")
-    wire.queue_packet(trace("00 04 04000000 00 " + _STATUS))
+    wire.queue_packet(trace("00 04 04000000" + _STATUS + " 00"))
     await wire.expect("010bf04b54")
     wire.feed("040bf04b5410" + "00" * 40)
 
@@ -62,12 +62,12 @@ class PeerCaptureTests(unittest.IsolatedAsyncioTestCase):
             await start(wire, "14")
             wire.feed("02070100000000")
             for row in (
-                "00 03 01000000 00 " + _STATUS,  # unselected port
-                "01 02 01000000 03 00 " + _STATUS,  # gateway transmit
-                "00 02 01000000 02 " + _STATUS,  # early start
-                "00 02 01000000 80 " + _STATUS,  # unrecognized flags
+                "00 03 01000000" + _STATUS + " 00",  # unselected port
+                "01 02 01000000" + _STATUS + " 03 00",  # gateway transmit
+                "00 02 01000000" + _STATUS + " 02",  # early start
+                "00 02 01000000" + _STATUS + " 80",  # unrecognized flags
                 "05 01 0300000000000000",  # no selected port
-                "00 02 01000000 01 " + _IDENTITY,
+                "00 02 01000000" + _IDENTITY + " 01",
                 "05 14 0300000000000000",
                 "04 04 02000000 02 0900 8080",
             ):
@@ -124,7 +124,7 @@ class PeerCaptureTests(unittest.IsolatedAsyncioTestCase):
                         await task
 
     async def test_old_firmware_refused_before_touching_mask(self) -> None:
-        script = Script(("0101f04b54", "0401f04b54030005bf06"))
+        script = Script(("0101f04b54", "0401f04b54040005bf06"))
         async with Tekmar482Client(script) as client:
             with self.assertRaisesRegex(ProtocolError, "Normal trace requires"):
                 async with BridgeManagement(client).peer_capture():
@@ -138,8 +138,8 @@ class PeerCaptureTests(unittest.IsolatedAsyncioTestCase):
         peers = NormalPeerCapture(4, 4, packet)
         peers.record(packet, outbound=False)
         for row in (
-            "00 02 01000000 00 6e7161c8 00001f 499d01 ca04",
-            "00 02 02000000 00 6f7161c3 84013c",
+            "00 02 01000000 6e7161c8 00001f 499d01 ca04 00",
+            "00 02 02000000 6f7161c3 84013c 00",
             "05 04 0100000000000000",
         ):
             peers.record(trace(row), outbound=False)
@@ -171,11 +171,11 @@ class PeerCaptureTests(unittest.IsolatedAsyncioTestCase):
         peers = NormalPeerCapture(4, 3, start_packet)
         peers.record(start_packet, outbound=False)
         for row in (
-            "00 00 00000000 00 " + _STATUS,
-            "00 00 00000000 00 " + _IDENTITY,
-            "00 01 00000000 00 " + _IDENTITY,
+            "00 00 00000000" + _STATUS + " 00",
+            "00 00 00000000" + _IDENTITY + " 00",
+            "00 01 00000000" + _IDENTITY + " 00",
             "05 01 0200000000000000",
-            "00 00 00000000 00 " + _STATUS,
+            "00 00 00000000" + _STATUS + " 00",
         ):
             peers.record(trace(row), outbound=False)
         with self.assertRaisesRegex(ValueError, "passive"):
@@ -202,7 +202,7 @@ class PeerCaptureTests(unittest.IsolatedAsyncioTestCase):
         async def gateway() -> None:
             await start(wire, "1f")
             wire.queue_packet(trace("05 14 0300000000000000"))
-            wire.queue_packet(trace("00 02 00000000 00 " + _STATUS))
+            wire.queue_packet(trace("00 02 00000000" + _STATUS + " 00"))
             await restore(wire)
 
         parser = build_parser()

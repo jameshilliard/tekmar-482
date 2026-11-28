@@ -239,12 +239,13 @@ native identification block 00. Match the actual port, subnet and node of
 the resulting report. A successful request or link ACK does not confirm
 a model, and a node without a response remains unidentified.
 
-Raw uses the 485 serial format for native sends and receives: TPCK length
-and type bytes are literal, and type `0x01` service `0x00` carries a port,
-four timestamp bytes, and the native body. A host send puts zero in the
-timestamp field. `BridgeClient.stream()` opts into 482 transmit results
-and invalid-frame diagnostics. Normal keeps stock TPCK framing; its trace
-type `0xD0` is observation only and is not a way to send Raw requests.
+Base Raw uses the 485 serial format: TPCK length and type bytes are
+literal, and type `0x01` service `0x00` carries a port, four timestamp
+bytes, and the native body. A host send puts zero in the timestamp field.
+`BridgeClient.stream()` opts into 482 transmit results and diagnostic
+records. Its RX and invalid-frame payloads match Normal trace, including
+the RX flags after the native body (`NativeFrame.rx_flags`). Normal keeps
+stock TPCK framing and uses type `0xD0` for its gateway-to-host traces.
 
 **Gateway traffic counters.** With `BridgeFeature.TRAFFIC_COUNTS`, use
 `BridgeManagement(client).traffic` in Normal mode or `stream.traffic` in
@@ -281,7 +282,7 @@ async with errors.watch([ErrorSource.PORT_1, ErrorSource.GATEWAY]) as reports:
         print(counter.source.name, counter.reason.name, counter.count)
 ```
 
-Custom bridge wire version 3 uses saturating 64-bit counters for capture
+Custom bridge wire version 4 uses saturating 64-bit counters for capture
 and trace drops, edge counts and panel events. They reset at gateway boot,
 not on a mode change. Application sessions reject older custom wire
 versions; only stock commands retain backward compatibility. Per-frame
@@ -1396,10 +1397,10 @@ Use the flash installer for development hardware and persistent deployment.
 To test a local revision, run the bundled CLI directly from the sdist:
 `uvx --from 'dist/tekmar_482-0.1.0.tar.gz[serial]' tekmar-482 update --serial "$PORT"`.
 An already-current custom build is not rewritten.
-The installer can hand off a running custom wire-version-2 application to
-ROM ISP, but the client does not use its old Raw format. For other unsupported
-versions, enter ROM ISP with the matching tool or the hardware Test button,
-then use the same `--from-rom` installer.
+The installer can hand off running custom wire-version-2 and wire-version-3
+applications to ROM ISP without using their old capture formats. For other
+unsupported versions, enter ROM ISP with the matching tool or the hardware
+Test button, then use the same `--from-rom` installer.
 
 ```bash
 # A custom dev image is running. This may replace an unversioned build.

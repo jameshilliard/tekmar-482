@@ -23,7 +23,7 @@ from .test_normal_block import Wire
 from .test_peer_capture import restore, start, trace
 
 _CAP = "0101f04b54"
-_SUPPORT = "0401f04b54030005bf1e"
+_SUPPORT = "0401f04b54040005bf1e"
 _ASK = "0113f04b54"
 _ACCEPT = "0413f04b54"
 _END = "0213f04b54"
@@ -43,12 +43,12 @@ class NormalDiscoveryTests(unittest.IsolatedAsyncioTestCase):
 
         async def gateway() -> None:
             await start(wire, "04")
-            wire.queue_packet(trace("00 02 01000000 01 7ff16000"))
+            wire.queue_packet(trace("00 02 01000000 7ff16000 01"))
             await admit(wire, "0216")
             # Contents name remote loops; only the header names this line's subnet.
-            wire.queue_packet(trace("00 02 02000000 01 7ff16002 2526"))
+            wire.queue_packet(trace("00 02 02000000 7ff16002 2526 01"))
             wire.feed(_END + "0200")
-            wire.queue_packet(trace("00 02 03000000 01 " + _ID))
+            wire.queue_packet(trace("00 02 03000000 " + _ID + " 01"))
             await restore(wire)
 
         async with Tekmar482Client(wire) as client, asyncio.TaskGroup() as tasks:
@@ -109,7 +109,7 @@ class NormalDiscoveryTests(unittest.IsolatedAsyncioTestCase):
             task = group.create_task(scan())
             await start(wire, "14")
             await admit(wire, "0409")
-            wire.queue_packet(trace("00 02 01000000 01 " + _ID))
+            wire.queue_packet(trace("00 02 01000000 " + _ID + " 01"))
             await admit(wire, "0216")
             # A valid peer report is independent of this outcome.
             wire.feed(_END + "0201")
@@ -123,7 +123,7 @@ class NormalDiscoveryTests(unittest.IsolatedAsyncioTestCase):
     ) -> None:
         key = "03ff"
         script = Script(
-            (_CAP, "0401f04b54030005bf0e"),
+            (_CAP, "0401f04b54040005bf0e"),
             (_CAP, _SUPPORT),
             (_ASK + key, "0406f04b5413f04b5401"),
             (_CAP, _SUPPORT),
@@ -156,7 +156,7 @@ class NormalDiscoveryTests(unittest.IsolatedAsyncioTestCase):
             await start(wire, "1f")
             await admit(wire, "0216")
             wire.feed(_END + "0200")
-            wire.queue_packet(trace("00 02 00000000 00 7d7161c2 8fe1"))
+            wire.queue_packet(trace("00 02 00000000 7d7161c2 8fe1 00"))
             await wire.until_read("0216 40000000 0000 0000")
             wire.feed("040ff04b54 0216 40000000 0000 0000")
             wire.feed("020ff04b54 020100")  # No answering identity.

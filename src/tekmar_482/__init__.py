@@ -204,6 +204,7 @@ from .native import (
     NativeFrame,
     NativeMessage,
     NativeTargets,
+    RxFlag,
     SnowmeltSetpoint,
     WeeklyEvent,
 )
@@ -318,7 +319,6 @@ from .normal_trace import (
     NormalPeerCapture,
     NormalTrace,
     NormalTraceState,
-    RxFlag,
     TraceOrigin,
     TracePacket,
     TraceRx,

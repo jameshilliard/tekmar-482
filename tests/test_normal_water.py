@@ -28,7 +28,7 @@ if TYPE_CHECKING:
     from tekmar_482 import WaterRead
 
 _CAP = "0101f04b54"
-_FEATURES = "0401f04b54030005bf3e"
+_FEATURES = "0401f04b54040005bf3e"
 _MASTER = "03000000f703"
 _ID = "03354000000000000000"
 _PUMP_SETUP = "03354000000041000000"
@@ -40,8 +40,7 @@ def peer(f: NativeFrame) -> Packet:
     return trace(
         f"00 {f.port:02x} "
         + f.timestamp_ms.to_bytes(4, "little").hex()
-        + " 00 "
-        + f.body.hex(),
+        + f" {f.body.hex()} 00",
     )
 
 

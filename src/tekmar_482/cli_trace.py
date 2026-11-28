@@ -6,7 +6,8 @@ from enum import IntEnum
 from typing import TYPE_CHECKING
 
 from .constants import TN4_PORTS
-from .normal_trace import GatewayTraceGap, RxFlag, TracePacket, TraceRx, TraceTx
+from .native import RxFlag
+from .normal_trace import GatewayTraceGap, TracePacket, TraceRx, TraceTx
 from .raw import CaptureGap, InvalidCapture
 from .trpc import TrpcPacket
 
