@@ -18,41 +18,39 @@ def git(*args: str) -> str:
     ).strip()
 
 
+def sync_decoders(tools: Path, package: Path, *, check: bool) -> None:
+    source, target = tools / "payloads", package / "_native_payloads"
+    if not (source / "__init__.py").is_file():
+        msg = "Canonical decoder package missing; initialize the firmware submodule"
+        raise RuntimeError(msg)
+    modules = {p.relative_to(source) for p in source.rglob("*.py")}
+    bundled = {p.relative_to(target) for p in target.rglob("*.py")}
+    files = {target / name: source / name for name in modules}
+    files[package / "_bridge_diagnostics.py"] = tools / "bridge_diagnostics.py"
+    for path in sorted(files.keys() | {target / name for name in bundled}):
+        origin = files.get(path)
+        data = origin.read_bytes() if origin is not None else None
+        if data is not None and path.is_file() and path.read_bytes() == data:
+            continue
+        if check:
+            msg = f"Stale bundled file: {path.relative_to(package)}"
+            raise RuntimeError(msg)
+        if data is None:
+            path.unlink()
+        else:
+            path.parent.mkdir(exist_ok=True, parents=True)
+            path.write_bytes(data)
+
+
 def main() -> None:
     """Synchronize the Python decoder sources; the sdist hook builds the binary."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--check", action="store_true")
     args = parser.parse_args()
-    native = (
-        "__init__.py",
-        "climate.py",
-        "codec.py",
-        "faults.py",
-        "io.py",
-        "layouts.py",
-        "line.py",
-        "products.py",
-        "plant.py",
-        "queries.py",
-        "scenes.py",
-        "schedules.py",
-        "sensors.py",
-        "setpoint.py",
-        "snowmelt.py",
-        "thermostat.py",
-        "water.py",
-        "writes.py",
-    )
-    files = [(Path("payloads") / n, PACKAGE / "_native_payloads" / n) for n in native]
-    files.append((Path("bridge_diagnostics.py"), PACKAGE / "_bridge_diagnostics.py"))
-    for name, path in files:
-        data = (SOURCE / "tools" / name).read_bytes()
-        if args.check:
-            if not path.is_file() or path.read_bytes() != data:
-                parser.exit(1, f"Stale bundled file: {name}\n")
-        else:
-            path.parent.mkdir(exist_ok=True)
-            path.write_bytes(data)
+    try:
+        sync_decoders(SOURCE / "tools", PACKAGE, check=args.check)
+    except RuntimeError as err:
+        parser.exit(1, f"{err}\n")
 
 
 def build_image() -> Path:
@@ -68,6 +66,7 @@ def build_image() -> Path:
     if gitlink[:2] != ["160000", revision]:
         msg = "Firmware checkout differs from the pinned submodule revision"
         raise RuntimeError(msg)
+    sync_decoders(SOURCE / "tools", PACKAGE, check=True)
     subprocess.run(
         ["make", "image"],  # noqa: S607
         cwd=SOURCE,
