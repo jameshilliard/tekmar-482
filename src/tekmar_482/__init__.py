@@ -56,6 +56,7 @@ from ._native_payloads.queries import (
 from ._native_payloads.scenes import NativeScene, SceneReport, SceneResponse
 from ._native_payloads.schedules import (
     DailyEvents,
+    LocalScheduleOverride,
     ScheduleBinding,
     ScheduleCycle,
     ScheduleEvent,
@@ -206,7 +207,7 @@ from .native import (
     SnowmeltSetpoint,
     WeeklyEvent,
 )
-from .native_calendar import NativeCalendar, ScheduleSignal
+from .native_calendar import NativeCalendar, ScheduleOverrideReport, ScheduleSignal
 from .native_discovery import (
     NativeDevice,
     NativeDiscovery,
@@ -540,6 +541,7 @@ __all__ = [
     "LineBroadcast",
     "LineReportKind",
     "LinkServiceTiming",
+    "LocalScheduleOverride",
     "LoopAssignment",
     "LoopKind",
     "LoopSetupSlot",
@@ -642,6 +644,7 @@ __all__ = [
     "ScheduleCycle",
     "ScheduleDirectory",
     "ScheduleEvent",
+    "ScheduleOverrideReport",
     "ScheduleProfile",
     "ScheduleRow",
     "ScheduleSetupChange",

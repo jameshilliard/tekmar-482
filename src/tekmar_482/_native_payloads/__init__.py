@@ -3,13 +3,14 @@
 from collections.abc import Callable
 
 from .climate import AIR_GROUP_CONFIG, AIR_MASTER, AIR_MEMBER, AirGroupConfiguration, AirStatus, ThermostatMode
-from .codec import Fields, Reader, SETBACK, ShortPayload, temp
+from .codec import Fields, Reader, ShortPayload, temp
 from .faults import NETWORK_ERROR, NetworkFault
 from .io import IO_CHANGE, IO_DISCOVER, IO_DISCOVERY, IO_REPLY, IO_REQUEST, IoReport
 from .layouts import (
     BLOCK_SELECTORS as BLOCK_SELECTORS,
     FIXED_BLOCKS,
     H_UNAVAILABLE as H_UNAVAILABLE,
+    LOCAL_SCHEDULE_OVERRIDE,
     MULTI_WEEK,
     SETPOINT_FIELDS,
     SNOW_SLAB_TARGETS as SNOW_SLAB_TARGETS,
@@ -20,7 +21,7 @@ from .line import GROUP_UPDATE, LINE_MESSAGES, NETWORK_INIT_REQUEST, LineValue
 from .plant import MIXING_PRESENT, MIXING_REPORT, MIXING_UPDATE, PLANT_OUTPUT, MixingPresent, MixingReport, MixingUpdate, PlantOutput
 from .products import corrected_identification, identify_product
 from .scenes import SCENE_RESPONSE_FIELDS, SceneResponse
-from .schedules import DAY_NAMES, SCHEDULE_STATUS, SINGLE_WEEK, DailyEvents, ScheduleBinding, ScheduleCycle, ScheduleEvent, ScheduleStatus
+from .schedules import DAY_NAMES, SCHEDULE_STATUS, SINGLE_WEEK, DailyEvents, LocalScheduleOverride, ScheduleBinding, ScheduleCycle, ScheduleEvent, ScheduleStatus
 from .service import CALIBRATION_MODE, CYCLE_LENGTH_REQUEST, NETWORK_TEST_MODE, NETWORK_TEST_TIME
 from .setpoint import SETPOINT_STATUS, SetpointStatus
 from .snowmelt import SNOW_REPORT, SNOW_REQUEST, SnowmeltApplication, SnowmeltReport
@@ -90,8 +91,8 @@ def fixed_value(block: int, name: str, value: int) -> Fields:
         source = HeatSource(value)
         return {**fields, prefix + "_kind": source.kind.value, prefix + "_loop": source.loop,
                 prefix + "_mode": source.mode}
-    elif block == 0x37 and value < 9:
-        fields["override_state_name"] = (*SETBACK[:7], "auto_4", "auto_2")[value]
+    elif block == LOCAL_SCHEDULE_OVERRIDE and value in LocalScheduleOverride:
+        fields["override_state_name"] = LocalScheduleOverride(value).name.lower()
     elif (block == SnowmeltBlock.APPLICATION_MODE and name == "application_mode"
           and value < len(SnowmeltApplication)):
         fields["application_mode_name"] = SnowmeltApplication(value).name.lower()

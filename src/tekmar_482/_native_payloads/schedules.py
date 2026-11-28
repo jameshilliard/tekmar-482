@@ -21,6 +21,19 @@ class ScheduleEvent(IntEnum):
     SLEEP = 3
 
 
+class LocalScheduleOverride(IntEnum):
+    """Block 37's local override state, not a row selector or broadcast event."""
+    WAKE = 0
+    UNOCCUPIED_4 = 1
+    OCCUPIED_4 = 2
+    SLEEP = 3
+    OCCUPIED_2 = 4
+    UNOCCUPIED_2 = 5
+    AWAY = 6
+    AUTO_4 = 7
+    AUTO_2 = 8
+
+
 class ScheduleBinding(IntEnum):
     NONE = 0
     ZONE = 1

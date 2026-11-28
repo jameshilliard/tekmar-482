@@ -3,6 +3,7 @@
 from enum import IntEnum
 
 SETPOINT_FIELDS = ("wake", "unoccupied", "occupied", "sleep", "away")
+LOCAL_SCHEDULE_OVERRIDE = 0x37
 MULTI_WEEK = range(0x38, 0x3c)
 H_UNAVAILABLE = (0x4000, 0x8000, 0xc000, 0xffff)
 FILTER_DATA = 0x0a
@@ -138,7 +139,7 @@ FIXED_BLOCKS: dict[int, FixedLayout] = {
     0x35: _octets("available_boilers", "enabled_boilers"),
     0x36: _octets("occupied_tank_target_raw", "unoccupied_tank_target_raw", "away_tank_target_raw",
                   "tank_differential_raw"),
-    0x37: _octets("override_state"),
+    LOCAL_SCHEDULE_OVERRIDE: _octets("override_state"),
     0x3c: _octets("boiler_number", "operation_enable", "btc_type", "boiler_relay_type",
                   "pump_post_purge_time", "pump_pre_purge_time"),
     0x3d: _octets("boiler_number", "thermal_mass", "actuator_motor_speed", "fire_delay",

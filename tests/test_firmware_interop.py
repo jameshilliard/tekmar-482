@@ -22,6 +22,7 @@ from tekmar_482 import (
     IoDirectory,
     IoEndpoint,
     LineBroadcast,
+    LocalScheduleOverride,
     NativeAddress,
     NativeBlockQuery,
     NativeField,
@@ -723,6 +724,64 @@ class FirmwareInteropTests(unittest.IsolatedAsyncioTestCase):
             assert observations[0] == (3, (5, True))
             assert observations[-1] == (5, (5, True))
             watch.cancel()
+
+    async def test_local_override_and_unavailable_mask_through_normal_firmware(
+        self,
+    ) -> None:
+        script = (
+            _block(3, "23 10000000", "0000", "6e723149 00003f 078701 8a0401"),
+            _block(3, "23 10000000", "3700", "6e723144 370001 07"),
+            _block(3, "23 10000000", "3700", "6e723143 370000"),
+        )
+        path = NativePath(3, _THERMOSTAT.subnet, _THERMOSTAT.node)
+        async with _gateway(script) as manager:
+            identity = await manager.read_block_group(
+                3,
+                NativeBlockQuery(_THERMOSTAT, 0),
+            )
+            query = NativeBlockQuery(_THERMOSTAT, 0x37)
+            override = await manager.read_block_group(3, query)
+            missing = await manager.read_block_group(3, query)
+            assert not override.missing_nodes and not missing.missing_nodes
+            state = NativeSnapshot((identity, override), ()).observed_state()
+            calendar = state.schedule(path)
+            assert calendar is not None and calendar.local_override is not None
+            assert calendar.local_override.mode is LocalScheduleOverride.AUTO_4
+            assert not calendar.schedules and not calendar.signals
+            assert state.observe(missing.require_report()) == (path,)
+            updated = state.schedule(path)
+            assert updated is not None and updated.local_override is None
+
+    async def test_humidity_status_through_normal_firmware(self) -> None:
+        script = (
+            _block(3, "23 10000000", "0000", "6e723149 00003f 8e9a01 c60403"),
+            (
+                3,
+                "32200005 2310000000",
+                ("32323147 02812c34125518", "3232314b 02812c34125518262d39ca"),
+            ),
+        )
+        async with _gateway(script) as manager:
+            identity = await manager.read_block_group(
+                3,
+                NativeBlockQuery(_THERMOSTAT, 0),
+            )
+            batch = await manager.read_status(
+                3,
+                NativeStatusQuery.humidity(0x23, 0x10),
+                peer=_THERMOSTAT,
+            )
+            assert batch.answered
+            (report,) = batch.reports
+            assert report.message.payload == bytes.fromhex("02812c34125518262d39ca")
+            assert report.decoded["extension_hex"] == "ca"
+            (thermostat,) = NativeSnapshot((identity,), (batch,)).thermostats
+            sample = thermostat.adjustments.humidity
+            assert sample is not None and sample.frame is report
+            assert sample.value.relative_percent == 44
+            assert sample.value.sensor_bytes == bytes.fromhex("1826")
+            assert sample.value.humidify_target_raw == 45
+            assert sample.value.dehumidify_target_raw == 57
 
     async def test_thermostat_mode_target_and_weekend_schedule(self) -> None:
         def read(block: str, reply: str) -> Exchange:

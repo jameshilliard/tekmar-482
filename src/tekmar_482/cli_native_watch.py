@@ -21,7 +21,7 @@ if TYPE_CHECKING:
 
     from ._native_payloads.line import LineReportKind
     from ._observation import ObservationStream
-    from .native_calendar import NativeCalendar
+    from .native_calendar import NativeCalendar, ScheduleOverrideReport
     from .native_io import IoDirectory
     from .native_operating_policy import NativeOperatingPolicy
     from .native_peer_link import PeerLinkCounters
@@ -510,6 +510,11 @@ def _watch_summary(
     )
 
 
+def schedule_override_fields(report: ScheduleOverrideReport) -> dict[str, object]:
+    mode = report.mode
+    return {"raw": report.raw, "mode": mode.name.lower() if mode is not None else None}
+
+
 def calendar_fields(calendar: NativeCalendar) -> dict[str, object]:
     return {
         "schedules": [schedule_fields(w) for w in calendar.schedules],
@@ -525,4 +530,7 @@ def calendar_fields(calendar: NativeCalendar) -> dict[str, object]:
         "missing_blocks": [
             {"block": b, "selector": s} for b, s in calendar.missing_blocks
         ],
+        "local_override": schedule_override_fields(calendar.local_override)
+        if calendar.local_override is not None
+        else None,
     }

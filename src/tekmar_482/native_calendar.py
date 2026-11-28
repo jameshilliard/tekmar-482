@@ -2,14 +2,16 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
-from ._native_payloads.layouts import MULTI_WEEK
+from ._native_payloads.codec import integer_field
+from ._native_payloads.layouts import LOCAL_SCHEDULE_OVERRIDE, MULTI_WEEK
 from ._native_payloads.schedules import (
     DAY_NAMES,
     SETUP_BLOCK,
     SINGLE_WEEK,
+    LocalScheduleOverride,
     ScheduleProfile,
 )
 from .native_schedule import (
@@ -26,7 +28,7 @@ if TYPE_CHECKING:
     from .native_schedule import NativeWeeklySchedule, ScheduleKey
 
 _WEEKLY_ROWS = frozenset((*SINGLE_WEEK, *MULTI_WEEK))
-SCHEDULE_BLOCKS = _WEEKLY_ROWS | {SETUP_BLOCK}
+SCHEDULE_BLOCKS = _WEEKLY_ROWS | {SETUP_BLOCK, LOCAL_SCHEDULE_OVERRIDE}
 _SLOTS = range(4)
 _DAY_FIELDS = tuple(name + "_raw" for name in DAY_NAMES)
 
@@ -43,10 +45,27 @@ class ScheduleSignal:
 
 
 @dataclass(frozen=True, slots=True)
+class ScheduleOverrideReport:
+    """Last reported local override, not the current or next schedule event."""
+
+    raw: int
+    frame: NativeFrame = field(compare=False, repr=False)
+
+    @property
+    def mode(self) -> LocalScheduleOverride | None:
+        return (
+            LocalScheduleOverride(self.raw)
+            if self.raw in LocalScheduleOverride
+            else None
+        )
+
+
+@dataclass(frozen=True, slots=True)
 class NativeCalendar:
     schedules: tuple[NativeWeeklySchedule, ...]
     signals: tuple[ScheduleSignal, ...]
     missing_blocks: tuple[ScheduleKey, ...]
+    local_override: ScheduleOverrideReport | None = None
 
     @property
     def incomplete(self) -> bool:
@@ -169,10 +188,18 @@ class ScheduleBook:
         addressable: bool,
     ) -> NativeCalendar:
         profile = schedule_profile(identity)
+        frame = self.blocks.get((LOCAL_SCHEDULE_OVERRIDE, None))
+        override = (
+            ScheduleOverrideReport(raw, frame)
+            if frame is not None
+            and (raw := integer_field(frame.decoded, "override_state")) is not None
+            else None
+        )
         return NativeCalendar(
             tuple(schedules_from_reports(profile, self.blocks)),
             tuple(signal for _, signal in sorted(self.signals.items())),
             self.missing(profile) if addressable else (),
+            override,
         )
 
 

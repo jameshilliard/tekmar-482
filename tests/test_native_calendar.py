@@ -4,6 +4,7 @@ import unittest
 from tekmar_482 import (
     CaptureGap,
     GatewayTraceGap,
+    LocalScheduleOverride,
     NativeCalendar,
     NativeFrame,
     NativeMessage,
@@ -79,6 +80,41 @@ def calendar(state: NativeState, path: NativePath = TEST_PATH) -> NativeCalendar
 
 
 class NativeCalendarTests(unittest.TestCase):
+    def test_local_override_is_source_scoped_and_independent_of_calendar(self) -> None:
+        state = NativeState()
+        state.observe(identity(_THERMOSTAT))
+        state.observe(setup(2))
+        state.observe(role(0, master=True, states=0x09))
+        previous = calendar(state)
+        assert previous.local_override is None
+        wake = block(0x37, b"\x01\x00")
+        assert state.observe(wake) == (TEST_PATH,)
+        automatic = block(0x37, b"\x01\x08", _OTHER)
+        state.observe(automatic)
+        current = calendar(state)
+        assert current.local_override is not None
+        assert current.local_override.mode is LocalScheduleOverride.WAKE
+        assert current.local_override.frame is wake
+        assert current.schedules == previous.schedules
+        assert current.signals == previous.signals
+        other = calendar(state, _OTHER).local_override
+        assert other is not None and other.mode is LocalScheduleOverride.AUTO_2
+        unknown = block(0x37, b"\x01\xff")
+        state.observe(unknown)
+        sample = calendar(state).local_override
+        assert sample is not None and sample.raw == 255 and sample.mode is None
+        state.observe(block(0x37, b"\x00\x05"))
+        assert calendar(state).local_override is None
+        assert state.observe(block(0x37, b"\x01")) == ()  # Missing supported byte.
+
+        state.observe(wake)
+        addressed = bytes([TEST_PATH.subnet, TEST_PATH.node, 0x37, 0, 7])
+        sender = NativePath(TEST_PATH.port, 0, 0)
+        assert state.observe(frame(0x2DF, addressed, sender)) == (TEST_PATH,)
+        assert calendar(state).local_override is None
+        assert calendar(state).schedules == previous.schedules
+        assert calendar(state, _OTHER).local_override == other
+
     def test_shared_schedule_uses_only_the_preferred_paths_table(self) -> None:
         state = NativeState()
         scope = (_OTHER.port, TEST_PATH.port)
@@ -454,6 +490,7 @@ class LiveCalendarTests(unittest.IsolatedAsyncioTestCase):
             block(0x10, b"\x7f" + _WEEK),
             block(0x13, b"\x7f" + _WEEK),
             role(0, master=True, states=0x09),
+            block(0x37, b"\x01\x06"),
         ):
             self.rx(f)
         args = build_parser().parse_args(
@@ -474,6 +511,7 @@ class LiveCalendarTests(unittest.IsolatedAsyncioTestCase):
             if isinstance(r, dict) and "native_calendar" in r
         ]
         assert records[-1]["signals"][0]["current_event"] == "unoccupied"
+        assert records[-1]["local_override"] == {"mode": "away", "raw": 6}
         sched = records[-1]["schedules"][0]
         assert sched["table_complete"] and sched["rows"][0]["tx_status"] is None
         assert sched["rows"][0]["body"] and self.tx.empty()

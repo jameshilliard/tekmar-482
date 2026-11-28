@@ -38,6 +38,7 @@ from .cli_native_watch import (
     fault_fields,
     io_fields,
     line_fields,
+    schedule_override_fields,
     setpoint_fields,
     snow_fields,
     snow_group_from_args,
@@ -1035,6 +1036,17 @@ def _emit_derived(snapshot: NativeSnapshot, emit: Callable[[object], None]) -> N
     state = snapshot.observed_state()
     _emit_io(state, emit)
     _emit_peer_details(state, emit)
+    for path in state.paths:
+        calendar = state.schedule(path)
+        if calendar is not None and (report := calendar.local_override) is not None:
+            emit(
+                {
+                    "schedule_override": {
+                        **asdict(path),
+                        **schedule_override_fields(report),
+                    },
+                },
+            )
     for control in state.setpoint_controls:
         emit({"setpoint_control": setpoint_fields(control)})
     for path, plant in state.plant_configurations:
@@ -1497,7 +1509,9 @@ def _emit_capture_summary(
         emit({"snowmelt": snow_fields(snow)})
     for path in observed.paths:
         calendar = observed.schedule(path)
-        if calendar and (calendar.schedules or calendar.signals):
+        if calendar and (
+            calendar.schedules or calendar.signals or calendar.local_override
+        ):
             emit({"native_calendar": {**asdict(path), **calendar_fields(calendar)}})
 
 

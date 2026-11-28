@@ -774,6 +774,12 @@ ports=(0, 1))` returns observed masters and members within those lines;
 `owner` is absent if there is no master or more than one distinct master.
 The library never forwards a member edit to a guessed owner.
 
+`state.schedule(path).local_override` exposes a supported block `0037`
+report separately from the assignment and current event. `read-device`
+and `dump` include it on cataloged models that answer, and passive watches
+retain it when observed. A zero support mask supplies no state; a supported
+zero means Wake. Unknown mode codes stay raw. No override write is offered.
+
 For low-level work `WeeklyEvent.from_frame(report, profile=week.config.profile)`
 parses a complete row and preserves its indexed header. Early 552/557
 revisions use a different weekday order, so a single-schedule row requires
