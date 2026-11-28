@@ -237,13 +237,13 @@ class NativeSnowmelt:
         )
 
     def setpoint(self, block: Block) -> SnowmeltSetpoint | None:
-        """Return a supported stored slab target, not an operating sample."""
+        """Return an editable stored slab target, not an operating sample."""
         require_enum(block, Block)
         if block not in SNOW_SLAB_TARGETS:
             msg = "expected a melt, idle or storm target"
             raise ValueError(msg)
         app = self.setup.application
-        if app is None or app.role is not SnowmeltRole.ZONE or not self.path.node:
+        if app is None or not app.control_writes_supported or not self.path.node:
             return None
         raw = {
             Block.MELT_SETPOINT: self.setup.melt_setpoint_raw,
@@ -256,7 +256,7 @@ class NativeSnowmelt:
 
     @property
     def missing_keys(self) -> bytes | None:
-        """Missing SW 11 profile keys, or None when there is no configured endpoint."""
+        """Missing profile keys, or None when there is no configured endpoint."""
         app = self.setup.application
         if app is None or self.setup.primary is None:
             return None

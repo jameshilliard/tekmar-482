@@ -57,8 +57,10 @@ class SnowmeltGroupBinding:
     ) -> SnowmeltGroupBinding | None:
         """Resolve an unambiguous group from a configured controller zone."""
         require_enum(operation, SnowmeltOperation)
-        address = setup.primary
-        if address is None or address.role is not SnowmeltRole.ZONE:
+        app = setup.application
+        if app is None or not app.control_writes_supported:
+            return None
+        if (address := setup.primary) is None:
             return None
         if (groups := setup.groups) is None:
             return None
@@ -131,8 +133,8 @@ async def _reported_application(
         await editor.read(NativeBlockQuery(target, Block.APPLICATION_MODE))
     ).require_report()
     setup = SnowmeltConfiguration.from_blocks({(Block.APPLICATION_MODE, None): frame})
-    if (app := setup.application) is None or app.role is not SnowmeltRole.ZONE:
-        msg = "operation requires a reported control application"
+    if (app := setup.application) is None or not app.control_writes_supported:
+        msg = "operation requires a supported snowmelt control application"
         raise ValueError(msg)
     return frame, app
 

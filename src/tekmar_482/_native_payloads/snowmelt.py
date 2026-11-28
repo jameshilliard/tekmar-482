@@ -79,6 +79,8 @@ class SnowmeltApplication(IntEnum):
     MIXING = 2
     ELECTRIC = 3
     SENSOR_ONLY = 4
+    BOILER_PWM = 5
+    BOILER_MIXING = 6
 
     @property
     def role(self) -> SnowmeltRole:
@@ -86,14 +88,21 @@ class SnowmeltApplication(IntEnum):
 
     @property
     def status_keys(self) -> bytes:
-        # SW 11 SnowmeltControl.stale_keys_to_request, when all values are absent.
         return _APPLICATION_KEYS[self]
 
+    @property
+    def control_writes_supported(self) -> bool:
+        """Whether the client supports guarded controls for this application."""
+        return self in (self.PWM, self.BOILER, self.MIXING, self.ELECTRIC)
 
+
+_COMMON_STATUS_KEYS = bytes((SnowmeltKey.WATER_DETECTION, SnowmeltKey.SLAB_TEMPERATURE))
+# SW 11's initial request keys. J1237G adds modes 5 and 6, but requests only
+# the shared water detection and slab temperature keys for those modes.
 _APPLICATION_KEYS = (
     bytes.fromhex("19 22 1b 23 2d 2a 29"), bytes.fromhex("19 22 1b 23 2d 2a 2e 27"),
     bytes.fromhex("19 22 1b 23 2d 2a 2e 28"), bytes.fromhex("19 22 1b 23 29"),
-    bytes.fromhex("19 22"),
+    _COMMON_STATUS_KEYS, _COMMON_STATUS_KEYS, _COMMON_STATUS_KEYS,
 )
 _WORDS = {
     0x19: "water_detect_state", 0x1a: "heat_sequence_state",

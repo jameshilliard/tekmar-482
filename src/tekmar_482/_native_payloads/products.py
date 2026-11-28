@@ -5,7 +5,7 @@ from dataclasses import dataclass
 
 from .layouts import (
     BLOCK_SELECTORS, LOCAL_SCHEDULE_OVERRIDE, MULTI_WEEK, ONBOARD_HUMIDITY_SETUP, RELAY_STATUS,
-    LinkCounterBlock, OperatingPolicyBlock,
+    LinkCounterBlock, OperatingPolicyBlock, RoomLimit,
 )
 
 
@@ -104,7 +104,7 @@ _MODELS: tuple[tuple[str, str, tuple[int, ...], tuple[int, ...]], ...] = (
     ("554", "thermostat", (105101,), ()),
     ("557", "thermostat", (104401,), (1215,)),
     ("654", "snowmelt_control", (105801,), (1226,)),
-    ("670", "snowmelt_control", (108401,), ()),
+    ("670", "snowmelt_control", (107002, 108401), ()),
     ("671", "snowmelt_control", (108402,), ()),
     ("1049", "reset_control", (104901,), (1202,)),
 )
@@ -146,8 +146,8 @@ def product_revision(fields: Mapping[str, object]) -> tuple[NativeProduct | None
     return product, z if isinstance(z, int) and z in range(26) else None
 
 
-# SW 11 per-model read tables, including zero-mask rows. Always allow the
-# identity probe. The extra 553 blocks and 654 block CD are from addressed reads.
+# 483 SW 11 and 485 J1237G read tables (554/670), including zero-mask rows.
+# The extra 553 blocks and 654 block CD are from addressed reads.
 _BLOCKS: dict[str, tuple[int, ...]] = {
     "033": (0x00, 0x14, 0x1b, *range(0x38, 0x3c)),
     "1049": (0x00, 0x02, 0x0b, 0x14, 0x23, 0x24, 0x36, 0x41, 0x43, 0x44),
@@ -181,6 +181,9 @@ _BLOCKS: dict[str, tuple[int, ...]] = {
             *range(0x0d, 0x19), RELAY_STATUS, *range(0x53, 0x56), 0x58, 0x97, *range(0x99, 0x9f),
             0xa1, 0xa2, *range(0xa3, 0xa6), OperatingPolicyBlock.COOL_PURGE, ONBOARD_HUMIDITY_SETUP,
             *range(OperatingPolicyBlock.BALANCE_POINT, OperatingPolicyBlock.UNOCCUPIED_HUMIDITY + 1)),
+    "554": (0x00, 0x01, *range(0x03, 0x0c), *range(0x0d, 0x19), *RoomLimit),
     "557": (0x00, 0x01, *range(0x03, 0x0c), *range(0x0d, 0x1a), 0x1b, *range(0x53, 0x56), 0x97, *range(0xa3, 0xa6), 0xab, 0xac),
     "654": (0x00, *range(0x0e, 0x15), 0x22, 0x23, 0x3d, 0x43, 0x44, 0x48, 0x49, *range(0x4d, 0x50), *range(0x71, 0x7e), *range(0xc0, 0xd3)),
+    "670": (0x00, 0x0e, 0x14, 0x22, 0x23, 0x3d, 0x41, 0x43, 0x44, 0x48, 0x49,
+            *range(0x4d, 0x51), *range(0x71, 0x7e), *range(0xc0, 0xca), *range(0xcc, 0xd3)),
 }

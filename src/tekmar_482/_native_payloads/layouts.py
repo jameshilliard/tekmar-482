@@ -1,4 +1,4 @@
-"""Byte positions, widths and selectors of the 483's addressed tN4 blocks."""
+"""Byte positions, widths and selectors of addressed tN4 blocks."""
 
 from enum import IntEnum
 
@@ -17,6 +17,13 @@ class LinkCounterBlock(IntEnum):
     BUS_ERRORS = 0x48
     BUS_EVENTS = 0x49
     RECEIVED_MESSAGES = 0x62
+
+
+class RoomLimit(IntEnum):
+    MINIMUM_ROOM_HEAT = 0x52
+    MAXIMUM_ROOM_HEAT = 0x53
+    MINIMUM_ROOM_COOL = 0x54
+    MAXIMUM_ROOM_COOL = 0x55
 
 
 class OperatingPolicyBlock(IntEnum):
@@ -168,9 +175,7 @@ FIXED_BLOCKS: dict[int, FixedLayout] = {
     0x4e: (("outdoor_low", 2),),
     0x4f: (("outdoor_high", 2),),
     0x50: _octets("available_mix_pumps", "enabled_mix_pumps"),
-    0x53: _setbacks("maximum_room_heat"),
-    0x54: _setbacks("minimum_room_cool"),
-    0x55: _setbacks("maximum_room_cool"),
+    **{limit: _setbacks(limit.name.lower()) for limit in RoomLimit},
     0x58: _octets("floor_cooling_enable"),
     0x5a: (("tank_id", 1), ("tank_pump_hours", 2)),
     0x5b: _octets("available_tank_pumps", "enabled_tank_pumps"),

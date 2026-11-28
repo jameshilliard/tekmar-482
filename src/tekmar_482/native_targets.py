@@ -3,12 +3,11 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from enum import IntEnum
 from typing import TYPE_CHECKING
 
 from ._native_payloads.climate import EXTRA_CLIMATE_SETUP
 from ._native_payloads.codec import integer_field
-from ._native_payloads.layouts import ONBOARD_HUMIDITY_SETUP, SETPOINT_FIELDS
+from ._native_payloads.layouts import ONBOARD_HUMIDITY_SETUP, SETPOINT_FIELDS, RoomLimit
 from ._native_payloads.sensors import (
     ROOM_STATS,
     SensorRole,
@@ -49,12 +48,6 @@ _SOURCE_GATES = (
 _ONBOARD_HUMIDITY_FIELD = "onboard_humidity_sensor_enabled"
 _RH = (ThermostatTarget.HUMIDIFY, ThermostatTarget.DEHUMIDIFY)
 _LEGACY_FLOOR = frozenset(("528", "538"))
-
-
-class RoomLimit(IntEnum):
-    MAXIMUM_ROOM_HEAT = 0x53
-    MINIMUM_ROOM_COOL = 0x54
-    MAXIMUM_ROOM_COOL = 0x55
 
 
 ADJUSTMENT_BLOCKS = frozenset(

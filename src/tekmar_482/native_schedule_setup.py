@@ -276,7 +276,7 @@ async def _check_model(
     if (
         not isinstance(mode, int)
         or mode not in SnowmeltApplication
-        or mode == SnowmeltApplication.SENSOR_ONLY
+        or not SnowmeltApplication(mode).control_writes_supported
     ):
         msg = "654 schedule editing requires a confirmed snowmelt control application"
         raise ValueError(msg)

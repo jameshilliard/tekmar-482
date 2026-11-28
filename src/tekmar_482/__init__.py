@@ -16,7 +16,7 @@ from ._native_payloads.climate import (
 )
 from ._native_payloads.faults import NetworkFault, SensorCircuit
 from ._native_payloads.io import IoEndpoint, IoReport, IoType, io_terminal
-from ._native_payloads.layouts import OperatingPolicyBlock
+from ._native_payloads.layouts import OperatingPolicyBlock, RoomLimit
 from ._native_payloads.line import (
     ClockReport,
     GatewayAccess,
@@ -294,7 +294,6 @@ from .native_status import NativeStatusBatch, read_snowmelt_status
 from .native_target_edit import ThermostatTargetChange
 from .native_targets import (
     OutputSample,
-    RoomLimit,
     RoomLimitTable,
     ThermostatAdjustments,
 )

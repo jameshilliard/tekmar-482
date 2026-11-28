@@ -106,6 +106,19 @@ class PlantStateTests(unittest.TestCase):
         )  # Output identity is not block-zero product identification.
         assert '"extension_hex": "cafe"' in json.dumps(water_fields(peer))
 
+    def test_heat_pump_observation_names_the_return_and_loop_pump(self) -> None:
+        state = NativeState()
+        report = frame(0x24F, bytes.fromhex("00 0a 32 01 03 82 3412 7856"))
+        assert state.observe(report) == (TEST_PATH,)
+        source = state.water_source(TEST_PATH)
+        assert source
+        (sample,) = source.equipment.outputs
+        pump = sample.value.body
+        assert isinstance(pump, HeatPumpOutput)
+        assert pump.return_temp_raw == 0x1234 and pump.outlet_temp_raw == 0x5678
+        assert pump.loop_pump_flags == 0x82 and pump.loop_pump_status == 2
+        assert report.decoded["loop_pump_reserved"] == 32
+
     def test_stage_subnets_and_modes_do_not_infer_physical_output(self) -> None:
         state = NativeState()
         for data in ("15 21 c2 4506", "15 00 00", "25 01 80 7806"):

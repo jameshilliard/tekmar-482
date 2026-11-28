@@ -40,6 +40,7 @@ from tekmar_482 import (
     PeerBusErrors,
     PeerBusEvents,
     PeerLinkCounters,
+    RoomLimit,
     SceneResponse,
     SceneSetup,
     ScheduleBinding,
@@ -595,6 +596,25 @@ class FirmwareInteropTests(unittest.IsolatedAsyncioTestCase):
                 (0x99, 0x5678),
                 (0x9A, 0),
             ]
+
+    async def test_554_minimum_heat_report_through_normal_firmware(self) -> None:
+        script = (
+            _block(3, "23 10000000", "0000", "6e723149 00003f 8d9a01 d80403"),
+            _block(3, "23 10000000", "5200", "6e723145 520009 28 25"),
+        )
+        async with _gateway(script) as manager:
+            batches = [
+                await manager.read_block_group(3, NativeBlockQuery(_THERMOSTAT, b))
+                for b in (0, RoomLimit.MINIMUM_ROOM_HEAT)
+            ]
+            assert batches[1].require_report().message.payload == bytes.fromhex(
+                "5200 09 28 25",
+            )
+            (thermostat,) = NativeSnapshot(tuple(batches), ()).thermostats
+            assert thermostat.setup.product.model == "554"
+            (limit,) = thermostat.adjustments.limits
+            assert limit.limit is RoomLimit.MINIMUM_ROOM_HEAT
+            assert limit.slots == (40, None, None, 37, None)
 
     async def test_operating_policy_blocks_through_normal_firmware(self) -> None:
         script = tuple(

@@ -545,6 +545,9 @@ and purge settings in wire units. An unreported field is unknown, and the
 configured stage or floor-cooling flag does not report a live output.
 `watch-native` can read the cataloged stage and floor-cooling blocks once
 after identification; `--no-thermostat-targets` skips those extra reads.
+On the 554, `adjustments.limits` includes the reported minimum room-heat
+targets (block `52`). Only slots in the peer's support mask are available;
+these values are read-only.
 
 `read-device` also reads cataloged equipment monitors. `NativeClimate.equipment`
 keeps the last relay-status readback, filter interval and elapsed time, and
@@ -897,7 +900,10 @@ send, read the same block again and check the device's reported value.
 are reported as snowmelt status keys, separate from its configuration
 blocks. `read_snowmelt_status(stream, port, peer, source=source)` reads
 the application and configured zone or sensor number before sending the status request.
-It requests the 483 application's keys by default. Pass `keys=bytes([...])`
+It requests the application's cataloged keys by default. The 485's combined
+boiler/PWM and boiler/mixing modes use only water detection and slab temperature
+by default; recognizing these modes does not enable remote writes.
+Pass `keys=bytes([...])`
 to select other keys, including melt and storm group IDs. The public
 `NativeStatusQuery.snowmelt(role, number, keys)` takes the **one-based**
 configured number, not a native node or the zero-based 17F wire destination.

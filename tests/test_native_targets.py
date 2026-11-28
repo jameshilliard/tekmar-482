@@ -189,6 +189,25 @@ class AdjustmentTests(unittest.TestCase):
         assert legacy and [legacy.value(s) for s in _S] == [0, 60, None, None, None]
         assert not state.thermostats[0].adjustments.limits
 
+    def test_554_minimum_heat_limit_uses_the_reported_slots(self) -> None:
+        state = NativeState()
+        state.observe(identity(_MODERN))
+        assert (
+            RoomLimit.MINIMUM_ROOM_HEAT
+            not in state.thermostats[0].adjustments.missing_blocks
+        )
+        state.observe(identity(105101))
+        assert (
+            RoomLimit.MINIMUM_ROOM_HEAT
+            in state.thermostats[0].adjustments.missing_blocks
+        )
+        assert state.observe(_report(0x52, "09 28 25")) == (TEST_PATH,)
+        settings = state.thermostats[0].adjustments
+        (limit,) = settings.limits
+        assert limit.limit is RoomLimit.MINIMUM_ROOM_HEAT
+        assert tuple(limit.raw(slot) for slot in _S) == (40, None, None, 37, None)
+        assert RoomLimit.MINIMUM_ROOM_HEAT not in settings.missing_blocks
+
     def test_operating_reports_never_become_stored_settings(self) -> None:
         state = NativeState()
         state.observe(identity(_MODERN))

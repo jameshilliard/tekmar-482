@@ -1,4 +1,4 @@
-"""483 SW 11 plant output variants and mixing module reports."""
+"""Plant output variants and mixing module reports."""
 
 from __future__ import annotations
 
@@ -125,20 +125,21 @@ class BoilerChillerOutput:
 class HeatPumpOutput:
     flags: int
     stages: StageCounts | Modulation
-    pump_flags: int | None
-    temperatures: tuple[int, int] | None
+    loop_pump_flags: int | None
+    return_temp_raw: int | None
+    outlet_temp_raw: int | None
     ambiguous_tail: bytes = b""
 
     @property
-    def pump_status(self) -> int | None:
-        return None if self.pump_flags is None else self.pump_flags & 3
+    def loop_pump_status(self) -> int | None:
+        return None if self.loop_pump_flags is None else self.loop_pump_flags & 3
 
     @classmethod
     def read(cls, r: Reader, kind: PlantKind) -> HeatPumpOutput:
         flags = r.byte()
         stages = StageCounts(*r.take(2)) if kind < 12 else Modulation(*r.take(3))
-        pump = r.byte() if kind in (10, 11, 14, 15) else None
-        temps = None
+        loop_pump = r.byte() if kind in (10, 11, 14, 15) else None
+        return_temp = outlet_temp = None
         tail = b""
         if kind in (9, 10, 11, 14, 15):
             # The indexed 14/15 reader skips a byte before the temperatures;
@@ -146,16 +147,18 @@ class HeatPumpOutput:
             if kind in (14, 15) and len(r.remaining) > 4:
                 tail = r.take(len(r.remaining))
             else:
-                temps = (r.word(), r.word())
-        return cls(flags, stages, pump, temps, tail)
+                return_temp, outlet_temp = r.word(), r.word()
+        return cls(flags, stages, loop_pump, return_temp, outlet_temp, tail)
 
     def fields(self) -> Fields:
         result: Fields = {"state": self.flags & 15, "ob_config": self.flags >> 4 & 1,
                           "cooling": self.flags >> 5 & 1, "reserved": self.flags >> 6}
-        if self.pump_flags is not None:
-            result.update(pump_status=self.pump_flags & 3, pump_reserved=self.pump_flags >> 2)
-        if self.temperatures is not None:
-            result.update(input_temp_raw=self.temperatures[0], outlet_temp_raw=self.temperatures[1])
+        if self.loop_pump_flags is not None:
+            result.update(loop_pump_status=self.loop_pump_flags & 3, loop_pump_reserved=self.loop_pump_flags >> 2)
+        if self.return_temp_raw is not None:
+            result["return_temp_raw"] = self.return_temp_raw
+        if self.outlet_temp_raw is not None:
+            result["outlet_temp_raw"] = self.outlet_temp_raw
         if self.ambiguous_tail:
             result["temperature_tail_hex"] = self.ambiguous_tail.hex()
         return result | self.stages.fields()

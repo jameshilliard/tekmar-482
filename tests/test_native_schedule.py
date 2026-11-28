@@ -488,21 +488,22 @@ class NativeScheduleTests(unittest.IsolatedAsyncioTestCase):
         assert self.requests == [(0, 0), (0xF, 0), (0x10, 0), (0x13, 0)]
         assert not self.updates
 
-    async def test_schedule_setup_does_not_enable_a_654_sensor_application(
+    async def test_schedule_setup_does_not_enable_unsupported_654_applications(
         self,
     ) -> None:
         self.identity(105801, 3)
         self.blocks[0xF, 0] = bytes.fromhex("1d 00ed030100")
-        self.blocks[0xD0, 0] = bytes.fromhex("01 04")
-        with self.assertRaisesRegex(ValueError, "snowmelt control application"):
-            await self.stream.configure_schedule(
-                1,
-                _TARGET,
-                ScheduleSetupChange(binding=ScheduleBinding.ZONE),
-                source=_HOST,
-                expected_binding=ScheduleBinding.NONE,
-                preview=False,
-            )
+        for mode in (4, 5, 6, 7):
+            self.blocks[0xD0, 0] = bytes([1, mode])
+            with self.assertRaisesRegex(ValueError, "snowmelt control application"):
+                await self.stream.configure_schedule(
+                    1,
+                    _TARGET,
+                    ScheduleSetupChange(binding=ScheduleBinding.ZONE),
+                    source=_HOST,
+                    expected_binding=ScheduleBinding.NONE,
+                    preview=False,
+                )
         assert not self.updates
 
     async def test_schedule_setup_checks_master_quirk_before_touching_rows(

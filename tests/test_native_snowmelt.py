@@ -18,6 +18,7 @@ from tekmar_482 import (
     SnowmeltAddress,
     SnowmeltApplication,
     SnowmeltBlock,
+    SnowmeltGroupBinding,
     SnowmeltGroupResult,
     SnowmeltGroups,
     SnowmeltKey,
@@ -82,6 +83,30 @@ def setup_frames(path: NativePath = SITE) -> list[NativeFrame]:
 
 
 class SnowmeltStateTests(unittest.TestCase):
+    def test_combined_670_modes_read_telemetry_without_enabling_controls(self) -> None:
+        for app in (SnowmeltApplication.BOILER_PWM, SnowmeltApplication.BOILER_MIXING):
+            state = NativeState()
+            state.observe(identity(107002))
+            state.observe(block(0xD0, bytes([1, app])))
+            for b in (0xC0, 0xC2, 0xC3, 0x71):
+                state.observe(block(b, CONFIG[b]))
+            device = state.snowmelt(SITE)
+            assert device and device.setup.application is app
+            assert device.identity.product and device.identity.product.model == "670"
+            assert device.setup.primary == ZONE and device.missing_keys == b"\x19\x22"
+            query = device.status_query()
+            assert query and query.payload == bytes.fromhex("11 02 19 22")
+            state.observe(snow(ZONE, [(0x19, 3), (0x22, 0x600), (0x27, 123)]))
+            device = state.snowmelt(SITE)
+            assert device and device.primary and device.primary.raw(0x27) == 123
+            assert device.missing_keys == b"" and device.setup.groups == SnowmeltGroups(
+                4,
+                6,
+            )
+            assert device.setup.melt_setpoint_raw == 0x5F0
+            assert SnowmeltGroupBinding.from_setup(device.setup, Operation.MELT) is None
+            assert device.setpoint(SnowmeltBlock.MELT_SETPOINT) is None
+
     def test_reported_groups_come_from_a_paired_primary_zone_report(self) -> None:
         state = NativeState()
         for item in setup_frames():
@@ -436,7 +461,12 @@ class SnowmeltWatchTests(unittest.IsolatedAsyncioTestCase):
         self.ack()
 
     async def test_target_edit_checks_application_before_transmitting(self) -> None:
-        for app in (SnowmeltApplication.MIXING, SnowmeltApplication.SENSOR_ONLY):
+        for app, expected in (
+            (SnowmeltApplication.MIXING, SnowmeltApplication.ELECTRIC),
+            (SnowmeltApplication.SENSOR_ONLY, SnowmeltApplication.ELECTRIC),
+            (SnowmeltApplication.BOILER_PWM, SnowmeltApplication.BOILER_PWM),
+            (SnowmeltApplication.BOILER_MIXING, SnowmeltApplication.BOILER_MIXING),
+        ):
             task = asyncio.create_task(
                 self.stream.write_snowmelt_setpoint(
                     SITE.port,
@@ -444,7 +474,7 @@ class SnowmeltWatchTests(unittest.IsolatedAsyncioTestCase):
                     SnowmeltBlock.IDLE_SETPOINT,
                     None,
                     source=NativeAddress(0, 0),
-                    expected_application=SnowmeltApplication.ELECTRIC,
+                    expected_application=expected,
                     preview=False,
                 ),
             )
@@ -456,18 +486,18 @@ class SnowmeltWatchTests(unittest.IsolatedAsyncioTestCase):
                 await task
             assert self.tx.empty()
 
-    async def test_group_rejects_sensor_application_and_unrelated_identity(
+    async def test_group_rejects_unsupported_applications_and_unrelated_identity(
         self,
     ) -> None:
-        for number in (105102, 105801):
+        for number, mode in ((105102, None), (105801, 4), (107002, 5), (108401, 6)):
             task = self.command(Operation.MELT, expected=4)
             assert (await self.next_send())[1].payload[:2] == b"\0\0"
             self.ack()
             self.rx(identity(number))
-            if number == 105801:
+            if mode is not None:
                 assert (await self.next_send())[1].payload[:2] == b"\xd0\0"
                 self.ack()
-                self.rx(block(0xD0, b"\x01\x04"))
+                self.rx(block(0xD0, bytes([1, mode])))
             with self.assertRaisesRegex(
                 ValueError,
                 "snowmelt control|control application",
