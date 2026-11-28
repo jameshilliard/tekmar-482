@@ -75,7 +75,11 @@ def management(method: int, service: int, body: bytes = b"") -> bytes:
     )
 
 
-RAW_CAPABILITIES = management(1, 4, bytes([2, 0, 5, 3]))
+RAW_CAPABILITIES = management(1, 4, bytes([3, 0, 5, 3]))
+
+
+def raw_wire(data: bytes) -> bytes:
+    return serialize(Packet(1, data), literal_header=True)
 
 
 class BridgeTests(unittest.IsolatedAsyncioTestCase):
@@ -118,17 +122,50 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
             while await reader.read(len(request)):
                 writer.write(management(4, 4, b"unversioned"))
 
-        packets: list[tuple[Packet, bool]] = []
+        packets: list[tuple[Packet, bool, bool]] = []
         async with listen(app) as endpoint, endpoint.connect() as wire:
-            with observe_bridge_packets(lambda p, tx: packets.append((p, tx))):
+            with observe_bridge_packets(
+                lambda p, tx, literal: packets.append((p, tx, literal)),
+            ):
                 bridge = BridgeClient(wire)
             await asyncio.create_task(bridge.revision())
             await BridgeClient(wire).revision()
         key = bytes.fromhex("04f04b54")
         assert packets == [
-            (Packet(6, b"\x01" + key), True),
-            (Packet(6, b"\x04" + key + b"unversioned"), False),
+            (Packet(6, b"\x01" + key), True, False),
+            (Packet(6, b"\x04" + key + b"unversioned"), False, False),
         ]
+
+    async def test_reconnect_learns_raw_header_before_reading_past_caps(self) -> None:
+        record = Packet(1, bytes(6) + bytes.fromhex("1230002b ca352f") + bytes(40))
+        capture = raw_wire(record.data)
+        assert capture[:3] == bytes.fromhex("ca3501")
+
+        async def app(
+            reader: asyncio.StreamReader,
+            writer: asyncio.StreamWriter,
+        ) -> None:
+            request = b"\xca" * 301 + management(1, 1)
+            assert await reader.readexactly(len(request)) == request
+            # Ignore a bad captured checksum before identification.
+            writer.write(
+                b"\xca\x01\x01\x00\xff\x35"
+                + management(1, 4, bytes([3, 1, 5, 3]))
+                + capture,
+            )
+            build = management(4, 1)
+            assert await reader.readexactly(len(build)) == build
+            writer.write(management(4, 4, b"unversioned"))
+
+        packets: list[tuple[Packet, bool, bool]] = []
+        async with listen(app) as endpoint, endpoint.connect() as wire:
+            with observe_bridge_packets(
+                lambda p, tx, literal: packets.append((p, tx, literal)),
+            ):
+                bridge = BridgeClient(wire)
+            await bridge.identify()
+            assert await bridge.revision() is None
+        assert (record, False, True) in packets
 
     def setUp(self) -> None:
         # Exercise two flash pages and real image validation without a binary fixture.
@@ -166,10 +203,12 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         reader: asyncio.StreamReader,
         writer: asyncio.StreamWriter,
         revision: str,
+        *,
+        capabilities: bytes = RAW_CAPABILITIES,
     ) -> None:
         caps = b"\xca" * 301 + management(1, 1)
         assert await reader.readexactly(len(caps)) == caps
-        writer.write(RAW_CAPABILITIES)
+        writer.write(capabilities)
         request = management(4, 1)
         if first := await reader.read(1):
             assert first + await reader.readexactly(len(request) - 1) == request
@@ -217,19 +256,19 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
                         struct.pack("<2I5Q5I", 2, 9, 3, 3, high + 3, 3, 3, *range(5)),
                     ),
                 ),
-                (2, management(2, 0, bytes([1])), management(2, 3, bytes([1]))),
+                (2, management(2, 0, b"\x01\x01"), management(2, 3, b"\x01\x01")),
                 (9, management(9, 0, bytes([0])), management(9, 3, bytes([0]))),
             ]:
                 assert await reader.readexactly(len(request)) == request, method
                 writer.write(reply)
             body = bytes.fromhex("12300001a5")
-            send = serialize(Packet(1, bytes([1, 0]) + body))
+            send = raw_wire(bytes([0, 0]) + bytes(4) + body)
             assert await reader.readexactly(len(send)) == send
-            writer.write(serialize(Packet(1, bytes(6) + body)))
-            writer.write(serialize(Packet(1, bytes([2, 0, 0]))))
-            mode = management(2, 0, bytes(1))
+            writer.write(raw_wire(bytes(6) + body))
+            writer.write(raw_wire(bytes([2, 0, 0])))
+            mode = management(2, 0, bytes(2))
             assert await reader.readexactly(len(mode)) == mode
-            writer.write(management(2, 3, bytes(1)))
+            writer.write(management(2, 3, bytes(2)))
             for port in range(5):
                 req = management(3, 1, bytes([port]))
                 assert await reader.readexactly(len(req)) == req
@@ -264,11 +303,11 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
             reader: asyncio.StreamReader,
             writer: asyncio.StreamWriter,
         ) -> None:
-            mode = management(2, 0, bytes(1))
+            mode = management(2, 0, bytes(2))
             assert await reader.readexactly(len(mode)) == mode
             writer.write(management(6, 3, struct.pack("<IB", 0x544BF002, 1)))
             assert await reader.readexactly(len(mode)) == mode
-            writer.write(management(2, 3, bytes(1)))
+            writer.write(management(2, 3, bytes(2)))
             walk = serialize(Packet(6, bytes.fromhex("01670100000000")))
             assert await reader.readexactly(len(walk)) == walk
             for address in (23, 1102, 0):
@@ -293,8 +332,9 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_raw_exit_drains_a_result_before_reusing_link(self) -> None:
         sent = asyncio.Event()
-        body = bytes.fromhex("12300000")
-        raw_frame = serialize(Packet(1, bytes(6) + body))
+        body = bytes.fromhex("12300025 ca352f") + bytes(34)
+        raw_frame = raw_wire(bytes(6) + body)
+        assert raw_frame[:3] == bytes.fromhex("ca2f01")
 
         async def app(
             reader: asyncio.StreamReader,
@@ -305,22 +345,25 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
                     b"\xca" * 301 + management(1, 1),
                     RAW_CAPABILITIES,
                 ),
-                (management(2, 0, b"\x01"), management(2, 3, b"\x01")),
-                (management(9, 0, b"\0"), raw_frame + management(9, 3, b"\0")),
+                (
+                    management(2, 0, b"\x01\x01"),
+                    management(2, 3, b"\x01\x01") + raw_frame,
+                ),
+                (management(9, 0, b"\0"), management(9, 3, b"\0")),
             ):
                 assert await reader.readexactly(len(request)) == request
                 writer.write(reply)
-            send = serialize(Packet(1, b"\x01\x01" + body))
+            send = raw_wire(b"\0\x01" + bytes(4) + body)
             assert await reader.readexactly(len(send)) == send
             sent.set()
-            normal = management(2, 0, b"\0")
+            normal = management(2, 0, bytes(2))
             assert await reader.readexactly(len(normal)) == normal
             writer.write(
                 management(6, 3, struct.pack("<IB", 0x544BF002, 1))
-                + serialize(Packet(1, b"\x02\x01\0")),
+                + raw_wire(b"\x02\x01\0"),
             )
             assert await reader.readexactly(len(normal)) == normal
-            writer.write(management(2, 3, b"\0"))
+            writer.write(management(2, 3, bytes(2)))
             build = management(4, 1)
             assert await reader.readexactly(len(build)) == build
             writer.write(management(4, 4, b"unversioned"))
@@ -359,13 +402,13 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
             assert first + await reader.readexactly(len(caps) - 1) == caps
             writer.write(RAW_CAPABILITIES)
             for request, reply in (
-                (management(2, 0, b"\x01"), management(2, 3, b"\x01")),
+                (management(2, 0, b"\x01\x01"), management(2, 3, b"\x01\x01")),
                 (management(9, 0, b"\0"), management(9, 3, b"\0")),
                 (
-                    serialize(Packet(1, b"\x01\x01" + body)),
-                    serialize(Packet(1, b"\x02\x01\0")),
+                    raw_wire(b"\0\x01" + bytes(4) + body),
+                    raw_wire(b"\x02\x01\0"),
                 ),
-                (management(2, 0, b"\0"), management(2, 3, b"\0")),
+                (management(2, 0, bytes(2)), management(2, 3, bytes(2))),
             ):
                 assert await reader.readexactly(len(request)) == request
                 writer.write(reply)
@@ -405,14 +448,14 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
             assert first + await reader.readexactly(len(caps) - 1) == caps
             writer.write(RAW_CAPABILITIES)
             for cmd, reply in (
-                (management(2, 0, b"\x01"), management(2, 3, b"\x01")),
+                (management(2, 0, b"\x01\x01"), management(2, 3, b"\x01\x01")),
                 (management(9, 0, b"\x04"), management(9, 3, b"\x04")),
                 (
-                    serialize(Packet(1, b"\x01\x02" + request)),
-                    serialize(Packet(1, b"\x02\x02\0"))
-                    + serialize(Packet(1, bytes.fromhex("000207000000") + report)),
+                    raw_wire(b"\0\x02" + bytes(4) + request),
+                    raw_wire(b"\x02\x02\0")
+                    + raw_wire(bytes.fromhex("000207000000") + report),
                 ),
-                (management(2, 0, b"\0"), management(2, 3, b"\0")),
+                (management(2, 0, bytes(2)), management(2, 3, bytes(2))),
             ):
                 assert await reader.readexactly(len(cmd)) == cmd
                 writer.write(reply)
@@ -450,10 +493,10 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         update = bytes.fromhex("6df00009 1203 0500 112233442f")
         before = bytes.fromhex("6e7128c8 05001f 1122334455")
         clamped = bytes.fromhex("6e7128c8 05001f 112233442e")
-        ack = serialize(Packet(1, bytes.fromhex("020100")))
+        ack = raw_wire(bytes.fromhex("020100"))
 
         def capture(body: bytes) -> bytes:
-            return serialize(Packet(1, bytes.fromhex("000107000000") + body))
+            return raw_wire(bytes.fromhex("000107000000") + body)
 
         async def exchange(
             reader: asyncio.StreamReader,
@@ -469,21 +512,21 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
             assert first + await reader.readexactly(len(caps) - 1) == caps
             writer.write(RAW_CAPABILITIES)
             steps = [
-                (management(2, 0, b"\x01"), management(2, 3, b"\x01")),
+                (management(2, 0, b"\x01\x01"), management(2, 3, b"\x01\x01")),
                 (management(9, 0, b"\0"), management(9, 3, b"\0")),
-                (serialize(Packet(1, b"\x01\x01" + request)), ack + capture(before)),
+                (raw_wire(b"\0\x01" + bytes(4) + request), ack + capture(before)),
             ]
             if confirm:
                 steps.extend(
                     (
-                        (serialize(Packet(1, b"\x01\x01" + update)), ack),
+                        (raw_wire(b"\0\x01" + bytes(4) + update), ack),
                         (
-                            serialize(Packet(1, b"\x01\x01" + request)),
+                            raw_wire(b"\0\x01" + bytes(4) + request),
                             ack + capture(clamped),
                         ),
                     ),
                 )
-            steps.append((management(2, 0, b"\0"), management(2, 3, b"\0")))
+            steps.append((management(2, 0, bytes(2)), management(2, 3, bytes(2))))
             for outgoing, incoming in steps:
                 assert await reader.readexactly(len(outgoing)) == outgoing
                 writer.write(incoming)
@@ -536,7 +579,7 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
             caps = management(1, 1)
             assert first + await reader.readexactly(len(caps) - 1) == caps
             writer.write(RAW_CAPABILITIES)
-            mode = management(2, 0, b"\x01"), management(2, 3, b"\x01")
+            mode = management(2, 0, b"\x01\x01"), management(2, 3, b"\x01\x01")
             mask = management(9, 0, b"\0"), management(9, 3, b"\0")
             steps = [mode, mask]
             for outgoing, report in (
@@ -546,17 +589,12 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
             ):
                 steps.append(
                     (
-                        serialize(Packet(1, bytes([1, 1]) + bytes.fromhex(outgoing))),
-                        serialize(Packet(1, bytes([2, 1, 0])))
-                        + serialize(
-                            Packet(
-                                1,
-                                bytes([0, 1, 1, 0, 0, 0]) + bytes.fromhex(report),
-                            ),
-                        ),
+                        raw_wire(bytes([0, 1]) + bytes(4) + bytes.fromhex(outgoing)),
+                        raw_wire(bytes([2, 1, 0]))
+                        + raw_wire(bytes([0, 1, 1, 0, 0, 0]) + bytes.fromhex(report)),
                     ),
                 )
-            steps.append((management(2, 0, b"\0"), management(2, 3, b"\0")))
+            steps.append((management(2, 0, bytes(2)), management(2, 3, bytes(2))))
             for command, reply in steps:
                 assert await reader.readexactly(len(command)) == command
                 writer.write(reply)
@@ -601,7 +639,7 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
             caps = management(1, 1)
             assert first + await reader.readexactly(len(caps) - 1) == caps
             writer.write(RAW_CAPABILITIES)
-            request = serialize(Packet(1, bytes.fromhex("0103 1f600002 43a5")))
+            request = raw_wire(bytes.fromhex("0003 00000000 1f600002 43a5"))
             response = serialize(
                 Packet(
                     1,
@@ -611,10 +649,10 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
                 ),
             )
             for outgoing, incoming in (
-                (management(2, 0, b"\x01"), management(2, 3, b"\x01")),
+                (management(2, 0, b"\x01\x01"), management(2, 3, b"\x01\x01")),
                 (management(9, 0, b"\0"), management(9, 3, b"\0")),
-                (request, serialize(Packet(1, bytes([2, 3, 0]))) + response),
-                (management(2, 0, b"\0"), management(2, 3, b"\0")),
+                (request, raw_wire(bytes([2, 3, 0])) + response),
+                (management(2, 0, bytes(2)), management(2, 3, bytes(2))),
             ):
                 assert await reader.readexactly(len(outgoing)) == outgoing
                 writer.write(incoming)
@@ -696,14 +734,14 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
             assert first + await reader.readexactly(len(caps) - 1) == caps
             writer.write(RAW_CAPABILITIES)
             for command, response in (
-                (management(2, 0, b"\x01"), management(2, 3, b"\x01")),
+                (management(2, 0, b"\x01\x01"), management(2, 3, b"\x01\x01")),
                 (management(9, 0, b"\x12"), management(9, 3, b"\x12")),
                 (
-                    serialize(Packet(1, b"\x01\x04" + request)),
-                    serialize(Packet(1, b"\x02\x04\0"))
-                    + serialize(Packet(1, bytes.fromhex("00040a000000") + report)),
+                    raw_wire(b"\0\x04" + bytes(4) + request),
+                    raw_wire(b"\x02\x04\0")
+                    + raw_wire(bytes.fromhex("00040a000000") + report),
                 ),
-                (management(2, 0, b"\0"), management(2, 3, b"\0")),
+                (management(2, 0, bytes(2)), management(2, 3, bytes(2))),
             ):
                 assert await reader.readexactly(len(command)) == command
                 writer.write(response)
@@ -761,7 +799,7 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
             + (1145).to_bytes(2, "little")
         )
         rx_identity, rx_other, rx_fault, rx_group = (
-            serialize(Packet(1, prefix + body))
+            raw_wire(prefix + body)
             for body in (
                 identity,
                 bytes.fromhex("6e7161c4 770001 13"),
@@ -769,9 +807,9 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
                 bytes.fromhex("60f161c3 0410ca"),
             )
         )
-        result = serialize(Packet(1, bytes([2, 3, 0])))
-        mode = management(2, 0, b"\x01"), management(2, 3, b"\x01")
-        stop = management(2, 0, b"\0"), management(2, 3, b"\0")
+        result = raw_wire(bytes([2, 3, 0]))
+        mode = management(2, 0, b"\x01\x01"), management(2, 3, b"\x01\x01")
+        stop = management(2, 0, bytes(2)), management(2, 3, bytes(2))
         ack = management(9, 0, b"\x08"), management(9, 3, b"\x08")
         stats = [
             (management(3, 1, bytes([p])), management(3, 4, bytes([p]) + bytes(16)))
@@ -785,7 +823,7 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
                 + mask.to_bytes(4, "little")
                 + bytes(4)
             )
-            return serialize(Packet(1, bytes([1, 3]) + body))
+            return raw_wire(bytes([0, 3]) + bytes(4) + body)
 
         async def simulate(*, passive: bool) -> list[dict[str, object]]:
             async def app(
@@ -827,13 +865,10 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
                     ):
                         steps.append(
                             (
-                                serialize(
-                                    Packet(1, bytes([1, 3]) + bytes.fromhex(query)),
+                                raw_wire(
+                                    bytes([0, 3]) + bytes(4) + bytes.fromhex(query),
                                 ),
-                                result
-                                + serialize(
-                                    Packet(1, prefix + bytes.fromhex(report_hex)),
-                                ),
+                                result + raw_wire(prefix + bytes.fromhex(report_hex)),
                             ),
                         )
                     steps.extend([stop, *stats])
@@ -916,9 +951,9 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
             reader: asyncio.StreamReader,
             writer: asyncio.StreamWriter,
         ) -> None:
-            mode = management(2, 0, bytes(1))
+            mode = management(2, 0, bytes(2))
             assert await reader.readexactly(len(mode)) == mode
-            writer.write(management(2, 3, bytes(1)))
+            writer.write(management(2, 3, bytes(2)))
             for method, request, actual in [
                 (0x127, bytes.fromhex("010002"), bytes.fromhex("010001")),
                 (0x13E, bytes.fromhex("0100074906"), bytes.fromhex("0100034606")),
@@ -1016,9 +1051,9 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
             caps = b"\xca" * 301 + management(1, 1)
             assert first + await reader.readexactly(len(caps) - 1) == caps
             writer.write(report + RAW_CAPABILITIES)
-            mode = management(2, 0, b"\0")
+            mode = management(2, 0, bytes(2))
             assert await reader.readexactly(len(mode)) == mode
-            writer.write(management(2, 3, b"\0"))
+            writer.write(management(2, 3, bytes(2)))
             req = serialize(Packet(6, bytes.fromhex("013701000001000000")))
             assert await reader.readexactly(len(req)) == req
             writer.write(
@@ -1069,9 +1104,11 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         reader: asyncio.StreamReader,
         writer: asyncio.StreamWriter,
         revision: str,
+        *,
+        capabilities: bytes = RAW_CAPABILITIES,
     ) -> None:
         assert await reader.readexactly(6) == b"?\r\nJ\r\n"
-        await self.booted(reader, writer, revision)
+        await self.booted(reader, writer, revision, capabilities=capabilities)
 
     async def test_matching_build_skips_isp(self) -> None:
         async def app(
@@ -1101,6 +1138,14 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
     async def test_different_build_auto_programs_and_verifies_boot(self) -> None:
         await self.check_auto_program("f" * 40)
 
+    async def test_version_two_raw_application_can_upgrade_without_a_button(
+        self,
+    ) -> None:
+        await self.check_auto_program(
+            "f" * 40,
+            capabilities=management(1, 4, bytes([2, 1, 5, 3])),
+        )
+
     async def test_unversioned_build_auto_programs_and_verifies_boot(self) -> None:
         await self.check_auto_program("unversioned")
 
@@ -1109,15 +1154,21 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         reader: asyncio.StreamReader,
         writer: asyncio.StreamWriter,
         running: str | None,
+        capabilities: bytes,
     ) -> None:
         if running is not None:
-            await self.app_revision(reader, writer, running)
+            await self.app_revision(reader, writer, running, capabilities=capabilities)
             request = management(5, 0)
             assert await reader.readexactly(len(request)) == request
             writer.write(management(5, 3))
         await self.sync(reader, writer, part=0x0402FF23)
 
-    async def check_auto_program(self, running: str | None) -> None:
+    async def check_auto_program(
+        self,
+        running: str | None,
+        *,
+        capabilities: bytes = RAW_CAPABILITIES,
+    ) -> None:
         bundle = FirmwareBundle.load()
         page = 4096
         expected = bundle.image + b"\xff" * (-len(bundle.image) % page)
@@ -1133,7 +1184,7 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
             if started:
                 await self.booted(reader, writer, bundle.revision)
                 return
-            await self.enter_rom(reader, writer, running)
+            await self.enter_rom(reader, writer, running, capabilities)
             unlocked = False
             prepared = None
             staged = bytearray()

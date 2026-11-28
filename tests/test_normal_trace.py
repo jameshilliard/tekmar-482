@@ -88,8 +88,8 @@ class NormalTraceTests(unittest.IsolatedAsyncioTestCase):
     async def test_refuses_stock_old_and_raw_without_changing_modes(self) -> None:
         for caps, reason in (
             ("0400000000", "Normal trace requires"),
-            ("0401f04b5402000503", "Normal trace requires"),
-            ("0401f04b5402010507", "Normal trace requires"),
+            ("0401f04b5403000503", "Normal trace requires"),
+            ("0401f04b5403010507", "Normal trace requires"),
             ("0401f04b5401000507", "unsupported custom bridge wire version"),
         ):
             script = Script(("0101f04b54", caps))
@@ -102,7 +102,7 @@ class NormalTraceTests(unittest.IsolatedAsyncioTestCase):
     async def test_owned_scope_restores_previous_mask_on_cancellation(self) -> None:
         state = "040bf04b5402" + "00" * 40
         script = Script(
-            ("0101f04b54", "0401f04b5402000507"),
+            ("0101f04b54", "0401f04b5403000507"),
             ("010bf04b54", state),
             ("000bf04b5411", "030bf04b5411"),
             ("000bf04b5402", "030bf04b5402"),
@@ -133,7 +133,7 @@ class NormalTraceTests(unittest.IsolatedAsyncioTestCase):
     ) -> None:
         high = 1 << 42
         counters = struct.pack("<5Q", 4, 0, high, 0, 8).hex()
-        caps = ("0101f04b54", "0401f04b5402000507")
+        caps = ("0101f04b54", "0401f04b5403000507")
         script = Script(
             caps,
             ("010bf04b54", "040bf04b5411" + counters),
@@ -154,7 +154,7 @@ class NormalTraceTests(unittest.IsolatedAsyncioTestCase):
         high = 1 << 48
         for last in (9, high * 2):
             script = Script(
-                ("0101f04b54", "0401f04b5402000507"),
+                ("0101f04b54", "0401f04b5403000507"),
                 (
                     "010bf04b54",
                     "040bf04b5400" + struct.pack("<5Q", high, 0, 0, 0, 0).hex(),
@@ -180,7 +180,7 @@ class NormalTraceTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_wide_firmware_rejects_truncated_trace_counters(self) -> None:
         script = Script(
-            ("0101f04b54", "0401f04b5402000507"),
+            ("0101f04b54", "0401f04b5403000507"),
             ("010bf04b54", "040bf04b54" + "00" * 21),
         )
         async with Tekmar482Client(script) as client:
@@ -189,7 +189,7 @@ class NormalTraceTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_reconnect_does_not_restore_a_mask_to_the_new_gateway(self) -> None:
         script = Script(
-            ("0101f04b54", "0401f04b5402000507"),
+            ("0101f04b54", "0401f04b5403000507"),
             ("010bf04b54", "040bf04b54" + "00" * 41),
             ("000bf04b5401", "030bf04b5401"),
         )
@@ -218,7 +218,7 @@ class NormalTraceTests(unittest.IsolatedAsyncioTestCase):
                     return
                 caps = management(1, 1)
                 assert first + await reader.readexactly(len(caps) - 1) == caps
-                caps_reply = management(1, 4, bytes.fromhex("02000507"))
+                caps_reply = management(1, 4, bytes.fromhex("03000507"))
                 writer.write(caps_reply)
                 before = bytes(1) + struct.pack("<5Q", 0, 0, 0xFFFFFFFF, 0, 0)
                 after = bytes(1) + struct.pack("<5Q", 0, 0, 0x100000001, 0, 0)

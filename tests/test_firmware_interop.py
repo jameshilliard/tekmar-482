@@ -668,7 +668,7 @@ class FirmwareInteropTests(unittest.IsolatedAsyncioTestCase):
         complete = asyncio.Event()
         rejections = 0
 
-        def on_packet(packet: Packet, outbound: bool) -> None:  # noqa: FBT001
+        def on_packet(packet: Packet, outbound: bool, _literal: bool) -> None:  # noqa: FBT001
             nonlocal rejections
             if (
                 not outbound

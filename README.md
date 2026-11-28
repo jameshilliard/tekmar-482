@@ -224,10 +224,11 @@ Use `trace-normal --status` to inspect the gateway's mask and lifetime
 drop counts, or `trace-normal --stop` to clear a trace after a disconnect.
 
 For instrumentation, wrap custom connection creation in
-`tekmar_482.wire_trace.observe_bridge_packets(callback)`. The synchronous
-callback receives `(packet, outbound)` for each received application packet
-and submitted transmission, including operations from other tasks on that
-connection. This observer does not enable tracing or capture ROM ISP bytes.
+`tekmar_482.wire_trace.observe_bridge_packets(callback)`. For each received
+or submitted application packet, the synchronous callback gets
+`(packet, outbound, literal_header)`. The second argument is true for host
+TX, and the third is true when the length and type bytes are literal.
+Observation does not enable tracing or capture ROM ISP bytes.
 `tekmar_482.raw.decode_raw_packet(packet)` decodes a gateway-to-host Raw
 record without taking ownership of the stream.
 
@@ -238,10 +239,12 @@ native identification block 00. Match the actual port, subnet and node of
 the resulting report. A successful request or link ACK does not confirm
 a model, and a node without a response remains unidentified.
 
-Raw and Normal trace carry the same native tN4 body inside TPCK. Their
-envelopes differ: Raw type `0x01` carries bridge operations; trace type
-`0xD0` identifies Normal RX or a gateway TX attempt with its origin and
-outcome. Trace is not an alternate encoding for sending Raw requests.
+Raw uses the 485 serial format for native sends and receives: TPCK length
+and type bytes are literal, and type `0x01` service `0x00` carries a port,
+four timestamp bytes, and the native body. A host send puts zero in the
+timestamp field. `BridgeClient.stream()` opts into 482 transmit results
+and invalid-frame diagnostics. Normal keeps stock TPCK framing; its trace
+type `0xD0` is observation only and is not a way to send Raw requests.
 
 **Gateway traffic counters.** With `BridgeFeature.TRAFFIC_COUNTS`, use
 `BridgeManagement(client).traffic` in Normal mode or `stream.traffic` in
@@ -278,11 +281,11 @@ async with errors.watch([ErrorSource.PORT_1, ErrorSource.GATEWAY]) as reports:
         print(counter.source.name, counter.reason.name, counter.count)
 ```
 
-Custom bridge wire version 2 uses saturating 64-bit counters for capture
+Custom bridge wire version 3 uses saturating 64-bit counters for capture
 and trace drops, edge counts and panel events. They reset at gateway boot,
-not on a mode change. Older custom wire versions are rejected; only stock
-commands have a backward-compatibility guarantee. Per-frame uptime and
-hardware timer readings are still 32-bit timestamps.
+not on a mode change. Application sessions reject older custom wire
+versions; only stock commands retain backward compatibility. Per-frame
+uptime and hardware timer readings are still 32-bit timestamps.
 
 Custom Normal mode obtains missing fields from the device on its own port.
 A tHA ModeSetting Request returns the thermostat's recent confirmed mode,
@@ -1393,9 +1396,10 @@ Use the flash installer for development hardware and persistent deployment.
 To test a local revision, run the bundled CLI directly from the sdist:
 `uvx --from 'dist/tekmar_482-0.1.0.tar.gz[serial]' tekmar-482 update --serial "$PORT"`.
 An already-current custom build is not rewritten.
-An application advertising an unsupported custom wire version is not
-programmed through that interface. Enter ROM ISP with its matching tool
-or the hardware Test button, then use the same `--from-rom` installer.
+The installer can hand off a running custom wire-version-2 application to
+ROM ISP, but the client does not use its old Raw format. For other unsupported
+versions, enter ROM ISP with the matching tool or the hardware Test button,
+then use the same `--from-rom` installer.
 
 ```bash
 # A custom dev image is running. This may replace an unversioned build.

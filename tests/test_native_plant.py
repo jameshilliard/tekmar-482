@@ -344,8 +344,8 @@ class PlantSessionTests(unittest.IsolatedAsyncioTestCase):
     async def sent(self) -> NativeMessage:
         async with asyncio.timeout(1):
             p = await self.tx.get()
-        assert p[:2] == bytes([1, TEST_PATH.port])
-        return NativeMessage.from_bytes(p[2:])
+        assert p[:2] == bytes([0, TEST_PATH.port])
+        return NativeMessage.from_bytes(p[6:])
 
     async def query(self) -> tuple[int, int]:
         m = await self.sent()

@@ -58,8 +58,8 @@ class NativeScheduleTests(unittest.IsolatedAsyncioTestCase):
         self.blocks[0, 0] = b"\x27" + product.to_bytes(3, "little") + bytes([z])
 
     async def receive_host(self, send: bytes) -> None:
-        assert send[:2] == b"\x01\x01"
-        msg = NativeMessage.from_bytes(send[2:])
+        assert send[:2] == b"\0\x01"
+        msg = NativeMessage.from_bytes(send[6:])
         self.stream.feed(Packet(1, bytes([2, 1, 0])))
         payload = msg.payload
         if msg.message_id == 0x2DF:
@@ -659,7 +659,7 @@ class NativeScheduleTests(unittest.IsolatedAsyncioTestCase):
             caps = management(1, 1)
             assert first + await reader.readexactly(len(caps) - 1) == caps
             writer.write(RAW_CAPABILITIES)
-            for method, data in ((2, b"\x01"), (9, b"\0")):
+            for method, data in ((2, b"\x01\x01"), (9, b"\0")):
                 command = management(method, 0, data)
                 assert await reader.readexactly(len(command)) == command
                 writer.write(management(method, 3, data))
@@ -675,7 +675,7 @@ class NativeScheduleTests(unittest.IsolatedAsyncioTestCase):
                     body = bytes.fromhex("6df0000b 23051300 0306090c0f3030")
                 else:
                     body = NativeBlockQuery(_PEER, block).request(_HOST).to_bytes()
-                command = serialize(Packet(1, b"\x01\x01" + body))
+                command = serialize(Packet(1, b"\0\x01" + bytes(4) + body))
                 assert await reader.readexactly(len(command)) == command
                 reply = serialize(Packet(1, b"\x02\x01\0"))
                 if block != -1:
@@ -686,9 +686,9 @@ class NativeScheduleTests(unittest.IsolatedAsyncioTestCase):
                     )
                     reply += serialize(Packet(1, b"\0\1" + bytes(4) + msg.to_bytes()))
                 writer.write(reply)
-            leave = management(2, 0, b"\0")
+            leave = management(2, 0, bytes(2))
             assert await reader.readexactly(len(leave)) == leave
-            writer.write(management(2, 3, b"\0"))
+            writer.write(management(2, 3, bytes(2)))
 
         async with listen(app) as endpoint, asyncio.timeout(5):
             out = StringIO()

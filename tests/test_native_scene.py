@@ -69,7 +69,7 @@ class NativeSceneTests(unittest.IsolatedAsyncioTestCase):
         task = asyncio.create_task(selection.send(self.stream))
         self.assertCountEqual(
             [await self.outgoing() for _ in range(3)],
-            [bytes([1, p]) + _SCENE_BODY for p in (3, 2, 0)],
+            [bytes([0, p]) + bytes(4) + _SCENE_BODY for p in (3, 2, 0)],
         )
         echo = self.capture(0x2FF, "05b400", peer=_HOST)
         self.result(2, TxStatus.FAILED, FailureReason.NO_ACK)
@@ -96,7 +96,9 @@ class NativeSceneTests(unittest.IsolatedAsyncioTestCase):
         one = SceneSelection(NativeScene.NORMAL, (1,), _HOST)
         for cancel in (True, False):
             task = asyncio.create_task(one.send(self.stream, timeout=0.05))
-            assert await self.outgoing() == bytes.fromhex("0101 2ff00003 000000")
+            assert await self.outgoing() == bytes.fromhex(
+                "0001 00000000 2ff00003 000000",
+            )
             if cancel:
                 task.cancel()
                 with self.assertRaises(asyncio.CancelledError):
@@ -136,7 +138,7 @@ class NativeSceneTests(unittest.IsolatedAsyncioTestCase):
             SceneSetup.read(self.stream, 2, _PEER, source=_HOST),
         )
         assert await self.outgoing() == bytes.fromhex(
-            "0102 6d70000b 0e0013 40000000 00000000",
+            "0002 00000000 6d70000b 0e0013 40000000 00000000",
         )
         self.result(2, TxStatus.ACK)
         self.capture(0x2E7, "0e0080 0000000000000001")
@@ -170,7 +172,7 @@ class NativeSceneTests(unittest.IsolatedAsyncioTestCase):
         self.result(2, TxStatus.ACK)
         self.capture(0x2E7, "0e0008 aabbcc04ef987601")
         assert await self.outgoing() == bytes.fromhex(
-            "0102 6df0000c 13070e00 aabbcc05ef987601",
+            "0002 00000000 6df0000c 13070e00 aabbcc05ef987601",
         )
         self.result(2, TxStatus.ACK)
         assert await self.outgoing() == request
@@ -226,12 +228,13 @@ class NativeSceneTests(unittest.IsolatedAsyncioTestCase):
             caps = management(1, 1)
             assert first + await reader.readexactly(len(caps) - 1) == caps
             writer.write(RAW_CAPABILITIES)
-            for method, data in ((2, b"\1"), (9, b"\0")):
+            for method, data in ((2, b"\x01\x01"), (9, b"\0")):
                 command = management(method, 0, data)
                 assert await reader.readexactly(len(command)) == command
                 writer.write(management(method, 3, data))
             sends = [
-                serialize(Packet(1, bytes([1, port]) + _SCENE_BODY)) for port in (1, 3)
+                serialize(Packet(1, bytes([0, port]) + bytes(4) + _SCENE_BODY))
+                for port in (1, 3)
             ]
             self.assertCountEqual(
                 [await reader.readexactly(len(sends[0])) for _ in sends],
@@ -241,9 +244,9 @@ class NativeSceneTests(unittest.IsolatedAsyncioTestCase):
                 serialize(Packet(1, bytes([2, 3, 2, 1])))
                 + serialize(Packet(1, bytes([2, 1, 0]))),
             )
-            leave = management(2, 0, b"\0")
+            leave = management(2, 0, bytes(2))
             assert await reader.readexactly(len(leave)) == leave
-            writer.write(management(2, 3, b"\0"))
+            writer.write(management(2, 3, bytes(2)))
 
         async with listen(app) as endpoint, asyncio.timeout(5):
             out = StringIO()

@@ -307,8 +307,8 @@ class LiveCalendarTests(unittest.IsolatedAsyncioTestCase):
     async def query(self, b: int, selector: int = 0) -> None:
         async with asyncio.timeout(1):
             packet = await self.tx.get()
-        assert packet[:2] == bytes([1, TEST_PATH.port])
-        msg = NativeMessage.from_bytes(packet[2:])
+        assert packet[:2] == bytes([0, TEST_PATH.port])
+        msg = NativeMessage.from_bytes(packet[6:])
         assert msg.message_id == 0x2D7 and msg.payload[:2] == b.to_bytes(2, "little")
         assert int.from_bytes(msg.payload[7:], "little") == selector
 

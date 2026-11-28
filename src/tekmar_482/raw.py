@@ -60,7 +60,6 @@ class TxStatus(IntEnum):
 class RejectReason(IntEnum):
     INVALID_BODY = 1
     PIN_UNAVAILABLE = 2
-    WRONG_MODE = 3
     LOCAL_ACK_ACTIVE = 4
 
 
@@ -85,8 +84,7 @@ class InvalidReason(IntEnum):
 
 
 class _Service(IntEnum):
-    RX = 0
-    SEND = 1
+    NATIVE = 0
     TX_RESULT = 2
     PORT_ERROR = 3
     RX_INVALID = 4
@@ -250,7 +248,7 @@ def decode_raw_packet(packet: Packet, capture_index: int = 0) -> _Record | TxRes
             # InvalidPort echoes even a port number outside the physical range.
             return PortError(port, _reason(PortErrorReason, data[2]))
         if port in TN4_PORTS:
-            if kind == _Service.RX and _valid_body(data[_RX_HEADER:]):
+            if kind == _Service.NATIVE and _valid_body(data[_RX_HEADER:]):
                 return NativeFrame(
                     port,
                     int.from_bytes(data[2:6], "little"),
@@ -537,7 +535,7 @@ class RawDispatcher:
         future: asyncio.Future[TxResult] = asyncio.get_running_loop().create_future()
         self._pending[port] = future
         try:
-            await self._write(bytes((_Service.SEND, port)) + body)
+            await self._write(bytes((_Service.NATIVE, port)) + bytes(4) + body)
             return await future
         except Exception as err:
             self.fail(err)

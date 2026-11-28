@@ -241,8 +241,8 @@ class SensorReadTests(unittest.IsolatedAsyncioTestCase):
         await self.enterAsyncContext(self.stream.receiving(idle.get))
 
     async def send(self, data: bytes) -> None:
-        assert data[:2] == bytes([1, 1])
-        cmd = NativeMessage.from_bytes(data[2:])
+        assert data[:2] == bytes([0, 1])
+        cmd = NativeMessage.from_bytes(data[6:])
         assert cmd.message_id == 0x2D7 and cmd.payload[2] == _PEER.subnet
         assert int.from_bytes(cmd.payload[3:7], "little") == _PEER.request_mask()
         block = int.from_bytes(cmd.payload[:2], "little")

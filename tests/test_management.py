@@ -35,7 +35,7 @@ class ManagementTest(unittest.IsolatedAsyncioTestCase):
         for mode in BridgeMode:
             with self.subTest(mode=mode):
                 script = Script(
-                    ("0101f04b54", f"0401f04b5402{mode:02x}050040"),
+                    ("0101f04b54", f"0401f04b5403{mode:02x}050040"),
                     ("0114f04b54", "0414f04b54000200000f00000012000000feffffff"),
                     (
                         "0114f04b5403",
@@ -49,7 +49,7 @@ class ManagementTest(unittest.IsolatedAsyncioTestCase):
                 async with Tekmar482Client(script) as client:
                     manager = BridgeManagement(client)
                     assert await manager.capabilities() == BridgeCapabilities(
-                        2,
+                        3,
                         mode,
                         5,
                         BridgeFeature.LINK_TIMING,
@@ -124,7 +124,7 @@ class ManagementTest(unittest.IsolatedAsyncioTestCase):
                     await BridgeManagement(client).enter_update_mode()
 
     async def test_identify_revision_then_enter_isp(self) -> None:
-        caps = ("0101f04b54", "0401f04b5402000502")
+        caps = ("0101f04b54", "0401f04b5403000502")
         revision = "a" * 40
         script = Script(
             caps,
@@ -135,7 +135,7 @@ class ManagementTest(unittest.IsolatedAsyncioTestCase):
         async with Tekmar482Client(script) as client:
             management = BridgeManagement(client)
             assert await management.capabilities() == BridgeCapabilities(
-                2,
+                3,
                 BridgeMode.NORMAL,
                 5,
                 BridgeFeature.ROM_UPDATE,
@@ -149,7 +149,7 @@ class ManagementTest(unittest.IsolatedAsyncioTestCase):
             "0400000000",
             "0401f04b5401000502",
             "0401f04b54ff000502",
-            "0401f04b5402000500",
+            "0401f04b5403000500",
         ):
             script = Script(("0101f04b54", response))
             async with Tekmar482Client(script) as client:
@@ -160,7 +160,7 @@ class ManagementTest(unittest.IsolatedAsyncioTestCase):
     async def test_capability_probe_and_busy_result_are_correlated(self) -> None:
         script = Script(
             ("0101f04b54", "0400000000"),
-            ("0101f04b54", "0300000000 0401f04b5402000502"),
+            ("0101f04b54", "0300000000 0401f04b5403000502"),
             ("0005f04b54", "0306f04b5404f04b5401 0306f04b5405f04b5401"),
         )
         async with Tekmar482Client(script) as client:

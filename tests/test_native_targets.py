@@ -340,8 +340,8 @@ class TargetSessionTests(unittest.IsolatedAsyncioTestCase):
     async def sent(self) -> NativeMessage:
         async with asyncio.timeout(1):
             raw = await self.tx.get()
-        assert raw[:2] == bytes([1, TEST_PATH.port])
-        return NativeMessage.from_bytes(raw[2:])
+        assert raw[:2] == bytes([0, TEST_PATH.port])
+        return NativeMessage.from_bytes(raw[6:])
 
     async def query(self, b: int) -> None:
         assert await self.sent() == NativeBlockQuery(TEST_PATH.address, b).request(

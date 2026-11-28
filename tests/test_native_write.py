@@ -63,7 +63,7 @@ class NativeWriteTests(unittest.IsolatedAsyncioTestCase):
         async with asyncio.timeout(2):
             assert (
                 await self.tx.get()
-                == bytes([1, port]) + _QUERY.request(_HOST).to_bytes()
+                == bytes([0, port]) + bytes(4) + _QUERY.request(_HOST).to_bytes()
             )
 
     async def baseline(self, body: bytes = _BODY, *, support: int = 31) -> None:
@@ -74,7 +74,7 @@ class NativeWriteTests(unittest.IsolatedAsyncioTestCase):
     async def expect_update(self, body: bytes = _PATCHED) -> None:
         expected = NativeMessage.update_block(5, body, source=_HOST, target=_PEER)
         async with asyncio.timeout(2):
-            assert await self.tx.get() == bytes([1, 1]) + expected.to_bytes()
+            assert await self.tx.get() == bytes([0, 1]) + bytes(4) + expected.to_bytes()
 
     async def test_unknown_fields_multicast_and_missing_source_never_write(
         self,

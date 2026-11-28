@@ -25,7 +25,7 @@ from tekmar_482.packet import Packet
 from .test_management import Script
 from .test_normal_block import Wire
 
-_CAPS = "0401f04b54020005bf0e"
+_CAPS = "0401f04b54030005bf0e"
 _IDENTITY = "6e7161c8 00001f 0d8e01 7904"
 _STATUS = "7d7161c2 8fe1"
 
@@ -124,7 +124,7 @@ class PeerCaptureTests(unittest.IsolatedAsyncioTestCase):
                         await task
 
     async def test_old_firmware_refused_before_touching_mask(self) -> None:
-        script = Script(("0101f04b54", "0401f04b54020005bf06"))
+        script = Script(("0101f04b54", "0401f04b54030005bf06"))
         async with Tekmar482Client(script) as client:
             with self.assertRaisesRegex(ProtocolError, "Normal trace requires"):
                 async with BridgeManagement(client).peer_capture():

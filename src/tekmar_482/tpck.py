@@ -32,7 +32,7 @@ def checksum(packet_type: int, data: bytes) -> int:
     return (packet_type + len(data) + sum(data)) & 0xFF
 
 
-def serialize(packet: Packet) -> bytes:
+def serialize(packet: Packet, *, literal_header: bool = False) -> bytes:
     """Serialize a packet into a TPCK frame."""
     if len(packet.data) > _MAX_DATA_LENGTH:
         msg = "TPCK payloads are limited to 255 bytes"
@@ -45,8 +45,11 @@ def serialize(packet: Packet) -> bytes:
             frame.append(ESC)
         frame.append(value)
 
-    append_stuffed(len(packet.data))
-    append_stuffed(packet.type)
+    if literal_header:
+        frame.extend((len(packet.data), packet.type))
+    else:
+        append_stuffed(len(packet.data))
+        append_stuffed(packet.type)
     for value in packet.data:
         append_stuffed(value)
     append_stuffed(checksum(packet.type, packet.data))
@@ -57,8 +60,14 @@ def serialize(packet: Packet) -> bytes:
 class TpckParser:
     """Incremental TPCK stream parser."""
 
-    def __init__(self, *, strict_checksum: bool = False) -> None:
+    def __init__(
+        self,
+        *,
+        strict_checksum: bool = False,
+        literal_header: bool = False,
+    ) -> None:
         self.strict_checksum = strict_checksum
+        self.literal_header = literal_header
         self._state = _State.WAIT_SOF
         self._escaped = False
         self._length = 0
@@ -93,19 +102,21 @@ class TpckParser:
                 self._start_frame()
             return None
 
-        if self._escaped:
-            self._escaped = False
-        elif value == ESC:
-            self._escaped = True
-            return None
-        elif value == SOF:
-            self._start_frame()
-            return None
-        elif value == EOF:
-            try:
-                return self._finish_frame() if self._state is _State.EOF else None
-            finally:
-                self.reset()
+        literal = self.literal_header and self._state in (_State.LENGTH, _State.TYPE)
+        if not literal:
+            if self._escaped:
+                self._escaped = False
+            elif value == ESC:
+                self._escaped = True
+                return None
+            elif value == SOF:
+                self._start_frame()
+                return None
+            elif value == EOF:
+                try:
+                    return self._finish_frame() if self._state is _State.EOF else None
+                finally:
+                    self.reset()
 
         if self._state is _State.LENGTH:
             self._length = value

@@ -4,12 +4,11 @@ from __future__ import annotations
 
 import asyncio
 import re
-from collections import deque
 from contextlib import asynccontextmanager, suppress
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
-from ._bridge_diagnostics import CAPTURE_COUNTERS, PANEL, PORT_DROPS
+from ._bridge_diagnostics import CAPTURE_COUNTERS, PANEL, PORT_DROPS, WIRE_VERSION
 from .client import Tekmar482Client
 from .constants import TN4_PORTS
 from .exceptions import (
@@ -33,12 +32,13 @@ from .trpc import TrpcMethod, TrpcService
 from .wire_trace import current_observer
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Awaitable, Callable, Iterable
+    from collections.abc import AsyncIterator, Awaitable, Callable, Iterable, Iterator
 
     from ._wire import Wire
     from .raw import BridgeStream
 
 _DEFAULT_BAUD = 9600
+_RAW_EXTENSIONS = 1
 _TICK_MASK = 0xFFFFFFFF
 
 
@@ -63,7 +63,7 @@ class BridgeClient:
     def __init__(self, wire: Wire) -> None:
         self._wire = wire
         self._parser = TpckParser(strict_checksum=True)
-        self._packets: deque[Packet] = deque()
+        self._pending: Iterator[int] = iter(())
         self._busy = asyncio.Lock()
         self._features = BridgeFeature(0)
         self._observer = current_observer()
@@ -81,23 +81,28 @@ class BridgeClient:
                 raise
 
     async def _next_packet(self) -> Packet:
-        while not self._packets:
+        while True:
+            # A mode acknowledgement and the first new-dialect frame can share
+            # a single read. Leave the unread bytes for the next packet.
+            for byte in self._pending:
+                if (packet := self._parser.feed(byte)) is not None:
+                    self._observe(packet, outbound=False)
+                    return packet
             chunk = await self._wire.reader.read(256)
             if not chunk:
                 msg = "gateway disconnected"
                 raise ConnectionClosedError(msg)
-            self._packets.extend(self._parser.feed_many(chunk))
-        packet = self._packets.popleft()
-        self._observe(packet, outbound=False)
-        return packet
+            self._pending = iter(chunk)
 
     def _observe(self, packet: Packet, *, outbound: bool) -> None:
         if self._observer is not None:
-            self._observer(packet, outbound)
+            self._observer(packet, outbound, self._parser.literal_header)
 
     async def _write_packet(self, packet: Packet) -> None:
         self._observe(packet, outbound=True)
-        await self._wire.write(serialize(packet))
+        await self._wire.write(
+            serialize(packet, literal_header=self._parser.literal_header),
+        )
 
     async def _write_raw(self, body: bytes) -> None:
         await self._write_packet(Packet(TYPE_TN4, body))
@@ -148,13 +153,17 @@ class BridgeClient:
                     msg = f"bridge management rejection: {payload[4:].hex()}"
                     raise ProtocolError(msg)
 
-    async def identify(self) -> None:
+    async def identify(self, *, for_update: bool = False) -> None:
+        """Identify this protocol, or allow the previous version for ROM handoff."""
         async with self._transaction():
             if self._wire.baudrate != _DEFAULT_BAUD:
                 burst = b"\xca" * max(1, self._wire.baudrate // 1250)
                 for preamble in (burst, burst, b"\xca"):
                     await self._wire.write(preamble)
                     await asyncio.sleep(0.08)
+            # A reconnect may start in Raw mode. Discard pre-negotiation
+            # checksum failures; the capabilities reply has the same framing.
+            self._parser.strict_checksum = False
             try:
                 data = await self._call(BridgeMethod.CAPABILITIES)
             except _NullCapabilitiesError as err:
@@ -164,7 +173,14 @@ class BridgeClient:
                     raise StockFirmwareError(msg) from err
                 msg = "unrecognized tHA protocol version after NullMethod"
                 raise ProtocolError(msg) from err
-            self._features = BridgeCapabilities.from_payload(data).features
+            finally:
+                self._parser.strict_checksum = True
+            caps = BridgeCapabilities.from_payload(data, for_update=for_update)
+            current = caps.wire_version == WIRE_VERSION
+            self._features = (
+                caps.features if current else caps.features & BridgeFeature.ROM_UPDATE
+            )
+            self._parser.literal_header = current and caps.mode is BridgeMode.RAW
 
     async def enter_update_mode(self) -> None:
         async with self._transaction():
@@ -230,6 +246,21 @@ class BridgeClient:
             msg = f"{method.name} change not acknowledged"
             raise ProtocolError(msg)
 
+    async def _set_mode(
+        self,
+        mode: BridgeMode,
+        consume: Callable[[Packet], object] | None = None,
+    ) -> None:
+        raw = mode is BridgeMode.RAW
+        value = bytes((mode, _RAW_EXTENSIONS if raw else 0))
+        if (
+            await self._call(BridgeMethod.MODE, value, update=True, consume=consume)
+            != value
+        ):
+            msg = "bridge mode change not acknowledged"
+            raise ProtocolError(msg)
+        self._parser.literal_header = raw
+
     @asynccontextmanager
     async def normal(
         self,
@@ -239,7 +270,7 @@ class BridgeClient:
         """Borrow the link for tRPC. A debugger can attach without a mode change."""
         async with self._transaction():
             if select_mode:
-                await self._set_byte(BridgeMethod.MODE, BridgeMode.NORMAL)
+                await self._set_mode(BridgeMode.NORMAL)
             transport = _SessionTransport(
                 self._next_packet,
                 self._write_packet,
@@ -302,7 +333,7 @@ class BridgeClient:
             traffic=management.traffic,
         )
         async with self._transaction():
-            await self._set_byte(BridgeMethod.MODE, BridgeMode.RAW)
+            await self._set_mode(BridgeMode.RAW)
             try:
                 await self._set_byte(
                     BridgeMethod.ACK_MASK,
@@ -320,14 +351,10 @@ class BridgeClient:
                     and not self._wire.writer.is_closing()
                 ):
                     with suppress(OSError, TekmarError):
-                        await self._set_byte(
-                            BridgeMethod.MODE,
-                            BridgeMode.NORMAL,
-                            stream.feed,
-                        )
+                        await self._set_mode(BridgeMode.NORMAL, stream.feed)
                 raise
             else:
-                await self._set_byte(BridgeMethod.MODE, BridgeMode.NORMAL, stream.feed)
+                await self._set_mode(BridgeMode.NORMAL, stream.feed)
                 stream.check_drained()
                 if diagnostics:
                     for p in TN4_PORTS:

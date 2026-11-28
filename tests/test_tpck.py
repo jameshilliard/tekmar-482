@@ -5,6 +5,13 @@ from tekmar_482.tpck import EOF, ESC, SOF, TpckParser, serialize
 
 
 class TpckTest(unittest.TestCase):
+    def test_485_stuffs_checksum_but_not_type(self) -> None:
+        packet = Packet(EOF, b"")
+        frame = bytes.fromhex("ca00352f3535")
+        assert serialize(packet, literal_header=True) == frame
+        assert TpckParser(literal_header=True).feed_many(frame) == [packet]
+        assert serialize(packet) == bytes.fromhex("ca002f352f3535")
+
     def test_only_unescaped_eof_terminates_a_complete_frame(self) -> None:
         packet = Packet(TYPE_TRPC, bytes([EOF]))
         frame = serialize(packet)

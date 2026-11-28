@@ -34,8 +34,8 @@ class NativeSnapshotTests(unittest.IsolatedAsyncioTestCase):
 
     async def write(self, data: bytes) -> None:
         port = data[1]
-        msg = NativeMessage.from_bytes(data[2:])
-        assert data[0] == 1
+        msg = NativeMessage.from_bytes(data[6:])
+        assert data[0] == 0
         if msg.message_id == 0x17F:
             self.status_requests.append(msg)
             payload = bytes([msg.payload[0] + 8, len(msg.payload[2:])]) + b"".join(

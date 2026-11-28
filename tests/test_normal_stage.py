@@ -19,7 +19,7 @@ from .test_management import Script
 from .test_normal_block import Wire
 
 _CAP = "0101f04b54"
-_SUPPORT = "0401f04b54020005bffe"
+_SUPPORT = "0401f04b54030005bffe"
 _UPDATE = "0015f04b54"
 _ADMIT = "0315f04b54"
 _END = "0215f04b54"
@@ -65,7 +65,7 @@ class NormalStageTests(unittest.IsolatedAsyncioTestCase):
         for nodes in ((), (0,), (25,)):
             with self.subTest(nodes=nodes), self.assertRaises(ValueError):
                 StageSelection.from_nodes(0xAB, nodes, stage=1, output_level=117)
-        for caps in ("0401f04b54020005bf7e", "0401f04b54020105bffe"):
+        for caps in ("0401f04b54030005bf7e", "0401f04b54030105bffe"):
             with self.subTest(caps=caps):
                 script = Script((_CAP, caps))
                 async with Tekmar482Client(script) as client:

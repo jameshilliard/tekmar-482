@@ -271,8 +271,8 @@ class SetpointEditTests(unittest.IsolatedAsyncioTestCase):
     async def sent(self) -> NativeMessage:
         async with asyncio.timeout(1):
             raw = await self.tx.get()
-        assert raw[:2] == bytes([1, TEST_PATH.port])
-        return NativeMessage.from_bytes(raw[2:])
+        assert raw[:2] == bytes([0, TEST_PATH.port])
+        return NativeMessage.from_bytes(raw[6:])
 
     def ack(self) -> None:
         self.stream.feed(Packet(1, bytes([2, TEST_PATH.port, 0])))
@@ -443,7 +443,7 @@ class SetpointWatchTests(unittest.IsolatedAsyncioTestCase):
             )
             async with asyncio.timeout(1):
                 while 0x2C not in seen:
-                    outgoing = NativeMessage.from_bytes((await tx.get())[2:])
+                    outgoing = NativeMessage.from_bytes((await tx.get())[6:])
                     assert outgoing.message_id == 0x2D7
                     b = int.from_bytes(outgoing.payload[:2], "little")
                     seen.append(b)

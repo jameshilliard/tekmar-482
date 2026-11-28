@@ -291,8 +291,8 @@ class IoExchangeTests(unittest.IsolatedAsyncioTestCase):
     async def send(self, port: int = PATH.port) -> NativeMessage:
         async with asyncio.timeout(2):
             data = await self.tx.get()
-        assert data[:2] == bytes([1, port])
-        return NativeMessage.from_bytes(data[2:])
+        assert data[:2] == bytes([0, port])
+        return NativeMessage.from_bytes(data[6:])
 
     def rx(self, f: NativeFrame) -> None:
         self.stream.feed(

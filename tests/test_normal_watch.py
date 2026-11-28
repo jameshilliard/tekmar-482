@@ -39,7 +39,7 @@ if TYPE_CHECKING:
     from tekmar_482 import NativeState
 
 _CAP = "0101f04b54"
-_SUPPORT = "0401f04b54020005bf2e"  # Ordered active reads without subnet discovery.
+_SUPPORT = "0401f04b54030005bf2e"  # Ordered active reads without subnet discovery.
 _ID = "03354000000000000000"
 _MODE = "03354000000003000000"
 _PLANT = 104103
@@ -464,7 +464,7 @@ class NormalWatchTests(unittest.IsolatedAsyncioTestCase):
         async def gateway() -> None:
             await start(wire, "08")
             await wire.expect(_CAP)
-            wire.feed("0401f04b54020005bf1e")
+            wire.feed("0401f04b54030005bf1e")
             await restore(wire)
 
         async with Tekmar482Client(wire) as client, asyncio.TaskGroup() as tasks:

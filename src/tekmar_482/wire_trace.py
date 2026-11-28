@@ -11,7 +11,7 @@ if TYPE_CHECKING:
 
     from .packet import Packet
 
-type PacketObserver = Callable[[Packet, bool], None]
+type PacketObserver = Callable[[Packet, bool, bool], None]
 _observer = ContextVar[PacketObserver | None]("tekmar_packet_observer", default=None)
 
 
@@ -19,8 +19,8 @@ _observer = ContextVar[PacketObserver | None]("tekmar_packet_observer", default=
 def observe_bridge_packets(callback: PacketObserver) -> Iterator[None]:
     """Observe decoded TPCK RX and submitted TX in custom sessions opened here.
 
-    The second argument is true for host TX. Keep callbacks synchronous and
-    nonblocking. Collecting packets does not enable tracing or send any request.
+    The second argument is true for host TX; the third is true for literal
+    Raw headers. Keep callbacks synchronous and nonblocking.
     """
     token = _observer.set(callback)
     try:

@@ -163,9 +163,9 @@ class NativeScanTests(unittest.IsolatedAsyncioTestCase):
             self.deliver(frame(3, 0, b"", mid=0x3F7))
             self.deliver(frame(3, 0, bytes.fromhex("2526"), mid=0x3FF))
             requests = {await self.tx.get(), await self.tx.get()}
-            assert {body[:2] + body[6:] for body in requests} == {
-                bytes.fromhex("0104 000011 ffffff7f 00000000"),
-                bytes.fromhex("0103 000015 ffffff7f 00000000"),
+            assert {body[:6] + body[10:] for body in requests} == {
+                bytes.fromhex("0004 00000000 000011 ffffff7f 00000000"),
+                bytes.fromhex("0003 00000000 000015 ffffff7f 00000000"),
             }
             self.stream.feed(Packet(1, bytes((2, 3, 0))))
             self.deliver(sample)

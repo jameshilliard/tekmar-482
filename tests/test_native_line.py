@@ -101,8 +101,8 @@ class GroupReadTests(unittest.IsolatedAsyncioTestCase):
         await self.enterAsyncContext(self.stream.receiving(idle.get))
 
     async def send(self, data: bytes) -> None:
-        assert data[:2] == bytes([1, 3])
-        cmd = NativeMessage.from_bytes(data[2:])
+        assert data[:2] == bytes([0, 3])
+        cmd = NativeMessage.from_bytes(data[6:])
         self.messages.append(cmd)
         self.stream.feed(Packet(1, bytes([2, 3, 0])))
         if cmd.message_id == 0x2D7:
@@ -172,7 +172,7 @@ class GroupReadTests(unittest.IsolatedAsyncioTestCase):
             task = asyncio.create_task(cmd.send(stream, timeout=0.1))
             for _ in cmd.ports:
                 sent = await tx.get()
-                assert sent[2:] == bytes.fromhex("21f00002 0400")
+                assert sent[6:] == bytes.fromhex("21f00002 0400")
                 if sent[1] != 3:
                     outcome = (
                         bytes([2, FailureReason.NO_ACK]) if sent[1] == 2 else bytes([0])
@@ -249,15 +249,17 @@ class GroupReadTests(unittest.IsolatedAsyncioTestCase):
                 caps = management(1, 1)
                 assert first + await reader.readexactly(len(caps) - 1) == caps
                 writer.write(RAW_CAPABILITIES)
-                for method, value in ((2, 1), (9, 0)):
-                    cmd = management(method, 0, bytes([value]))
+                for method, value in ((2, b"\x01\x01"), (9, b"\0")):
+                    cmd = management(method, 0, value)
                     assert await reader.readexactly(len(cmd)) == cmd
-                    writer.write(management(method, 3, bytes([value])))
+                    writer.write(management(method, 3, value))
 
                 ack = serialize(Packet(1, bytes([2, 3, 0])))
                 for block, sample in self.blocks.items():
                     native = NativeBlockQuery(_PEER, block).request(_HOST)
-                    request = serialize(Packet(1, bytes([1, 3]) + native.to_bytes()))
+                    request = serialize(
+                        Packet(1, bytes([0, 3]) + bytes(4) + native.to_bytes()),
+                    )
                     assert await reader.readexactly(len(request)) == request
                     report = NativeMessage(
                         0x2E7,
@@ -271,12 +273,14 @@ class GroupReadTests(unittest.IsolatedAsyncioTestCase):
                         ),
                     )
                 if confirm and expected == 5:
-                    cmd = serialize(Packet(1, bytes.fromhex("0103 21f00002 0501")))
+                    cmd = serialize(
+                        Packet(1, bytes.fromhex("0003 00000000 21f00002 0501")),
+                    )
                     assert await reader.readexactly(len(cmd)) == cmd
                     writer.write(ack)
-                leave = management(2, 0, b"\x00")
+                leave = management(2, 0, bytes(2))
                 assert await reader.readexactly(len(leave)) == leave
-                writer.write(management(2, 3, b"\x00"))
+                writer.write(management(2, 3, bytes(2)))
 
             async with listen(serve) as endpoint, asyncio.timeout(5):
                 args = build_parser().parse_args(

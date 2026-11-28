@@ -269,14 +269,14 @@ class WaterReadTests(unittest.IsolatedAsyncioTestCase):
         async with asyncio.timeout(1):
             for port in (1, 3):
                 out = await self.tx.get()
-                assert out[:2] == bytes([1, port])
-                assert NativeMessage.from_bytes(out[2:]).message_id == 0x3F7
+                assert out[:2] == bytes([0, port])
+                assert NativeMessage.from_bytes(out[6:]).message_id == 0x3F7
                 self.stream.feed(Packet(1, bytes([2, port, 0])))
                 self.feed(0x3FF, b"" if port == 1 else b"\x25", port)
             for _ in range(2):
                 request = await self.tx.get()
                 port = request[1]
-                message = NativeMessage.from_bytes(request[2:])
+                message = NativeMessage.from_bytes(request[6:])
                 assert message.message_id == 0x2D7 and message.payload[:2] == bytes(2)
                 assert message.payload[2] == _LOCAL.subnet
                 assert (
@@ -292,7 +292,7 @@ class WaterReadTests(unittest.IsolatedAsyncioTestCase):
                 )
             setup = await self.tx.get()
             assert setup[1] == 3
-            assert NativeMessage.from_bytes(setup[2:]).payload[:2] == b"\x33\x00"
+            assert NativeMessage.from_bytes(setup[6:]).payload[:2] == b"\x33\x00"
             self.stream.feed(Packet(1, bytes([2, 3, 0])))
             self.feed(0x2E7, bytes.fromhex("330003 25 13"))
             await asyncio.sleep(0)

@@ -28,7 +28,7 @@ from tekmar_482.cli import build_parser, run
 from .test_management import Script
 from .test_normal_block import Wire
 
-_CAP = ("0101f04b54", "0401f04b54020005bf04")
+_CAP = ("0101f04b54", "0401f04b54030005bf04")
 _KEY = "02120100000003000000"
 _EDIT = "021201030000000703010409000409"
 _OLD = "6e712846030007010409"
@@ -184,7 +184,7 @@ class NormalEditTests(unittest.IsolatedAsyncioTestCase):
                         preview=False,
                     )
             assert not script.rows
-        for caps in ("0401f04b54020005ff", "0401f04b54020105bf01", "0400000000"):
+        for caps in ("0401f04b54030005ff", "0401f04b54030105bf01", "0400000000"):
             async with Tekmar482Client(Script((_CAP[0], caps))) as client:
                 with self.assertRaisesRegex(ProtocolError, "does not support"):
                     await BridgeManagement(client).write_block(

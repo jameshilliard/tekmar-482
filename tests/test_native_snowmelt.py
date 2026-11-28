@@ -327,8 +327,8 @@ class SnowmeltWatchTests(unittest.IsolatedAsyncioTestCase):
     async def next_send(self) -> tuple[int, NativeMessage]:
         async with asyncio.timeout(1):
             wire = await self.tx.get()
-        assert wire[0] == 1
-        return wire[1], NativeMessage.from_bytes(wire[2:])
+        assert wire[0] == 0
+        return wire[1], NativeMessage.from_bytes(wire[6:])
 
     async def boot(self) -> None:
         assert (await self.next_send())[1].message_id == 0x2D7

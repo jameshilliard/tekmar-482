@@ -35,8 +35,8 @@ class NativeStatusTests(unittest.IsolatedAsyncioTestCase):
     async def sent(self) -> NativeMessage:
         async with asyncio.timeout(2):
             data = await self.tx.get()
-        assert data[:2] == b"\x01\x02"
-        return NativeMessage.from_bytes(data[2:])
+        assert data[:2] == b"\0\x02"
+        return NativeMessage.from_bytes(data[6:])
 
     def result(self, *outcome: int) -> None:
         self.stream.feed(Packet(1, bytes([2, 2, *outcome])))

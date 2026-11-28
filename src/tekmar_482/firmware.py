@@ -214,7 +214,7 @@ async def install_firmware(
                 msg = "no confirmed LPC2146 ROM on the selected endpoint"
                 raise ProtocolError(msg)
             bridge = BridgeClient(wire)
-            await bridge.identify()
+            await bridge.identify(for_update=True)
             revision = await bridge.revision()
             if revision == bundle.revision:
                 return False

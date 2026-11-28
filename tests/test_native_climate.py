@@ -269,8 +269,8 @@ class ClimateSessionTests(unittest.IsolatedAsyncioTestCase):
     async def sent(self, mid: int, b: int, path: NativePath = _PATH) -> NativeMessage:
         async with asyncio.timeout(1):
             data = await self.tx.get()
-        message = NativeMessage.from_bytes(data[2:])
-        assert data[:2] == bytes([1, path.port]) and message.message_id == mid
+        message = NativeMessage.from_bytes(data[6:])
+        assert data[:2] == bytes([0, path.port]) and message.message_id == mid
         if mid == 0x2D7:
             assert message.payload[2] == path.subnet
             assert (

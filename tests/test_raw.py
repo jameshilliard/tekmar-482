@@ -51,7 +51,10 @@ class RawTests(unittest.IsolatedAsyncioTestCase):
             task = asyncio.create_task(
                 self.stream.read_block_group(3, query, source=host),
             )
-            assert await self.tx.get() == bytes((1, 3)) + query.request(host).to_bytes()
+            assert (
+                await self.tx.get()
+                == bytes((0, 3)) + bytes(4) + query.request(host).to_bytes()
+            )
             # Same address and selector, but earlier bus traffic.
             report(3, 1, b"\x07\x81\x11\0")
             self.deliver(2, 3, TxStatus.FAILED, FailureReason.NO_ACK)
@@ -111,7 +114,10 @@ class RawTests(unittest.IsolatedAsyncioTestCase):
         async with self.stream.receiving(self.rx.get), asyncio.timeout(2):
             self.stream.feed(Packet(1, bytes((0, 1, 0, 0, 0, 0)) + body))
             first = asyncio.create_task(self.stream.read_block(1, query, source=host))
-            assert await self.tx.get() == bytes((1, 1)) + query.request(host).to_bytes()
+            assert (
+                await self.tx.get()
+                == bytes((0, 1)) + bytes(4) + query.request(host).to_bytes()
+            )
             with self.assertRaisesRegex(ProtocolError, "native read already"):
                 await self.stream.read_block(1, query, source=host)
             other = asyncio.create_task(self.stream.read_block(2, query, source=host))
@@ -174,9 +180,9 @@ class RawTests(unittest.IsolatedAsyncioTestCase):
     async def test_independent_completions_and_nonterminal_diagnostics(self) -> None:
         async with self.stream.receiving(self.rx.get), asyncio.timeout(2):
             first = asyncio.create_task(self.stream.send(1, _BODY))
-            assert await self.tx.get() == bytes((1, 1)) + _BODY
+            assert await self.tx.get() == bytes((0, 1)) + bytes(4) + _BODY
             other = asyncio.create_task(self.stream.send(2, _BODY))
-            assert await self.tx.get() == bytes((1, 2)) + _BODY
+            assert await self.tx.get() == bytes((0, 2)) + bytes(4) + _BODY
             self.deliver(3, 1, 1)
             self.deliver(2, 2, 2, 3)
             assert await other == TxResult(
@@ -195,7 +201,7 @@ class RawTests(unittest.IsolatedAsyncioTestCase):
             assert await first == TxResult(1, TxStatus.ACK)
             for code, why in ((2, RejectReason.PIN_UNAVAILABLE), (255, 255)):
                 pending = asyncio.create_task(self.stream.send(1, _BODY))
-                assert await self.tx.get() == bytes((1, 1)) + _BODY
+                assert await self.tx.get() == bytes((0, 1)) + bytes(4) + _BODY
                 self.deliver(2, 1, 1, code)
                 assert await pending == TxResult(1, TxStatus.REJECTED, why)
             assert self.tx.empty()
