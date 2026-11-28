@@ -1352,8 +1352,15 @@ class ControllerTest(unittest.IsolatedAsyncioTestCase):
                 report(TrpcMethod.CURRENT_TEMPERATURE, address=1201, temp=1551),
             )
             assert await seen.get() == 1551
-            await transport.close()
-            assert await seen.get() == 1600
+            close = controller.client.close
+
+            async def close_after_reset() -> None:
+                await close()
+                raise ConnectionResetError
+
+            with patch.object(controller.client, "close", close_after_reset):
+                await transport.close()
+                assert await seen.get() == 1600
             assert controller.last_error is None
             assert written_request_count(transport, TrpcMethod.DEVICE_INVENTORY) == 2
             assert (

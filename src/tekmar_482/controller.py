@@ -12,6 +12,8 @@ from typing import TYPE_CHECKING, Self
 
 from ._mode import ModeReads
 from ._poll import RuntimePoll, filter_discovery_events, observe_runtime
+from ._wire import GatewayEndpoint
+from .bridge import BridgeClient
 from .constants import DeviceMode, ThaSetback
 from .exceptions import (
     ConnectionClosedError,
@@ -88,7 +90,7 @@ class Tekmar482Controller:
 
     def __init__(
         self,
-        client: Tekmar482Client,
+        client: Tekmar482Client | GatewayEndpoint,
         *,
         discovery_timeout: float | None = 30,
         poll_timeout: float | None = 2,
@@ -98,7 +100,11 @@ class Tekmar482Controller:
         setback_enable: bool | None = None,
         mode_refresh_burst_window: float = MODE_REFRESH_BURST_WINDOW,
     ) -> None:
-        self.client = client
+        self.client = (
+            BridgeClient.reconnecting_normal(client)
+            if isinstance(client, GatewayEndpoint)
+            else client
+        )
         self.discovery_timeout = discovery_timeout
         self.poll_timeout = poll_timeout
         self.reconnect_interval = (
@@ -505,11 +511,16 @@ class Tekmar482Controller:
                 self._ready_generation = None
                 self._reports = None
                 self.last_error = err
-                self._notify_error(err)
                 await self._stop_observing()
                 await self._mode_reads.clear()
-                await self.client.close()
-                await asyncio.sleep(self.reconnect_interval)
+                # A reset socket can report the same failure again during close.
+                with suppress(*_GATEWAY_ERRORS):
+                    await self.client.close()
+                if not self.client.can_reconnect:
+                    self._running = False
+                self._notify_error(err)
+                if self._running:
+                    await asyncio.sleep(self.reconnect_interval)
 
     async def _set_reporting_confirmed(self, *, enabled: bool) -> TrpcPacket:
         response = await self.client.set_reporting_state(enabled=enabled)

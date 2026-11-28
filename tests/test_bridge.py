@@ -15,6 +15,7 @@ from unittest.mock import patch
 
 from tekmar_482 import (
     BridgeClient,
+    BridgeManagement,
     ConnectionClosedError,
     FirmwareBundle,
     GatewayEndpoint,
@@ -84,6 +85,42 @@ def raw_wire(data: bytes) -> bytes:
 
 
 class BridgeTests(unittest.IsolatedAsyncioTestCase):
+    async def test_normal_endpoint_never_replays_an_unconfirmed_write(self) -> None:
+        connections = 0
+        probe = management(1, 1)
+        select = management(2, 0, bytes(2))
+        update = serialize(Packet(6, bytes.fromhex("00 27010000 010002")))
+
+        async def app(
+            reader: asyncio.StreamReader,
+            writer: asyncio.StreamWriter,
+        ) -> None:
+            nonlocal connections
+            connections += 1
+            assert await reader.readexactly(len(probe)) == probe
+            if connections == 1:
+                writer.write(RAW_CAPABILITIES)
+                assert await reader.readexactly(len(update)) == update
+                return  # Disconnect after receipt but before acknowledging.
+            writer.write(management(1, 4, bytes([6, 1, 5, 3])))
+            assert await reader.readexactly(len(select)) == select
+            writer.write(management(2, 3, bytes(2)))
+            assert await reader.readexactly(len(probe)) == probe
+            writer.write(RAW_CAPABILITIES)
+            assert not await reader.read()
+
+        async with listen(app) as endpoint, asyncio.timeout(3):
+            assert endpoint.port is not None
+            client = BridgeClient.reconnecting_normal(
+                GatewayEndpoint.tcp(endpoint.address, endpoint.port),
+            )
+            async with client:
+                with self.assertRaises(ConnectionClosedError):
+                    await client.set_mode(1, 2)
+            async with client:
+                assert await BridgeManagement(client).capabilities() is not None
+            assert connections == 2
+
     async def test_cancelled_mode_entry_restores_before_closing(self) -> None:
         for base in (True, False):
             with self.subTest(base=base):

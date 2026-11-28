@@ -16,10 +16,12 @@ from typing import TYPE_CHECKING
 
 from tekmar_482 import (
     AddressFields,
+    AvailableInfo,
     BridgeClient,
     BridgeFeature,
     BridgeManagement,
     BridgeMode,
+    ConnectionClosedError,
     GatewayEndpoint,
     IoDirectory,
     IoEndpoint,
@@ -66,6 +68,7 @@ from tekmar_482 import (
     StageSelection,
     StatusRequest,
     TargetSlot,
+    Tekmar482Controller,
     ThermostatMode,
     ThermostatSensorMonitor,
     ThermostatTarget,
@@ -123,37 +126,41 @@ async def _uart_step(
 
 
 @asynccontextmanager
-async def _connected(
+async def _serve_endpoint(
     program: asyncio.StreamReader,
     control: asyncio.StreamWriter,
-) -> AsyncIterator[BridgeClient]:
-    accepted: asyncio.Queue[tuple[asyncio.StreamReader, asyncio.StreamWriter]] = (
-        asyncio.Queue()
-    )
+) -> AsyncIterator[GatewayEndpoint]:
+    accepted: asyncio.Queue[
+        tuple[asyncio.StreamReader, asyncio.StreamWriter] | None
+    ] = asyncio.Queue()
 
     def accept(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         accepted.put_nowait((reader, writer))
 
     async def serve() -> None:
-        reader, writer = await accepted.get()
-        try:
-            await _uart_step(reader, writer, program, control)
-        finally:
-            writer.close()
-            await writer.wait_closed()
+        while (connection := await accepted.get()) is not None:
+            reader, writer = connection
+            try:
+                await _uart_step(reader, writer, program, control)
+            finally:
+                writer.close()
+                await writer.wait_closed()
 
     server = await asyncio.start_server(accept, "127.0.0.1", 0)
     endpoint = GatewayEndpoint.tcp("127.0.0.1", server.sockets[0].getsockname()[1])
     async with server, asyncio.TaskGroup() as tasks:
         tasks.create_task(serve())
-        async with endpoint.connect() as wire:
-            gateway = BridgeClient(wire)
-            await gateway.identify()
-            yield gateway
+        try:
+            yield endpoint
+        finally:
+            server.close()
+            accepted.put_nowait(None)
 
 
 @asynccontextmanager
-async def _emulated_bridge(script: Sequence[Exchange]) -> AsyncIterator[BridgeClient]:
+async def _emulated_endpoint(
+    script: Sequence[Exchange],
+) -> AsyncIterator[GatewayEndpoint]:
     uv = shutil.which("uv")
     assert uv is not None and _IMAGE is not None
     process = await asyncio.create_subprocess_exec(
@@ -174,8 +181,8 @@ async def _emulated_bridge(script: Sequence[Exchange]) -> AsyncIterator[BridgeCl
             control.write(json.dumps(script).encode("ascii") + b"\n")
             await control.drain()
             assert await program.readline() == b"\n", "emulator did not boot"
-            async with _connected(program, control) as client:
-                yield client
+            async with _serve_endpoint(program, control) as endpoint:
+                yield endpoint
             control.close()
             await control.wait_closed()
             assert await process.wait() == 0, "firmware bus script did not complete"
@@ -187,6 +194,14 @@ async def _emulated_bridge(script: Sequence[Exchange]) -> AsyncIterator[BridgeCl
             with suppress(ProcessLookupError):
                 os.killpg(process.pid, signal.SIGKILL)
             await process.wait()
+
+
+@asynccontextmanager
+async def _emulated_bridge(script: Sequence[Exchange]) -> AsyncIterator[BridgeClient]:
+    async with _emulated_endpoint(script) as endpoint, endpoint.connect() as wire:
+        bridge = BridgeClient(wire)
+        await bridge.identify()
+        yield bridge
 
 
 @asynccontextmanager
@@ -222,6 +237,34 @@ _SETPOINT = NativeAddress(0x31, 7)
 
 @unittest.skipUnless(_IMAGE, "set TEKMAR_TEST_FLASH_IMAGE to run the ARM interop suite")
 class FirmwareInteropTests(unittest.IsolatedAsyncioTestCase):
+    async def test_controller_reopens_endpoint_and_reseeds(self) -> None:
+        async with _emulated_endpoint(()) as endpoint:
+            controller = Tekmar482Controller(endpoint, reconnect_interval=0)
+            snapshots: asyncio.Queue[AvailableInfo] = asyncio.Queue()
+            controller.add_listener(snapshots.put_nowait)
+            failures: asyncio.Queue[BaseException] = asyncio.Queue()
+            controller.add_error_listener(failures.put_nowait)
+            async with controller, asyncio.timeout(5):
+                first = await snapshots.get()
+                generation = controller.client.session.connection_generation
+                await controller.client.transport.close()
+                assert isinstance(await failures.get(), ConnectionClosedError)
+                assert (await snapshots.get()) is not first
+                assert controller.client.session.connection_generation == generation + 1
+                assert controller.require_ready_state().data.gateway.reporting_enabled
+
+    async def test_borrowed_controller_stops_on_disconnect(self) -> None:
+        async with _gateway_client(()) as client:
+            controller = Tekmar482Controller(client, reconnect_interval=0)
+            lost = asyncio.Event()
+            controller.add_error_listener(lambda _err: lost.set())
+            async with controller, asyncio.timeout(5):
+                await client.close()
+                await lost.wait()
+                assert not controller.is_running
+                assert isinstance(controller.last_error, ConnectionClosedError)
+                assert client.session.connection_generation == 1
+
     async def test_raw_echo_is_not_peer_identity(self) -> None:
         body = bytes.fromhex("6e723149 00003f 8e9a01 c60402")
         async with (

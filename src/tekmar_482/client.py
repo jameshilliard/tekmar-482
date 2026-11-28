@@ -101,9 +101,11 @@ class Tekmar482Client:
         *,
         readback_methods: frozenset[int] = frozenset(),
         reports_configured_mode: bool = False,
+        can_reconnect: bool = True,
     ) -> None:
         self.transport = transport
         self.reports_configured_mode = reports_configured_mode
+        self.can_reconnect = can_reconnect
         self.session = Tekmar482Session(transport, readback_methods=readback_methods)
 
     @classmethod

@@ -1648,6 +1648,14 @@ checked with a targeted read, never by repeating the write. A targeted mode
 read that times out gets one retry unless a newer trigger supersedes it. Overlapping writes
 to the same thermostat settle before that read takes the wire.
 
+Pass a `GatewayEndpoint` to let the controller own the custom Normal
+connection. On each open it identifies the running bridge, selects Normal
+if needed, and starts a fresh session generation without flashing firmware
+or replaying writes. A client borrowed from `bridge.normal()` has only
+one physical connection: a controller using it reports a disconnect and
+stops instead of retrying that closed session. An explicitly supplied
+stock TCP or serial client retains its own reconnect behavior.
+
 While reconnecting, `controller.data` remains the last published snapshot.
 Controller writes and repeated calls to `start()` raise `ConnectionClosedError`
 until the replacement connection has confirmed its inventory and reporting.
@@ -1677,12 +1685,11 @@ controller clears other slots that may have changed.
 ```python
 import asyncio
 
-from tekmar_482 import Tekmar482Client, Tekmar482Controller
+from tekmar_482 import GatewayEndpoint, Tekmar482Controller
 
 
 async def main() -> None:
-    client = Tekmar482Client.tcp("192.0.2.10", 3001)
-    controller = Tekmar482Controller(client)
+    controller = Tekmar482Controller(GatewayEndpoint.tcp("192.0.2.10", 3001))
 
     def updated(data):
         runtime = data.device_runtime(1201)

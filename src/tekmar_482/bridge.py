@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import re
-from contextlib import asynccontextmanager, suppress
+from contextlib import AsyncExitStack, asynccontextmanager, suppress
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
@@ -40,14 +40,40 @@ if TYPE_CHECKING:
         Iterable,
         Iterator,
     )
+    from contextlib import AbstractAsyncContextManager
 
-    from ._wire import Wire
+    from ._wire import GatewayEndpoint, Wire
     from .raw import BaseRawStream, BridgeStream
+    from .transport import PacketTransport
 
 _DEFAULT_BAUD = 9600
 _LITERAL_RAW_SINCE = 3
 _RAW_EXTENSIONS = 1
 _TICK_MASK = 0xFFFFFFFF
+
+
+def _normal_client(
+    transport: PacketTransport,
+    *,
+    can_reconnect: bool,
+) -> Tekmar482Client:
+    return Tekmar482Client(
+        transport,
+        can_reconnect=can_reconnect,
+        reports_configured_mode=True,
+        readback_methods=frozenset(
+            {
+                TrpcMethod.MODE_SETTING,
+                TrpcMethod.SETPOINT_DEVICE,
+                TrpcMethod.HEAT_SETPOINT,
+                TrpcMethod.COOL_SETPOINT,
+                TrpcMethod.SLAB_SETPOINT,
+                TrpcMethod.FAN_PERCENT,
+                TrpcMethod.HUMIDITY_SET_MIN,
+                TrpcMethod.HUMIDITY_SET_MAX,
+            },
+        ),
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -179,7 +205,7 @@ class BridgeClient:
                     msg = f"bridge management rejection: {payload[4:].hex()}"
                     raise ProtocolError(msg)
 
-    async def identify(self, *, for_update: bool = False) -> None:
+    async def identify(self, *, for_update: bool = False) -> BridgeCapabilities:
         """Identify this protocol; the installer can also use older ROM handoffs."""
         async with self._transaction():
             if self._wire.baudrate != _DEFAULT_BAUD:
@@ -209,6 +235,7 @@ class BridgeClient:
             self._parser.literal_header = (
                 caps.mode is BridgeMode.RAW and caps.wire_version >= _LITERAL_RAW_SINCE
             )
+            return caps
 
     async def enter_update_mode(self) -> None:
         async with self._transaction():
@@ -292,12 +319,11 @@ class BridgeClient:
         self._parser.literal_header = raw
 
     @asynccontextmanager
-    async def normal(
+    async def _normal_transport(
         self,
         *,
-        select_mode: bool = True,
-    ) -> AsyncIterator[Tekmar482Client]:
-        """Borrow the link for tRPC. A debugger can attach without a mode change."""
+        select_mode: bool,
+    ) -> AsyncIterator[_SessionTransport]:
         async with self._transaction():
             if select_mode:
                 await self._set_mode(BridgeMode.NORMAL)
@@ -306,23 +332,39 @@ class BridgeClient:
                 self._write_packet,
                 self._wire,
             )
-            async with Tekmar482Client(
-                transport,
-                reports_configured_mode=True,
-                readback_methods=frozenset(
-                    {
-                        TrpcMethod.MODE_SETTING,
-                        TrpcMethod.SETPOINT_DEVICE,
-                        TrpcMethod.HEAT_SETPOINT,
-                        TrpcMethod.COOL_SETPOINT,
-                        TrpcMethod.SLAB_SETPOINT,
-                        TrpcMethod.FAN_PERCENT,
-                        TrpcMethod.HUMIDITY_SET_MIN,
-                        TrpcMethod.HUMIDITY_SET_MAX,
-                    },
-                ),
-            ) as client:
-                yield client
+            try:
+                yield transport
+            finally:
+                await transport.close()
+
+    @asynccontextmanager
+    async def normal(
+        self,
+        *,
+        select_mode: bool = True,
+    ) -> AsyncIterator[Tekmar482Client]:
+        """Borrow the current physical connection for tRPC; it cannot be reopened."""
+        async with (
+            self._normal_transport(select_mode=select_mode) as transport,
+            _normal_client(transport, can_reconnect=False) as client,
+        ):
+            yield client
+
+    @classmethod
+    def reconnecting_normal(cls, endpoint: GatewayEndpoint) -> Tekmar482Client:
+        """Reopen the running Normal application without provisioning firmware."""
+
+        @asynccontextmanager
+        async def connect() -> AsyncIterator[_SessionTransport]:
+            async with endpoint.connect() as wire:
+                bridge = cls(wire)
+                caps = await bridge.identify()
+                async with bridge._normal_transport(
+                    select_mode=caps.mode is BridgeMode.RAW,
+                ) as transport:
+                    yield transport
+
+        return _normal_client(_EndpointTransport(connect), can_reconnect=True)
 
     @asynccontextmanager
     async def _raw_mode(
@@ -373,6 +415,7 @@ class BridgeClient:
 
         return Tekmar482Client(
             _SessionTransport(receive_control, self._write_packet, self._wire),
+            can_reconnect=False,
         )
 
     @asynccontextmanager
@@ -470,3 +513,40 @@ class _SessionTransport:
     async def write_packet(self, packet: Packet) -> None:
         await self.open()
         await self._send(packet)
+
+
+class _EndpointTransport:
+    """Keep the session and its generation counter, replace the wire on open."""
+
+    def __init__(
+        self,
+        connect: Callable[[], AbstractAsyncContextManager[_SessionTransport]],
+    ) -> None:
+        self._connect = connect
+        self._stack = AsyncExitStack()
+        self._current: _SessionTransport | None = None
+
+    @property
+    def is_open(self) -> bool:
+        return self._current is not None and self._current.is_open
+
+    async def open(self) -> None:
+        if not self.is_open:
+            await self.close()
+            self._current = await self._stack.enter_async_context(self._connect())
+
+    async def close(self) -> None:
+        self._current = None
+        await self._stack.aclose()
+
+    def _connection(self) -> _SessionTransport:
+        if self._current is None:
+            msg = "no open Normal connection"
+            raise ConnectionClosedError(msg)
+        return self._current
+
+    async def read_packet(self, timeout: float | None = None) -> Packet | None:
+        return await self._connection().read_packet(timeout)
+
+    async def write_packet(self, packet: Packet) -> None:
+        await self._connection().write_packet(packet)
