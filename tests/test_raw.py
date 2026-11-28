@@ -76,7 +76,7 @@ class RawTests(unittest.IsolatedAsyncioTestCase):
             task = asyncio.create_task(self.stream.read_block(1, query, source=host))
             await self.tx.get()
             self.stream.feed(Packet(1, bytes.fromhex("020100")))
-            for flags in (RxFlag.ACK | RxFlag.EARLY_START, 0x80):
+            for flags in (RxFlag.ACK | RxFlag.EARLY_START, RxFlag.LOCAL_ECHO, 0x80):
                 self.stream.feed(Packet(1, prefix + body + bytes([flags])))
                 frame = await self.stream.read()
                 assert isinstance(frame, NativeFrame) and frame.rx_flags == flags

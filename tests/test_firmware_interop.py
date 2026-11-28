@@ -31,6 +31,7 @@ from tekmar_482 import (
     NativeFrame,
     NativeIdentity,
     NativeIdentityMismatchError,
+    NativeInventory,
     NativeMessage,
     NativePath,
     NativeScene,
@@ -42,6 +43,7 @@ from tekmar_482 import (
     PeerBusEvents,
     PeerLinkCounters,
     RoomLimit,
+    RxFlag,
     SceneResponse,
     SceneSetup,
     ScheduleBinding,
@@ -220,6 +222,21 @@ _SETPOINT = NativeAddress(0x31, 7)
 
 @unittest.skipUnless(_IMAGE, "set TEKMAR_TEST_FLASH_IMAGE to run the ARM interop suite")
 class FirmwareInteropTests(unittest.IsolatedAsyncioTestCase):
+    async def test_raw_echo_is_not_peer_identity(self) -> None:
+        body = bytes.fromhex("6e723149 00003f 8e9a01 c60402")
+        async with (
+            _emulated_bridge([(3, body.hex(), (body.hex(),))]) as bridge,
+            bridge.stream() as raw,
+        ):
+            assert (await raw.send(3, body)).status is TxStatus.ACK
+            inventory = NativeInventory()
+            echo, peer = await raw.read(), await raw.read()
+            assert isinstance(echo, NativeFrame) and isinstance(peer, NativeFrame)
+            assert echo.body == peer.body == body
+            assert echo.rx_flags == RxFlag.LOCAL_ECHO | RxFlag.ACK
+            assert inventory.observe(echo) is None and not inventory.devices
+            assert peer.rx_flags == 0 and inventory.observe(peer) is not None
+
     async def test_extended_raw_read_and_return_to_normal(self) -> None:
         script = (_block(3, "23 10000000", "0300", "6e723144 030001 01"),)
         async with _emulated_bridge(script) as bridge:

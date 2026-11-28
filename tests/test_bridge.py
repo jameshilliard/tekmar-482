@@ -76,7 +76,7 @@ def management(method: int, service: int, body: bytes = b"") -> bytes:
     )
 
 
-RAW_CAPABILITIES = management(1, 4, bytes([5, 0, 5, 3]))
+RAW_CAPABILITIES = management(1, 4, bytes([6, 0, 5, 3]))
 
 
 def raw_wire(data: bytes) -> bytes:
@@ -202,7 +202,7 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
             # Ignore a bad captured checksum before identification.
             writer.write(
                 b"\xca\x01\x01\x00\xff\x35"
-                + management(1, 4, bytes([5, 1, 5, 3]))
+                + management(1, 4, bytes([6, 1, 5, 3]))
                 + capture,
             )
             build = management(4, 1)
@@ -797,7 +797,8 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
                 (management(9, 0, b"\x12"), management(9, 3, b"\x12")),
                 (
                     raw_wire(b"\0\x04" + bytes(4) + request),
-                    raw_wire(b"\x02\x04\0")
+                    raw_wire(bytes.fromhex("000409000000") + request + b"\x05")
+                    + raw_wire(b"\x02\x04\0")
                     + raw_wire(bytes.fromhex("00040a000000") + report + bytes(1)),
                 ),
                 (management(2, 0, bytes(2)), management(2, 3, bytes(2))),
@@ -1203,7 +1204,7 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
     async def test_older_raw_applications_can_upgrade_without_a_button(
         self,
     ) -> None:
-        for version in (2, 3, 4):
+        for version in (2, 3, 4, 5):
             with self.subTest(version=version):
                 await self.check_auto_program(
                     "f" * 40,

@@ -23,7 +23,7 @@ from .test_normal_block import Wire
 from .test_peer_capture import restore, start, trace
 
 _CAP = "0101f04b54"
-_SUPPORT = "0401f04b54050005bf1e"
+_SUPPORT = "0401f04b54060005bf1e"
 _ASK = "0113f04b54"
 _ACCEPT = "0413f04b54"
 _END = "0213f04b54"
@@ -123,7 +123,7 @@ class NormalDiscoveryTests(unittest.IsolatedAsyncioTestCase):
     ) -> None:
         key = "03ff"
         script = Script(
-            (_CAP, "0401f04b54050005bf0e"),
+            (_CAP, "0401f04b54060005bf0e"),
             (_CAP, _SUPPORT),
             (_ASK + key, "0406f04b5413f04b5401"),
             (_CAP, _SUPPORT),

@@ -20,8 +20,8 @@ if TYPE_CHECKING:
     from tekmar_482 import NativeFrame
 
 _CAP = "0101f04b54"
-_SUPPORT = "0401f04b54050005bf2e"  # Only the targeted reads used by these scripts.
-_SCAN_SUPPORT = "0401f04b54050005bf3e"
+_SUPPORT = "0401f04b54060005bf2e"  # Only the targeted reads used by these scripts.
+_SCAN_SUPPORT = "0401f04b54060005bf3e"
 _TRACE = "010bf04b54"
 _COUNTS = "00" * 40
 _ID = "03354000000000000000"
@@ -507,7 +507,7 @@ class NativeMonitorTests(unittest.IsolatedAsyncioTestCase):
             tasks.create_task(fail())
             peer = await self.accepted.get()
             await peer.exchange(_CAP, _SUPPORT)
-            await peer.exchange(_CAP, "0401f04b540500050100")
+            await peer.exchange(_CAP, "0401f04b540600050100")
             assert await peer.reader.read() == b""
         assert isinstance(monitor.last_error, ProtocolError)
         assert monitor.management is None and self.accepted.empty()

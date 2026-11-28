@@ -1377,7 +1377,7 @@ async def _native_capture(
             observed.observe(frame)
         if isinstance(frame, NativeFrame):
             frames += 1
-            if args.command in {"discover", "dump"}:
+            if args.command in {"discover", "dump"} and frame.usable_for_state:
                 nodes.add((frame.port, frame.subnet, frame.node))
         if args.command != "discover" or isinstance(frame, (CaptureGap, PortError)):
             emit(_capture_fields(frame))
@@ -1480,6 +1480,7 @@ def _capture_fields(frame: CaptureRecord) -> dict[str, object]:
             rx_flags=int(frame.rx_flags),
             ack=bool(frame.rx_flags & RxFlag.ACK),
             early_start=bool(frame.rx_flags & RxFlag.EARLY_START),
+            local_echo=bool(frame.rx_flags & RxFlag.LOCAL_ECHO),
         )
     return fields
 

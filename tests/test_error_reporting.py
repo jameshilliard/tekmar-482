@@ -24,8 +24,8 @@ from tekmar_482.tpck import serialize
 from .test_bridge import listen, management
 from .test_management import Script
 
-_NORMAL = ("0101f04b54", "0401f04b540500050f")
-_RAW = ("0101f04b54", "0401f04b540501050f")
+_NORMAL = ("0101f04b54", "0401f04b540600050f")
+_RAW = ("0101f04b54", "0401f04b540601050f")
 _STATUS = ("010cf04b54", "040cf04b5404")
 _STOP = ("000cf04b5400", "030cf04b5400")
 _RESTORE = ("000cf04b5404", "030cf04b5404")
@@ -162,7 +162,7 @@ class ErrorReportingTests(unittest.IsolatedAsyncioTestCase):
         assert not script.rows
 
     async def test_firmware_without_the_feature_receives_only_a_probe(self) -> None:
-        for reply in ("0400000000", "0401f04b5405010507"):
+        for reply in ("0400000000", "0401f04b5406010507"):
             script = Script(("0101f04b54", reply))
             async with Tekmar482Client(script) as client:
                 with self.assertRaisesRegex(ProtocolError, "does not advertise"):
@@ -184,10 +184,10 @@ class ErrorReportingTests(unittest.IsolatedAsyncioTestCase):
             writer: asyncio.StreamWriter,
         ) -> None:
             for request, reply in (
-                (b"\xca" * 301 + caps, management(1, 4, bytes.fromhex("0500050f"))),
+                (b"\xca" * 301 + caps, management(1, 4, bytes.fromhex("0600050f"))),
                 (management(2, 0, b"\x01\x01"), management(2, 3, b"\x01\x01")),
                 (management(9, 0, b"\0"), management(9, 3, b"\0")),
-                (caps, management(1, 4, bytes.fromhex("0501050f"))),
+                (caps, management(1, 4, bytes.fromhex("0601050f"))),
                 (management(12, 1), management(12, 4, b"\0")),
                 (management(12, 0, b"\x02"), management(12, 3, b"\x02")),
                 (
@@ -219,7 +219,7 @@ class ErrorReportingTests(unittest.IsolatedAsyncioTestCase):
         self,
     ) -> None:
         caps = management(1, 1)
-        reply = management(1, 4, bytes.fromhex("0501050f"))
+        reply = management(1, 4, bytes.fromhex("0601050f"))
 
         async def app(
             reader: asyncio.StreamReader,

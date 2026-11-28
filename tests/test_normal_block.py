@@ -23,7 +23,7 @@ from tekmar_482.packet import TYPE_TRPC, Packet
 from .test_management import Script
 
 _CAP = "0101f04b54"
-_SUPPORT = "0401f04b540500053f04"
+_SUPPORT = "0401f04b540600053f04"
 _READ = "010ff04b54"
 _ADMIT = "040ff04b54"
 _EVENT = "020ff04b54"
@@ -175,7 +175,7 @@ class NormalBlockTests(unittest.IsolatedAsyncioTestCase):
                     with self.assertRaises(exc):
                         await BridgeManagement(client).read_block(2, _QUERY)
                     assert not client.session.report_subscription_count
-        for caps in ("0400000000", "0401f04b540500053f01", "0401f04b540501053f04"):
+        for caps in ("0400000000", "0401f04b540600053f01", "0401f04b540601053f04"):
             script = Script((_CAP, caps))
             async with Tekmar482Client(script) as client:
                 with self.assertRaisesRegex(ProtocolError, "does not support"):

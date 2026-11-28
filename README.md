@@ -257,7 +257,10 @@ literal, and type `0x01` service `0x00` carries a port, four timestamp
 bytes, and the native body. A host send puts zero in the timestamp field.
 `BridgeClient.stream()` opts into 482 transmit results and diagnostic
 records. Its RX and invalid-frame payloads match Normal trace, including
-the RX flags after the native body (`NativeFrame.rx_flags`). Normal keeps
+the RX flags after the native body (`NativeFrame.rx_flags`). Extended Raw
+marks the gateway's own transmissions with `RxFlag.LOCAL_ECHO`. They remain
+visible in captures but never count as peer identity, state or readback.
+Base Raw has no origin bit; Normal trace already omits local echoes. Normal keeps
 stock TPCK framing and uses type `0xD0` for its gateway-to-host traces.
 
 **Gateway traffic counters.** With `BridgeFeature.TRAFFIC_COUNTS`, use
@@ -295,7 +298,7 @@ async with errors.watch([ErrorSource.PORT_1, ErrorSource.GATEWAY]) as reports:
         print(counter.source.name, counter.reason.name, counter.count)
 ```
 
-Custom bridge wire version 5 uses saturating 64-bit counters for capture
+Custom bridge wire version 6 uses saturating 64-bit counters for capture
 and trace drops, edge counts and panel events. They reset at gateway boot,
 not on a mode change. Application sessions reject older custom wire
 versions; only stock commands retain backward compatibility. Per-frame

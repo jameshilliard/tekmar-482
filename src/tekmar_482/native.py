@@ -425,6 +425,7 @@ class NativeMessage:
 class RxFlag(IntFlag):
     ACK = 1
     EARLY_START = 2
+    LOCAL_ECHO = 4
 
 
 @dataclass(frozen=True, slots=True)
@@ -443,7 +444,7 @@ class NativeFrame:
 
     @property
     def usable_for_state(self) -> bool:
-        """Ignore timing-faulted observations for state, regardless of link ACK."""
+        """Exclude timing faults, local echoes and unknown flags regardless of ACK."""
         return self.rx_flags is None or not (int(self.rx_flags) & ~int(RxFlag.ACK))
 
     @property

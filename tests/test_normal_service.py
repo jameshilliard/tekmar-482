@@ -15,7 +15,7 @@ from tekmar_482 import (
 from .test_management import Script
 
 _CAP = "0101f04b54"
-_SUPPORT = "0401f04b54050005bffe01"
+_SUPPORT = "0401f04b54060005bffe01"
 _SOURCE = NativeAddress(0x43, 7)
 _CALIBRATION = "687431c103"
 _CYCLE = "b3f431c20320"
@@ -126,7 +126,7 @@ class NormalServiceTests(unittest.IsolatedAsyncioTestCase):
                     await manager.send_service_frame(port, msg)
 
     async def test_checks_normal_capability_before_sending(self) -> None:
-        for caps in ("0401f04b54050005bffe", "0401f04b54050105bffe01"):
+        for caps in ("0401f04b54060005bffe", "0401f04b54060105bffe01"):
             with self.subTest(caps=caps):
                 script = Script((_CAP, caps))
                 async with Tekmar482Client(script) as client:
