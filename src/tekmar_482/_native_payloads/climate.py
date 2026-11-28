@@ -205,7 +205,8 @@ class AirGroupConfiguration:
         previous_group, previous_master = self.previous_role
         return {"group": group, "master": int(master), "previous_group": previous_group,
                 "previous_master": int(previous_master),
-                "no_response_required": int(self.no_response_required)}
+                "no_response_required": int(self.no_response_required),
+                "reserved0": self.flags >> 5 & 1, "reserved1": self.previous_flags >> 5 & 3}
 
 
 @dataclass(frozen=True, slots=True)
@@ -301,7 +302,7 @@ class AirStatus:
                           reserved5=self.outputs >> 4)
             return fields | temp("target", channel.target_raw, deg_e=True) | temp("temperature", channel.temperature_raw)
         fields.update(inhibit_heat=self.group_flags >> 5 & 1, inhibit_cool=self.group_flags >> 6 & 1,
-                      cycle_length=self.cycle & 127, new_cycle=self.cycle >> 7)
+                      reserved0=self.group_flags >> 7, cycle_length=self.cycle & 127, new_cycle=self.cycle >> 7)
         for name, side in (("heat", self.heat), ("cool", self.cool)):
             if side is not None:
                 fields.update(side.fields(name + "_"))

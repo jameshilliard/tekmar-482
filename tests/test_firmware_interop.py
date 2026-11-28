@@ -732,6 +732,7 @@ class FirmwareInteropTests(unittest.IsolatedAsyncioTestCase):
         )
         path = NativePath(3, _THERMOSTAT.subnet, _THERMOSTAT.node)
         observations: list[tuple[int | None, tuple[int, bool]]] = []
+        reserved: list[tuple[object, object]] = []
         confirmed = asyncio.Event()
 
         def observe(updated: NativePath, state: NativeState) -> None:
@@ -742,6 +743,8 @@ class FirmwareInteropTests(unittest.IsolatedAsyncioTestCase):
             ):
                 group = device.setup.air_group_id
                 observations.append((group, role.role))
+                fields = role.fields()
+                reserved.append((fields["reserved0"], fields["reserved1"]))
                 if group == 5:
                     confirmed.set()
 
@@ -761,6 +764,7 @@ class FirmwareInteropTests(unittest.IsolatedAsyncioTestCase):
                 await confirmed.wait()
             assert observations[0] == (3, (5, True))
             assert observations[-1] == (5, (5, True))
+            assert (1, 1) in reserved
             watch.cancel()
 
     async def test_local_override_and_unavailable_mask_through_normal_firmware(

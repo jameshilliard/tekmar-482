@@ -109,6 +109,7 @@ class StateTests(unittest.TestCase):
         config = report.air_group_configuration
         assert config is not None and config.no_response_required
         assert config.role == (5, True) and config.previous_role == (3, True)
+        assert report.decoded["reserved0"] == 1 and report.decoded["reserved1"] == 1
         assert report.decoded["extension_hex"] == "99"
         assert state.observe(report) == (_PATH,)
         assert state.air_group_configuration(_PATH) == config
@@ -125,6 +126,15 @@ class StateTests(unittest.TestCase):
         assert state.block_revision(_PATH, (3, None)) == 1
         state.observe(CaptureGap(1))
         assert state.air_group_configuration(_PATH) is None
+
+    def test_air_master_status_preserves_reserved_header_bit(self) -> None:
+        report = frame(0x377, bytes.fromhex("80000000000000000000000000"))
+        assert report.decoded["reserved0"] == 1
+        assert report.decoded["air_group_id"] == 0
+        state = NativeState()
+        state.observe(report)
+        status = state.air_status(_PATH)
+        assert status is not None and status.group_flags == 0x80
 
     def test_selectors_paths_and_identity_replacement(self) -> None:
         state = NativeState()
