@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from tekmar_482 import (
+    AddressFields,
     BridgeClient,
     BridgeFeature,
     BridgeManagement,
@@ -26,6 +27,7 @@ from tekmar_482 import (
     NativeAddress,
     NativeBlockQuery,
     NativeField,
+    NativeFrame,
     NativeIdentity,
     NativeIdentityMismatchError,
     NativeMessage,
@@ -67,6 +69,7 @@ from tekmar_482 import (
     TraceOrigin,
     TracePacket,
     TraceTx,
+    TrpcMethod,
     TxStatus,
     WaterDetection,
     WritableBlock,
@@ -81,7 +84,7 @@ from tekmar_482.wire_trace import observe_bridge_packets
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Sequence
 
-    from tekmar_482 import NormalPeerCapture, Packet
+    from tekmar_482 import NormalPeerCapture, Packet, Tekmar482Client
 
 type ScheduledReply = str | tuple[int, str]
 type Exchange = tuple[int, str, tuple[ScheduledReply, ...]]
@@ -119,7 +122,7 @@ async def _uart_step(
 async def _connected(
     program: asyncio.StreamReader,
     control: asyncio.StreamWriter,
-) -> AsyncIterator[BridgeManagement]:
+) -> AsyncIterator[Tekmar482Client]:
     accepted: asyncio.Queue[tuple[asyncio.StreamReader, asyncio.StreamWriter]] = (
         asyncio.Queue()
     )
@@ -143,11 +146,11 @@ async def _connected(
             gateway = BridgeClient(wire)
             await gateway.identify()
             async with gateway.normal(select_mode=False) as client:
-                yield BridgeManagement(client)
+                yield client
 
 
 @asynccontextmanager
-async def _gateway(script: Sequence[Exchange]) -> AsyncIterator[BridgeManagement]:
+async def _gateway_client(script: Sequence[Exchange]) -> AsyncIterator[Tekmar482Client]:
     uv = shutil.which("uv")
     assert uv is not None and _IMAGE is not None
     process = await asyncio.create_subprocess_exec(
@@ -168,8 +171,8 @@ async def _gateway(script: Sequence[Exchange]) -> AsyncIterator[BridgeManagement
             control.write(json.dumps(script).encode("ascii") + b"\n")
             await control.drain()
             assert await program.readline() == b"\n", "emulator did not boot"
-            async with _connected(program, control) as manager:
-                yield manager
+            async with _connected(program, control) as client:
+                yield client
             control.close()
             await control.wait_closed()
             assert await process.wait() == 0, "firmware bus script did not complete"
@@ -181,6 +184,12 @@ async def _gateway(script: Sequence[Exchange]) -> AsyncIterator[BridgeManagement
             with suppress(ProcessLookupError):
                 os.killpg(process.pid, signal.SIGKILL)
             await process.wait()
+
+
+@asynccontextmanager
+async def _gateway(script: Sequence[Exchange]) -> AsyncIterator[BridgeManagement]:
+    async with _gateway_client(script) as client:
+        yield BridgeManagement(client)
 
 
 def _block(
@@ -822,6 +831,48 @@ class FirmwareInteropTests(unittest.IsolatedAsyncioTestCase):
 
             assert (await manager.read_status(3, query)).answered
             await wait_mode(capture, ThermostatMode.HEAT)
+
+    async def test_invalid_block_layout_is_trace_only_on_the_firmware(self) -> None:
+        path = NativePath(3, _THERMOSTAT.subnet, _THERMOSTAT.node)
+        bad = "6e723184 000007aa"  # Node six, only one of three identity bytes.
+        setup = "6e723146 030007 010401"
+        script = (
+            _block(3, "23 10000000", "0000", "6e723149 00003f 8e9a01 c60402"),
+            (
+                3,
+                "6d70000b 0300 23 10000000 00000000",
+                ("6e723144 030007ff", setup),
+            ),
+            (
+                3,
+                "32700000",
+                (bad, "6e723144 260000e7", "6e723144 2c001012", "72f23002 0106"),
+            ),
+        )
+        async with _gateway_client(script) as client:
+            manager = BridgeManagement(client)
+            async with manager.peer_capture((3,)) as capture:
+                await manager.read_block(3, NativeBlockQuery(path.address, 0))
+                report = await manager.read_block(3, NativeBlockQuery(path.address, 3))
+                assert report.body == bytes.fromhex(setup)
+                query = NativeStatusQuery(StatusRequest.OUTDOOR)
+                assert (await manager.read_status(3, query)).answered
+                address = path.address.tha_address(path.port)
+                assert address is not None
+                assert await client.get_inventory_addresses() == (address,)
+                mode = await client.request_response(
+                    TrpcMethod.MODE_SETTING,
+                    fields=AddressFields(address),
+                )
+                assert mode and mode.require("mode") == ThermostatMode.HEAT
+
+                bad_body = bytes.fromhex(bad)
+                async with asyncio.timeout(5):
+                    while True:
+                        frame = await capture.read()
+                        if isinstance(frame, NativeFrame) and frame.body == bad_body:
+                            assert "truncated" in frame.decoded
+                            break
 
     async def test_local_override_and_unavailable_mask_through_normal_firmware(
         self,
