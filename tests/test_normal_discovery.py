@@ -38,6 +38,30 @@ async def admit(wire: Wire, key: str) -> None:
 
 
 class NormalDiscoveryTests(unittest.IsolatedAsyncioTestCase):
+    async def test_node_zero_master_header_probes_only_its_subnet(self) -> None:
+        wire = Wire()
+
+        async def gateway() -> None:
+            await start(wire, "04")
+            wire.queue_packet(trace("00 02 01000000 01 7ff16000"))
+            await admit(wire, "0216")
+            # Contents name remote loops; only the header names this line's subnet.
+            wire.queue_packet(trace("00 02 02000000 01 7ff16002 2526"))
+            wire.feed(_END + "0200")
+            wire.queue_packet(trace("00 02 03000000 01 " + _ID))
+            await restore(wire)
+
+        async with Tekmar482Client(wire) as client, asyncio.TaskGroup() as tasks:
+            tasks.create_task(gateway())
+            async with BridgeManagement(client).native_session([2]) as native:
+                result = await discover_native(native, duration=0.15)
+            (probe,) = result.probes
+            assert (probe.port, probe.subnet) == (2, 22)
+            (device,) = result.devices
+            assert device.port == 2 and device.address == NativeAddress(22, 7)
+            assert device.identity and device.identity.product
+            assert device.identity.product.model == "481"
+
     async def test_discovery_validates_selection_and_drains_only_admitted_probes(
         self,
     ) -> None:

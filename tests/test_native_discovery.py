@@ -160,15 +160,16 @@ class NativeScanTests(unittest.IsolatedAsyncioTestCase):
             scan = asyncio.create_task(
                 discover_native(self.stream, duration=0.15, subnets=((4, 17),)),
             )
-            self.deliver(sample)
-            self.deliver(sample)
             self.deliver(frame(3, 0, b"", mid=0x3F7))
+            self.deliver(frame(3, 0, bytes.fromhex("2526"), mid=0x3FF))
             requests = {await self.tx.get(), await self.tx.get()}
             assert {body[:2] + body[6:] for body in requests} == {
                 bytes.fromhex("0104 000011 ffffff7f 00000000"),
                 bytes.fromhex("0103 000015 ffffff7f 00000000"),
             }
             self.stream.feed(Packet(1, bytes((2, 3, 0))))
+            self.deliver(sample)
+            self.deliver(sample)
             result = await scan
             assert len(result.devices) == 1
             assert not result.host_records_dropped and self.tx.empty()

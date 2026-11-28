@@ -8,6 +8,7 @@ from math import isfinite
 from typing import TYPE_CHECKING
 
 from ._native_payloads import BLOCK_SELECTORS
+from ._native_payloads.water import MASTER_PRESENT
 from .constants import TN4_PORTS
 from .exceptions import ConnectionClosedError
 from .native import NativeAddress, NativeFrame, NativeMessage, NativeTargets
@@ -250,10 +251,14 @@ async def discover_native(
                 probes.lost(record)
             elif (
                 isinstance(record, NativeFrame)
-                and device is not None
                 and source is not None
-                and record.node & _NODE_BITS
+                and (
+                    record.message_id == MASTER_PRESENT
+                    or (device is not None and record.node & _NODE_BITS)
+                )
             ):
+                # A master can name its local subnet from node zero. Advertised
+                # loop slots are not independent discovery routes on this port.
                 probes.enqueue(record.port, record.subnet)
 
     listener = asyncio.create_task(receive())

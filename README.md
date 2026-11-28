@@ -92,8 +92,10 @@ tekmar-482 discover --tcp 192.0.2.10:3001 --duration 45 --json
 Use `--probe-subnet PORT:SUBNET` to include a known silent subnet, or
 `--passive` to skip all native requests. Discovery and dump stay in Normal
 mode by default, including while probing. The gateway attempts one read of
-identity block 00 per observed or specified subnet; only a peer frame
-establishes a device, not a link ACK. The listening window stops new probes;
+identity block 00 per observed or specified subnet. A MasterPresent header
+supplies that subnet even at node zero; its advertised loop slots are not
+probed as local subnets. The node-zero marker gives no device identity,
+and neither does a link ACK. The listening window stops new probes;
 already submitted Normal probes finish before a subsequent scan reuses the
 ports. Active and passive thermostat and device watches also stay in Normal
 mode. Use `--raw` to
