@@ -282,6 +282,8 @@ from .native_snowmelt import (
     SnowmeltSample,
 )
 from .native_state import (
+    NativeAirChannel,
+    NativeAirChannels,
     NativeClimate,
     NativeFaultReport,
     NativeLineReport,
@@ -556,6 +558,8 @@ __all__ = [
     "ModulatingSignal",
     "Modulation",
     "NativeAddress",
+    "NativeAirChannel",
+    "NativeAirChannels",
     "NativeBlockBatch",
     "NativeBlockQuery",
     "NativeCalendar",

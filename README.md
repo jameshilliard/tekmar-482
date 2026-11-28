@@ -497,13 +497,13 @@ require firmware that orders read completions after earlier trace frames
 and loss notices, so an address change or gap retires an obsolete read.
 Passive watches never send. A Raw stream remains available for explicit
 source addresses or link ACKs. The watcher reads identity and cataloged mode setup once.
-There is no periodic poll. An addressed setup update or a change in operating
-channel, enable, demand, setback or active target queues a targeted read,
-with at most one pending follow-up
-per source and block. If initial identification or a mode read went
-unanswered, later air traffic can trigger a retry once per distinct
-operating state, not once per repeated sample. A source's confirmed mode
-comes from block `0003`,
+There is no periodic poll. An addressed setup update or a change in group,
+role, enablement, demand, setback or target queues a targeted read, with at
+most one pending follow-up per source and block. A member's heat and cool
+hints are compared separately: alternating unchanged reports does not queue
+more reads. If initial identification or a mode read went unanswered,
+later air traffic can trigger a retry once per distinct operating state,
+not once per repeated sample. A source's confirmed mode comes from block `0003`,
 never from the update request or an air-group demand flag. A setting change
 with no distinguishable bus traffic cannot be detected by this mechanism.
 A quiet device can have a confirmed mode but no observed demand. A finite
@@ -1070,7 +1070,13 @@ humidify and dehumidify tables from live air, fan/duct, slab and RH reports.
 eligible master/member status: heat or cool, setback selector, raw byte and
 Celsius. It is `None` when that frame supplies no eligible target, and
 `celsius` is `None` for an explicit FF. It does not overwrite a stored
-schedule slot. `air` preserves the full report, including inactive channels.
+schedule slot. `air` is the latest complete master or member report.
+`air_channels.heat` and `.cool` retain the latest sample and source frame
+for each observed channel within the same group and role. An unreported
+channel is unknown, not disabled. A group or role change does not carry
+over older samples, and address changes and capture gaps invalidate them.
+Each channel has its own capture timestamp; these readings need not have
+been sampled simultaneously.
 
 Read a stored slot with `adjustments.table(ThermostatTarget.HEAT)`, then
 `table.value(TargetSlot.WAKE)` (Celsius or percent) or `table.raw(...)`.

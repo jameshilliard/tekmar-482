@@ -45,33 +45,36 @@ from .raw import CaptureGap
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterable, Mapping
 
-    from ._native_payloads.climate import AirReading, AirStatus
     from ._observation import ObservationStream
     from .native import BlockKey
     from .native_identity import NativeIdentity
     from .native_io import IoDirectory, IoDirectoryRead
-    from .native_state import NativeClimate
+    from .native_state import NativeAirChannel, NativeAirChannels, NativeClimate
     from .native_status import NativeStatusBatch
     from .raw import BridgeStream, CaptureRecord, NativeBlockBatch, TxResult
 
 _HOST = NativeAddress(0, 0)
 _MASTER_QUERY = NativeStatusQuery(StatusRequest.MASTER)
 _UPDATE_HEADER = 4
+_MODE_HINT_FLAGS = 0x1F  # Enable, demand and the three setback bits.
 type _Read = int | SnowRead | BlockKey | IoEndpoint
 type _DeviceJob = tuple[NativePath, _Read]
 type _Job = _DeviceJob | _MasterProbe | _SubnetProbe
 type _ChannelHint = tuple[int, int] | None
-type _ModeHint = tuple[int, _ChannelHint, _ChannelHint]
+type _ModeHint = tuple[tuple[int, bool], _ChannelHint, _ChannelHint]
 
 
-def _mode_hint(air: AirStatus) -> _ModeHint:
-    def side(reading: AirReading | None) -> _ChannelHint:
-        # Enable, demand, setback and active target can change with a local
-        # adjustment. Temperature drift and the master's cycle counter cannot
-        # establish a new setting and would turn a watcher into a poller.
-        return (reading.flags & 31, reading.target_raw) if reading is not None else None
+def _mode_hint(channels: NativeAirChannels | None) -> _ModeHint | None:
+    def side(sample: NativeAirChannel | None) -> _ChannelHint:
+        if sample is None:
+            return None
+        reading = sample.reading
+        return reading.flags & _MODE_HINT_FLAGS, reading.target_raw
 
-    return air.group, side(air.heat), side(air.cool)
+    # Temperature drift and the master's cycle counter are not mode hints.
+    if channels is None:
+        return None
+    return channels.role, side(channels.heat), side(channels.cool)
 
 
 def _listen_ports(
@@ -457,9 +460,9 @@ class _Watch:
             ):
                 self.latest.pop((path, HEATING_SETUP), None)
                 self._queue(path, HEATING_SETUP)
-            elif current.air is not None and (
-                before.air is None or _mode_hint(before.air) != _mode_hint(current.air)
-            ):
+            elif current.air_channels is not None and _mode_hint(
+                current.air_channels,
+            ) != _mode_hint(before.air_channels):
                 self._queue(path, HEATING_SETUP)
         elif before is not None:
             self.current.pop(path, None)
@@ -633,11 +636,10 @@ class _Watch:
         batch = self.latest.get((path, block))
         if batch is None or batch.reports or (block and path not in self.current):
             return
-        if (air := self.state.air_status(path)) is not None:
-            hint = _mode_hint(air)
-            if self.retry_hints.get((path, block)) != hint:
-                self.retry_hints[path, block] = hint
-                self._queue(path, block)
+        hint = _mode_hint(self.state.air_channels(path))
+        if hint is not None and self.retry_hints.get((path, block)) != hint:
+            self.retry_hints[path, block] = hint
+            self._queue(path, block)
 
     async def _wait_io_evidence(
         self,

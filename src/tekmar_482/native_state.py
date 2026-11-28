@@ -60,7 +60,7 @@ from .water_topology import water_systems
 if TYPE_CHECKING:
     from collections.abc import Iterable
 
-    from ._native_payloads.climate import AirGroupConfiguration
+    from ._native_payloads.climate import AirGroupConfiguration, AirReading
     from ._native_payloads.faults import NetworkFault
     from ._native_payloads.line import LineValue
     from ._water_monitor import WaterSource
@@ -132,6 +132,43 @@ class NativeLineReport:
 
 
 @dataclass(frozen=True, slots=True)
+class NativeAirChannel:
+    """One heat or cool reading and the exact frame that supplied it."""
+
+    reading: AirReading
+    frame: NativeFrame = field(compare=False, repr=False)
+
+
+@dataclass(frozen=True, slots=True)
+class NativeAirChannels:
+    """Latest samples from the same reporting path, group and role."""
+
+    group: int
+    master: bool
+    heat: NativeAirChannel | None
+    cool: NativeAirChannel | None
+
+    @property
+    def role(self) -> tuple[int, bool]:
+        return self.group, self.master
+
+
+def _merge_air_channels(
+    air: AirStatus,
+    frame: NativeFrame,
+    before: NativeAirChannels | None,
+) -> NativeAirChannels:
+    role = air.group, air.cycle is not None
+    if before is None or before.role != role:
+        before = NativeAirChannels(*role, None, None)
+    return NativeAirChannels(
+        *role,
+        NativeAirChannel(air.heat, frame) if air.heat is not None else before.heat,
+        NativeAirChannel(air.cool, frame) if air.cool is not None else before.cool,
+    )
+
+
+@dataclass(frozen=True, slots=True)
 class NativeClimate:
     path: NativePath
     identity: NativeIdentity
@@ -143,6 +180,7 @@ class NativeClimate:
     equipment: ThermostatEquipment
     air_timestamp_ms: int | None = field(compare=False)
     air_group_configuration: AirGroupConfiguration | None = None
+    air_channels: NativeAirChannels | None = None
 
 
 @dataclass(slots=True)
@@ -156,6 +194,7 @@ class _Peer:
     air: AirStatus | None = None
     active_air_target: AirTarget | None = None
     air_frame: NativeFrame | None = None
+    air_channels: NativeAirChannels | None = None
     air_group_configuration: AirGroupConfiguration | None = None
     heating_setup_revision: int = 0
     snow: SnowmeltChannels = field(default_factory=SnowmeltChannels)
@@ -190,6 +229,7 @@ class _Peer:
             ThermostatEquipment.from_reports(self.blocks, self.plant.reports.values()),
             self.air_frame.timestamp_ms if self.air_frame else None,
             self.air_group_configuration,
+            self.air_channels,
         )
 
 
@@ -521,6 +561,10 @@ class NativeState:
     def air_status(self, path: NativePath) -> AirStatus | None:
         return peer.air if (peer := self._peers.get(path)) else None
 
+    def air_channels(self, path: NativePath) -> NativeAirChannels | None:
+        """Read both observed channels without inventing a sample for either one."""
+        return peer.air_channels if (peer := self._peers.get(path)) else None
+
     def air_group_configuration(self, path: NativePath) -> AirGroupConfiguration | None:
         """Return the peer's latest role announcement, not its stored assignment."""
         return peer.air_group_configuration if (peer := self._peers.get(path)) else None
@@ -794,6 +838,11 @@ class NativeState:
         peer.air_group_configuration = config
         if config.role_changed(previous):
             peer.heating_setup_revision += 1
+            if peer.air_channels is not None and peer.air_channels.role != config.role:
+                peer.air_channels = None
+                peer.air = None
+                peer.air_frame = None
+                peer.active_air_target = None
         return (path,) if config != previous else ()
 
     def _observe_air(
@@ -815,7 +864,13 @@ class NativeState:
         peer = self._peers[path]
         if target is not None:
             peer.outputs.air(target, peer.blocks)
-        changed_air = peer.air != air or peer.active_air_target != target
+        channels = _merge_air_channels(air, record, peer.air_channels)
+        changed_air = (
+            peer.air != air
+            or peer.active_air_target != target
+            or peer.air_channels != channels
+        )
         peer.air, peer.air_frame = air, record
+        peer.air_channels = channels
         peer.active_air_target = target
         return (path,) if changed_air else ()

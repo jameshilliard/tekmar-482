@@ -81,7 +81,7 @@ from tekmar_482.wire_trace import observe_bridge_packets
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Sequence
 
-    from tekmar_482 import Packet
+    from tekmar_482 import NormalPeerCapture, Packet
 
 type ScheduledReply = str | tuple[int, str]
 type Exchange = tuple[int, str, tuple[ScheduledReply, ...]]
@@ -766,6 +766,62 @@ class FirmwareInteropTests(unittest.IsolatedAsyncioTestCase):
             assert observations[-1] == (5, (5, True))
             assert (1, 1) in reserved
             watch.cancel()
+
+    async def test_member_channels_do_not_repoll_mode_via_firmware(self) -> None:
+        path = NativePath(3, _THERMOSTAT.subnet, _THERMOSTAT.node)
+        outdoor = "72f23002 0106"
+        setup_read = "6d700007 0300 23 10000000"
+        script = (
+            _block(3, "23 10000000", "0000", "6e723149 00003f 8e9a01 c60402"),
+            (
+                3,
+                "32700000",
+                ("76f23148 01032a0006000000", "76f23148 2105500106000000", outdoor),
+            ),
+            (3, setup_read, ("6e723146 030007 020401",)),
+            (
+                3,
+                "32700000",
+                ("76f23148 01032a0206000000", "76f23148 2105500306000000", outdoor),
+            ),
+            (3, "32700000", ("76f23148 2104500306000000", outdoor)),
+            (3, setup_read, ("6e723146 030007 010401",)),
+        )
+        state = NativeState()
+
+        async def wait_mode(
+            capture: NormalPeerCapture,
+            mode: ThermostatMode,
+        ) -> None:
+            async with asyncio.timeout(5):
+                while (
+                    climate := state.climate(path)
+                ) is None or climate.setup.mode != mode:
+                    state.observe(await capture.read())
+
+        async with _gateway(script) as manager, manager.peer_capture([3]) as capture:
+            await manager.read_block(3, NativeBlockQuery(path.address, 0))
+            query = NativeStatusQuery(StatusRequest.OUTDOOR)
+            assert (await manager.read_status(3, query)).answered
+            await wait_mode(capture, ThermostatMode.AUTO)
+
+            assert (await manager.read_status(3, query)).answered
+            async with asyncio.timeout(5):
+                while True:
+                    state.observe(await capture.read())
+                    channels = state.air_channels(path)
+                    if (
+                        channels
+                        and channels.cool
+                        and channels.cool.reading.temperature_raw == 0x0603
+                    ):
+                        assert channels.heat and channels.heat.reading.calling
+                        assert not channels.cool.reading.calling
+                        assert channels.heat.reading.temperature_raw == 0x0602
+                        break
+
+            assert (await manager.read_status(3, query)).answered
+            await wait_mode(capture, ThermostatMode.HEAT)
 
     async def test_local_override_and_unavailable_mask_through_normal_firmware(
         self,

@@ -136,6 +136,55 @@ class StateTests(unittest.TestCase):
         status = state.air_status(_PATH)
         assert status is not None and status.group_flags == 0x80
 
+    def test_member_channels_keep_independent_samples_and_cli_values(self) -> None:
+        state = NativeState()
+        state.observe(identity(105102))
+        heat = frame(0x36F, bytes.fromhex("01 03 2d 0006 00 0000"), stamp=0xFFFFFFFE)
+        cool = frame(0x36F, bytes.fromhex("21 05 50 0106 00 0000"), stamp=4)
+        state.observe(heat)
+        channels = state.air_channels(_PATH)
+        assert channels and channels.role == (1, False) and channels.cool is None
+        assert state.observe(cool) == (_PATH,)
+        (device,) = state.thermostats
+        assert device.air and device.air.heat is None  # The latest wire report.
+        assert device.setup.mode is None
+        channels = device.air_channels
+        assert channels and channels.heat and channels.cool
+        assert channels.heat.reading.calling and channels.heat.frame is heat
+        assert not channels.cool.reading.calling and channels.cool.frame is cool
+        rendered = climate_fields(device)["air_channels"]
+        assert isinstance(rendered, dict)
+        assert rendered["heat"]["timestamp_ms"] == heat.timestamp_ms
+        assert rendered["cool"]["schedule"] == 1
+
+        repeat = frame(0x36F, cool.message.payload, stamp=5)
+        assert not state.observe(repeat)
+        channels = state.air_channels(_PATH)
+        assert channels and channels.heat and channels.cool
+        assert channels.heat.frame is heat and channels.cool.frame is repeat
+
+    def test_air_channels_never_cross_a_group_or_role_change(self) -> None:
+        state = NativeState()
+        state.observe(identity(105102))
+        state.observe(air(3))
+        state.observe(frame(0x36F, bytes.fromhex("22 05 50 0106 00 0000")))
+        channels = state.air_channels(_PATH)
+        assert channels and channels.role == (2, False) and channels.heat is None
+        master = frame(0x377, bytes.fromhex("02 c8 03 2d 0006 01 40 0106 00 0000"))
+        state.observe(master)
+        channels = state.air_channels(_PATH)
+        assert channels and channels.role == (2, True)
+        assert channels.heat and channels.heat.frame is master
+        assert channels.cool and channels.cool.frame is master
+
+        state.observe(frame(0x36F, bytes.fromhex("02 03 2d 0006 00 0000")))
+        channels = state.air_channels(_PATH)
+        assert channels and channels.role == (2, False) and channels.cool is None
+        state.observe(frame(0x36A, bytes.fromhex("03 02")))
+        assert state.air_channels(_PATH) is None and state.air_status(_PATH) is None
+        (device,) = state.thermostats
+        assert device.active_air_target is None
+
     def test_selectors_paths_and_identity_replacement(self) -> None:
         state = NativeState()
         other = NativePath(2, _PATH.subnet, _PATH.node)
@@ -149,6 +198,7 @@ class StateTests(unittest.TestCase):
         assert not state.observe(block(0x5A, bytes.fromhex("06 02 00")))
         state.observe(identity(104104))
         assert state.block(_PATH, 0x5A, 0) is None and state.air_frame(_PATH) is None
+        assert state.air_channels(_PATH) is None and state.air_channels(other)
         assert state.climate(_PATH) is None and state.climate(other) is not None
         assert NativePath(2, _PATH.subnet, _PATH.node | 32) == other
 
@@ -171,6 +221,7 @@ class StateTests(unittest.TestCase):
         state.observe(air(3, path=dest))
         state.observe(identity(path=dest))
         assert state.thermostats[0].air is None
+        assert state.air_channels(dest) is None
 
 
 class ClimateSessionTests(unittest.IsolatedAsyncioTestCase):
@@ -308,6 +359,42 @@ class ClimateSessionTests(unittest.IsolatedAsyncioTestCase):
         assert done.thermostats[0].setup.mode is ThermostatMode.OFF
         assert done.thermostats[0].air and done.thermostats[0].air.heat
         assert done.thermostats[0].air.heat.calling
+
+    async def test_alternating_member_channels_do_not_keep_reading_mode(self) -> None:
+        task = asyncio.create_task(
+            watch_climate(
+                self.stream,
+                [_PATH],
+                on_change=self.changes.put_nowait,
+                duration=0.3,
+            ),
+        )
+        await self.sent(0x2D7, 0)
+        self.rx(air(3))
+        self.rx(frame(0x36F, bytes.fromhex("21 05 50 0006 00 0000")))
+        self.ack()
+        self.rx(identity())
+        await self.sent(0x2D7, 3)
+        self.ack()
+        self.rx(block(3, bytes.fromhex("07 02 04 01")))
+        await self.changed(
+            lambda c: (
+                c.current is not None and c.current.setup.mode is ThermostatMode.AUTO
+            ),
+        )
+
+        self.rx(air(3, 0x610))
+        self.rx(frame(0x36F, bytes.fromhex("21 05 50 1006 00 0000")))
+        with self.assertRaises(TimeoutError):
+            await asyncio.wait_for(self.tx.get(), 0.04)
+
+        self.rx(frame(0x36F, bytes.fromhex("21 04 50 1006 00 0000")))
+        await self.sent(0x2D7, 3)  # Disable only the cool side.
+        self.ack()
+        self.rx(block(3, bytes.fromhex("07 01 04 01")))
+        result = await task
+        assert result.reads == 3 and self.tx.empty()
+        assert result.thermostats[0].setup.mode is ThermostatMode.HEAT
 
     async def test_timeout_keeps_transmit_slot_until_actual_result(self) -> None:
         task = asyncio.create_task(

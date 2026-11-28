@@ -24,7 +24,7 @@ if TYPE_CHECKING:
     from .native_plant import PlantEquipment, WaterSample, WaterValue
     from .native_plant_registers import PlantRegisters
     from .native_sensors import SensorObservation
-    from .native_state import NativeClimate
+    from .native_state import NativeAirChannel, NativeClimate
     from .native_status import NativeStatusBatch
     from .native_targets import ThermostatAdjustments
     from .native_thermostat_equipment import ThermostatEquipment
@@ -194,9 +194,16 @@ def water_system_fields(system: WaterSystem) -> dict[str, object]:
     }
 
 
+def _air_channel_fields(sample: NativeAirChannel | None) -> dict[str, object] | None:
+    if sample is None:
+        return None
+    return {"timestamp_ms": sample.frame.timestamp_ms, **sample.reading.fields("")}
+
+
 def climate_fields(device: NativeClimate) -> dict[str, object]:
     setup = device.setup
     target = device.active_air_target
+    channels = device.air_channels
     return {
         **asdict(device.path),
         "model": setup.product.model,
@@ -225,6 +232,14 @@ def climate_fields(device: NativeClimate) -> dict[str, object]:
         "floor_cooling_enabled": setup.floor_cooling_enabled,
         "air_timestamp_ms": device.air_timestamp_ms,
         "air": device.air.fields() if device.air is not None else None,
+        "air_channels": {
+            "group": channels.group,
+            "master": channels.master,
+            "heat": _air_channel_fields(channels.heat),
+            "cool": _air_channel_fields(channels.cool),
+        }
+        if channels is not None
+        else None,
         "active_air_target": {
             "kind": target.kind.name.lower(),
             "setback": target.setback,
