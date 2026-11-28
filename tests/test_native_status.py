@@ -50,7 +50,7 @@ class NativeStatusTests(unittest.IsolatedAsyncioTestCase):
         peer: NativeAddress = _PEER,
     ) -> NativeFrame:
         body = NativeMessage(mid, peer, bytes.fromhex(payload)).to_bytes()
-        self.stream.feed(Packet(1, bytes([0, port, 9, 0, 0, 0]) + body))
+        self.stream.feed(Packet(1, bytes([0, port, 9, 0, 0, 0]) + body + bytes(1)))
         return NativeFrame(port, 9, body)
 
     async def test_snowmelt_collects_distinct_keys_from_one_reporting_peer(

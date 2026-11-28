@@ -19,7 +19,7 @@ from tekmar_482.cli import build_parser
 from tekmar_482.cli_native_watch import watch_all_from_args
 from tekmar_482.raw import CaptureRecord, RawDispatcher
 
-from .native_fixtures import TEST_PATH, block, frame, identity
+from .native_fixtures import TEST_PATH, block, extended_rx, frame, identity
 
 _WEEK = bytes(range(1, 8))
 _TIMER = 101103
@@ -298,10 +298,7 @@ class LiveCalendarTests(unittest.IsolatedAsyncioTestCase):
 
     def rx(self, f: NativeFrame) -> None:
         self.stream.feed(
-            Packet(
-                1,
-                bytes([0, f.port]) + f.timestamp_ms.to_bytes(4, "little") + f.body,
-            ),
+            extended_rx(f),
         )
 
     async def query(self, b: int, selector: int = 0) -> None:

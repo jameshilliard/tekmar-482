@@ -25,7 +25,7 @@ from tekmar_482.cli_native_watch import setpoint_fields, watch_all_from_args
 from tekmar_482.native_write import NativeWriteStatus
 from tekmar_482.raw import RawDispatcher
 
-from .native_fixtures import TEST_PATH, block, frame, identity
+from .native_fixtures import TEST_PATH, block, extended_rx, frame, identity
 
 _STATUS = bytes.fromhex("b3 dc 5800 4800 00c0 6c 35 ca e4")
 _OTHER = NativePath(2, TEST_PATH.subnet, TEST_PATH.node)
@@ -282,7 +282,9 @@ class SetpointEditTests(unittest.IsolatedAsyncioTestCase):
         query = NativeBlockQuery(TEST_PATH.address, b)
         self.assertEqual(await self.sent(), query.request(self.source))
         self.ack()
-        self.stream.feed(Packet(1, bytes([0, report.port]) + bytes(4) + report.body))
+        self.stream.feed(
+            Packet(1, bytes([0, report.port]) + bytes(4) + report.body + bytes(1)),
+        )
 
     def edit(
         self,
@@ -400,7 +402,7 @@ class SetpointWatchTests(unittest.IsolatedAsyncioTestCase):
             ],
         )
         for f in (identity(_162), block(0x26, bytes([1, 2])), frame(0x22F, _STATUS)):
-            stream.feed(Packet(1, bytes([0, f.port]) + bytes(4) + f.body))
+            stream.feed(Packet(1, bytes([0, f.port]) + bytes(4) + f.body + bytes(1)))
         output: list[object] = []
         assert await watch_all_from_args(stream, args, output.append) == 0
         assert any(
@@ -422,10 +424,7 @@ class SetpointWatchTests(unittest.IsolatedAsyncioTestCase):
 
         def receive(f: NativeFrame) -> None:
             stream.feed(
-                Packet(
-                    1,
-                    bytes([0, f.port]) + f.timestamp_ms.to_bytes(4, "little") + f.body,
-                ),
+                extended_rx(f),
             )
 
         seen: list[int] = []

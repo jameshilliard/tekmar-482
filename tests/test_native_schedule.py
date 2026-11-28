@@ -87,7 +87,9 @@ class NativeScheduleTests(unittest.IsolatedAsyncioTestCase):
         data = self.blocks.get(query)
         if data is not None:
             report = NativeMessage(0x2E7, _PEER, payload[:2] + data)
-            self.stream.feed(Packet(1, bytes([0, 1, 4, 0, 0, 0]) + report.to_bytes()))
+            self.stream.feed(
+                Packet(1, bytes([0, 1, 4, 0, 0, 0]) + report.to_bytes() + bytes(1)),
+            )
 
     def test_complete_row_round_trip_for_sunday_first_and_unknown_revision(
         self,
@@ -684,7 +686,9 @@ class NativeScheduleTests(unittest.IsolatedAsyncioTestCase):
                         _PEER,
                         block.to_bytes(2, "little") + data,
                     )
-                    reply += serialize(Packet(1, b"\0\1" + bytes(4) + msg.to_bytes()))
+                    reply += serialize(
+                        Packet(1, b"\0\1" + bytes(4) + msg.to_bytes() + bytes(1)),
+                    )
                 writer.write(reply)
             leave = management(2, 0, bytes(2))
             assert await reader.readexactly(len(leave)) == leave

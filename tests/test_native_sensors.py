@@ -251,7 +251,10 @@ class SensorReadTests(unittest.IsolatedAsyncioTestCase):
             self.stream.feed(Packet(1, bytes([2, 1, 0])))
         if (body := self.blocks.get(block)) is not None:
             self.stream.feed(
-                Packet(1, bytes([0, 1, 0, 0, 0, 0]) + _block(block, body).body),
+                Packet(
+                    1,
+                    bytes([0, 1, 0, 0, 0, 0]) + _block(block, body).body + bytes(1),
+                ),
             )
 
     async def test_addressed_and_snapshot_match_with_missing_replies(self) -> None:

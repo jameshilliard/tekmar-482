@@ -14,7 +14,7 @@ from tekmar_482.cli import build_parser
 from tekmar_482.cli_native_watch import watch_all_from_args
 from tekmar_482.raw import RawDispatcher
 
-from .native_fixtures import TEST_PATH, block, frame, identity
+from .native_fixtures import TEST_PATH, block, extended_rx, frame, identity
 
 _OTHER = NativePath(0, TEST_PATH.subnet, TEST_PATH.node)
 
@@ -84,10 +84,7 @@ class PeerLinkWatchTests(unittest.IsolatedAsyncioTestCase):
         match = block(0x49, bytes.fromhex("17 00 04 03 10"))
         for f in (match, match):
             stream.feed(
-                Packet(
-                    1,
-                    bytes([0, f.port]) + f.timestamp_ms.to_bytes(4, "little") + f.body,
-                ),
+                extended_rx(f),
             )
         args = build_parser().parse_args(
             [

@@ -535,6 +535,8 @@ class _Watch:
         if isinstance(record, NativeFrame):
             self.capture_index = record.capture_index
             self.capture_advanced.set()
+            if not record.usable_for_state:
+                return
         elif isinstance(record, CaptureGap):
             self.capture_advanced.set()
         io = (

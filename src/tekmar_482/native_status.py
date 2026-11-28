@@ -28,6 +28,7 @@ class NativeStatusBatch:
     covered: frozenset[int]
     expected_count: int | None
     expired_unsent: bool = False
+    capture_lost: bool = False
 
     @property
     def transmit_pending(self) -> bool:
@@ -114,6 +115,7 @@ class StatusCollector:
         result: TxResult | None,
         *,
         expired_unsent: bool = False,
+        capture_lost: bool = False,
     ) -> NativeStatusBatch:
         return NativeStatusBatch(
             port,
@@ -124,6 +126,7 @@ class StatusCollector:
             frozenset(self.covered),
             self.expected_count,
             expired_unsent,
+            capture_lost,
         )
 
 

@@ -76,7 +76,7 @@ def management(method: int, service: int, body: bytes = b"") -> bytes:
     )
 
 
-RAW_CAPABILITIES = management(1, 4, bytes([4, 0, 5, 3]))
+RAW_CAPABILITIES = management(1, 4, bytes([5, 0, 5, 3]))
 
 
 def raw_wire(data: bytes) -> bytes:
@@ -84,6 +84,57 @@ def raw_wire(data: bytes) -> bytes:
 
 
 class BridgeTests(unittest.IsolatedAsyncioTestCase):
+    async def test_cancelled_mode_entry_restores_before_closing(self) -> None:
+        for base in (True, False):
+            with self.subTest(base=base):
+                await self.check_cancelled_mode_entry(base=base)
+
+    async def check_cancelled_mode_entry(self, *, base: bool) -> None:
+        accepted, release, restoring, restored = (asyncio.Event() for _ in range(4))
+        profile = bytes([1, 0 if base else 1])
+
+        async def app(
+            reader: asyncio.StreamReader,
+            writer: asyncio.StreamWriter,
+        ) -> None:
+            caps = b"\xca" * 301 + management(1, 1)
+            assert await reader.readexactly(len(caps)) == caps
+            writer.write(RAW_CAPABILITIES)
+            request = management(2, 0, profile)
+            assert await reader.readexactly(len(request)) == request
+            accepted.set()
+            await release.wait()
+            writer.write(management(2, 3, profile))
+            normal = management(2, 0, bytes(2))
+            assert await reader.readexactly(len(normal)) == normal
+            restoring.set()
+            await restored.wait()
+            writer.write(management(2, 3, bytes(2)))
+
+        async with (
+            listen(app) as endpoint,
+            endpoint.connect() as wire,
+            asyncio.timeout(4),
+        ):
+            bridge = BridgeClient(wire)
+            await bridge.identify()
+
+            async def borrow() -> None:
+                async with bridge.base_stream() if base else bridge.stream():
+                    self.fail("a cancelled borrower must not enter Raw")
+
+            task = asyncio.create_task(borrow())
+            await accepted.wait()
+            task.cancel()
+            release.set()
+            await restoring.wait()
+            task.cancel()
+            await asyncio.sleep(0)
+            assert not task.done()
+            restored.set()
+            with self.assertRaises(asyncio.CancelledError):
+                await task
+
     async def test_stock_requires_null_capabilities_and_real_protocol_reply(
         self,
     ) -> None:
@@ -151,7 +202,7 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
             # Ignore a bad captured checksum before identification.
             writer.write(
                 b"\xca\x01\x01\x00\xff\x35"
-                + management(1, 4, bytes([4, 1, 5, 3]))
+                + management(1, 4, bytes([5, 1, 5, 3]))
                 + capture,
             )
             build = management(4, 1)
@@ -265,7 +316,7 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
             body = bytes.fromhex("12300001a5")
             send = raw_wire(bytes([0, 0]) + bytes(4) + body)
             assert await reader.readexactly(len(send)) == send
-            writer.write(raw_wire(bytes(6) + body))
+            writer.write(raw_wire(bytes(6) + body + bytes(1)))
             writer.write(raw_wire(bytes([2, 0, 0])))
             mode = management(2, 0, bytes(2))
             assert await reader.readexactly(len(mode)) == mode
@@ -458,7 +509,7 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
                 (
                     raw_wire(b"\0\x02" + bytes(4) + request),
                     raw_wire(b"\x02\x02\0")
-                    + raw_wire(bytes.fromhex("000207000000") + report),
+                    + raw_wire(bytes.fromhex("000207000000") + report + bytes(1)),
                 ),
                 (management(2, 0, bytes(2)), management(2, 3, bytes(2))),
             ):
@@ -501,7 +552,7 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         ack = raw_wire(bytes.fromhex("020100"))
 
         def capture(body: bytes) -> bytes:
-            return raw_wire(bytes.fromhex("000107000000") + body)
+            return raw_wire(bytes.fromhex("000107000000") + body + bytes(1))
 
         async def exchange(
             reader: asyncio.StreamReader,
@@ -596,7 +647,9 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
                     (
                         raw_wire(bytes([0, 1]) + bytes(4) + bytes.fromhex(outgoing)),
                         raw_wire(bytes([2, 1, 0]))
-                        + raw_wire(bytes([0, 1, 1, 0, 0, 0]) + bytes.fromhex(report)),
+                        + raw_wire(
+                            bytes.fromhex("000101000000" + report + "00"),
+                        ),
                     ),
                 )
             steps.append((management(2, 0, bytes(2)), management(2, 3, bytes(2))))
@@ -650,7 +703,8 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
                     1,
                     bytes.fromhex(
                         "0003 22000000 5f58100e 43a5 e701 410042caff00 08 3412 e4",
-                    ),
+                    )
+                    + bytes(1),
                 ),
             )
             for outgoing, incoming in (
@@ -744,7 +798,7 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
                 (
                     raw_wire(b"\0\x04" + bytes(4) + request),
                     raw_wire(b"\x02\x04\0")
-                    + raw_wire(bytes.fromhex("00040a000000") + report),
+                    + raw_wire(bytes.fromhex("00040a000000") + report + bytes(1)),
                 ),
                 (management(2, 0, bytes(2)), management(2, 3, bytes(2))),
             ):
@@ -804,7 +858,7 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
             + (1145).to_bytes(2, "little")
         )
         rx_identity, rx_other, rx_fault, rx_group = (
-            raw_wire(prefix + body)
+            raw_wire(prefix + body + bytes(1))
             for body in (
                 identity,
                 bytes.fromhex("6e7161c4 770001 13"),
@@ -873,7 +927,10 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
                                 raw_wire(
                                     bytes([0, 3]) + bytes(4) + bytes.fromhex(query),
                                 ),
-                                result + raw_wire(prefix + bytes.fromhex(report_hex)),
+                                result
+                                + raw_wire(
+                                    prefix + bytes.fromhex(report_hex) + bytes(1),
+                                ),
                             ),
                         )
                     steps.extend([stop, *stats])
@@ -1146,7 +1203,7 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
     async def test_older_raw_applications_can_upgrade_without_a_button(
         self,
     ) -> None:
-        for version in (2, 3):
+        for version in (2, 3, 4):
             with self.subTest(version=version):
                 await self.check_auto_program(
                     "f" * 40,

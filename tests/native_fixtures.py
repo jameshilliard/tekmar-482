@@ -1,6 +1,16 @@
-from tekmar_482 import NativeFrame, NativeMessage, NativePath
+from tekmar_482 import NativeFrame, NativeMessage, NativePath, Packet
 
 TEST_PATH = NativePath(3, 0x35, 7)
+
+
+def extended_rx(sample: NativeFrame) -> Packet:
+    return Packet(
+        1,
+        bytes([0, sample.port])
+        + sample.timestamp_ms.to_bytes(4, "little")
+        + sample.body
+        + bytes([sample.rx_flags or 0]),
+    )
 
 
 def frame(

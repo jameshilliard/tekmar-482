@@ -5,10 +5,12 @@ from tekmar_482 import (
     CaptureGap,
     ConnectionClosedError,
     FailureReason,
+    GatewayTraceGap,
     InvalidCapture,
     NativeAddress,
     NativeBlockQuery,
     NativeFrame,
+    NativeInventory,
     NativeMessage,
     NativeTargets,
     NativeTransmitError,
@@ -17,11 +19,12 @@ from tekmar_482 import (
     PortErrorReason,
     ProtocolError,
     RejectReason,
+    RxFlag,
     SnowmeltBlock,
     TxResult,
     TxStatus,
 )
-from tekmar_482.raw import RawDispatcher
+from tekmar_482.raw import BaseRawDispatcher, RawDispatcher
 
 _BODY = bytes.fromhex("12300000")
 
@@ -35,6 +38,83 @@ class RawTests(unittest.IsolatedAsyncioTestCase):
     def deliver(self, *data: int) -> None:
         self.rx.put_nowait(Packet(1, bytes(data)))
 
+    async def test_base_submissions_and_capture_have_no_extensions(self) -> None:
+        base = BaseRawDispatcher(self.tx.put, 1)
+        async with asyncio.timeout(2):
+            await base.submit(4, _BODY)
+            await base.submit_all(_BODY)
+            assert await self.tx.get() == bytes.fromhex("0004 00000000 12300000")
+            assert await self.tx.get() == bytes.fromhex("003f 00000000 12300000")
+            with self.assertRaises(ValueError):
+                await base.submit(0x3F, _BODY)
+            with self.assertRaises(ValueError):
+                await base.submit_all(_BODY[:-1])
+            capture = bytes.fromhex("0004 0a000000 12300000")
+            base.feed(Packet(1, capture))
+            base.feed(Packet(1, capture))
+            assert await base.read() == CaptureGap(1)
+            frame = await base.read()
+            assert isinstance(frame, NativeFrame) and frame.rx_flags is None
+            for extended in (capture + bytes(1), bytes.fromhex("020400")):
+                with self.assertRaisesRegex(ProtocolError, "extension"):
+                    base.feed(Packet(1, extended))
+            base.finish()
+            with self.assertRaises(ConnectionClosedError):
+                await base.submit(4, _BODY)
+            with self.assertRaises(ConnectionClosedError):
+                await base.read()
+
+    async def test_timing_faults_are_capture_only_and_no_ack_is_still_evidence(
+        self,
+    ) -> None:
+        host, peer = NativeAddress(0, 0), NativeAddress(0x42, 3)
+        query = NativeBlockQuery(peer, 3)
+        body = NativeMessage(0x2E7, peer, bytes.fromhex("030005010003")).to_bytes()
+        prefix = bytes.fromhex("0001 00000000")
+        inventory = NativeInventory()
+        async with self.stream.receiving(self.rx.get), asyncio.timeout(2):
+            task = asyncio.create_task(self.stream.read_block(1, query, source=host))
+            await self.tx.get()
+            self.stream.feed(Packet(1, bytes.fromhex("020100")))
+            for flags in (RxFlag.ACK | RxFlag.EARLY_START, 0x80):
+                self.stream.feed(Packet(1, prefix + body + bytes([flags])))
+                frame = await self.stream.read()
+                assert isinstance(frame, NativeFrame) and frame.rx_flags == flags
+                assert inventory.observe(frame) is None
+                assert not task.done()
+            self.stream.feed(Packet(1, prefix + body + bytes(1)))
+            assert (await task).rx_flags == 0
+            with self.assertRaisesRegex(ProtocolError, "missing RX flags"):
+                self.stream.feed(Packet(1, prefix + body))
+
+    async def test_only_an_affected_gateway_gap_interrupts_an_admitted_read(
+        self,
+    ) -> None:
+        query = NativeBlockQuery(NativeAddress(0x42, 3), 3)
+        async with self.stream.receiving(self.rx.get), asyncio.timeout(2):
+            task = asyncio.create_task(
+                self.stream.read_block_group(1, query, source=NativeAddress(0, 0)),
+            )
+            await self.tx.get()
+
+            def gap(mask: int) -> None:
+                self.stream.feed(Packet(1, bytes([5, mask, 1]) + bytes(7)))
+
+            gap(2)
+            assert await self.stream.read() == GatewayTraceGap(1, 2)
+            self.stream.feed(Packet(1, bytes.fromhex("020100")))
+            gap(4)
+            assert await self.stream.read() == GatewayTraceGap(1, 4)
+            await asyncio.sleep(0)
+            assert not task.done()
+            gap(2)
+            assert await self.stream.read() == GatewayTraceGap(1, 2)
+            batch = await task
+            assert batch.capture_lost and not batch.reports
+            assert batch.tx_result == TxResult(1, TxStatus.ACK)
+            with self.assertRaisesRegex(ProtocolError, "capture loss"):
+                batch.require_report()
+
     async def test_group_accepts_each_selected_node_once_after_tx_result(
         self,
     ) -> None:
@@ -43,7 +123,7 @@ class RawTests(unittest.IsolatedAsyncioTestCase):
 
         def report(port: int, node: int, value: bytes) -> None:
             body = NativeMessage(0x2E7, NativeAddress(0x24, node), b"\x44\0" + value)
-            self.deliver(0, port, 0, 0, 0, 0, *body.to_bytes())
+            self.deliver(0, port, 0, 0, 0, 0, *body.to_bytes(), 0)
 
         async with self.stream.receiving(self.rx.get), asyncio.timeout(2):
             with self.assertRaisesRegex(ValueError, "multiple nodes"):
@@ -90,7 +170,7 @@ class RawTests(unittest.IsolatedAsyncioTestCase):
                 if not lost_tx:
                     self.deliver(2, 0, TxStatus.ACK)
                 msg = NativeMessage(0x2E7, NativeAddress(8, 2), bytes.fromhex("150000"))
-                self.deliver(0, 0, 8, 0, 0, 0, *msg.to_bytes())
+                self.deliver(0, 0, 8, 0, 0, 0, *msg.to_bytes(), 0)
                 batch = await task
                 assert batch.tx_result == (
                     None if lost_tx else TxResult(0, TxStatus.ACK)
@@ -112,7 +192,7 @@ class RawTests(unittest.IsolatedAsyncioTestCase):
         query = NativeBlockQuery(peer, SnowmeltBlock.SNOW_ICE_SENSOR_TYPE, 0)
         body = NativeMessage(0x2E7, peer, bytes.fromhex("7a00030003")).to_bytes()
         async with self.stream.receiving(self.rx.get), asyncio.timeout(2):
-            self.stream.feed(Packet(1, bytes((0, 1, 0, 0, 0, 0)) + body))
+            self.stream.feed(Packet(1, bytes((0, 1, 0, 0, 0, 0)) + body + bytes(1)))
             first = asyncio.create_task(self.stream.read_block(1, query, source=host))
             assert (
                 await self.tx.get()
@@ -125,11 +205,11 @@ class RawTests(unittest.IsolatedAsyncioTestCase):
             self.deliver(2, 1, 0)
             # No link ACK; an actual matching report still counts.
             self.deliver(2, 2, 2, 1)
-            self.deliver(0, 2, 1, 0, 0, 0, *body)
+            self.deliver(0, 2, 1, 0, 0, 0, *body, 0)
             assert await other == NativeFrame(2, 1, body)
             assert not first.done()
-            self.deliver(0, 1, 2, 0, 0, 0, *body[:-2], 1, 4)  # Different sensor.
-            self.deliver(0, 1, 3, 0, 0, 0, *body)
+            self.deliver(0, 1, 2, 0, 0, 0, *body[:-2], 1, 4, 0)  # Different sensor.
+            self.deliver(0, 1, 3, 0, 0, 0, *body, 0)
             assert await first == NativeFrame(1, 3, body)
             assert await self.stream.read() == CaptureGap(2)
             wrong = await self.stream.read()
@@ -163,7 +243,7 @@ class RawTests(unittest.IsolatedAsyncioTestCase):
                 await self.tx.get()
                 peer = NativeAddress(0, 4)
                 report = NativeMessage(0x2E7, peer, bytes([query.block_id, 0, 1, 5]))
-                self.deliver(0, 0, 0, 0, 0, 0, *report.to_bytes())
+                self.deliver(0, 0, 0, 0, 0, 0, *report.to_bytes(), 0)
                 self.deliver(2, 0, status, reason)
                 with self.assertRaises(NativeTransmitError) as ctx:
                     await task
@@ -248,7 +328,7 @@ class RawTests(unittest.IsolatedAsyncioTestCase):
             pending = asyncio.create_task(self.stream.send(4, _BODY))
             await self.tx.get()
             for tick in range(3):
-                self.deliver(0, 0, tick, 0, 0, 0, *_BODY)
+                self.deliver(0, 0, tick, 0, 0, 0, *_BODY, 0)
             self.deliver(4, 0, 4, 0, 0, 0, 2, 3, 0, 0xA0)
             self.deliver(2, 4, 0)
             assert await pending == TxResult(4, TxStatus.ACK)

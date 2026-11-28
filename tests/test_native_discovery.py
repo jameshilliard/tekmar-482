@@ -150,7 +150,9 @@ class NativeScanTests(unittest.IsolatedAsyncioTestCase):
         self.stream = RawDispatcher(self.tx.put, 8)
 
     def deliver(self, sample: NativeFrame) -> None:
-        self.stream.feed(Packet(1, bytes((0, sample.port, 12, 0, 0, 0)) + sample.body))
+        self.stream.feed(
+            Packet(1, bytes((0, sample.port, 12, 0, 0, 0)) + sample.body + bytes(1)),
+        )
 
     async def test_scan_is_once_per_subnet_and_stalled_ports_are_independent(
         self,

@@ -60,7 +60,7 @@ class ThermostatSensorMonitor:
         """Return whether observations changed, without I/O or combining half words."""
         if isinstance(record, CaptureGap):
             return bool(self._state.observe(record))
-        if not isinstance(record, NativeFrame):
+        if not isinstance(record, NativeFrame) or not record.usable_for_state:
             return False
         path = NativePath.from_frame(record)
         data = record.message.payload

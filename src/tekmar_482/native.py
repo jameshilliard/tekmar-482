@@ -442,6 +442,11 @@ class NativeFrame:
         object.__setattr__(self, "message", NativeMessage.from_bytes(self.body))
 
     @property
+    def usable_for_state(self) -> bool:
+        """Ignore timing-faulted observations for state, regardless of link ACK."""
+        return self.rx_flags is None or not (int(self.rx_flags) & ~int(RxFlag.ACK))
+
+    @property
     def message_id(self) -> int:
         return self.message.message_id
 

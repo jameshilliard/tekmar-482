@@ -2,29 +2,30 @@
 
 from __future__ import annotations
 
-import asyncio
-from collections import deque
 from dataclasses import dataclass
 from enum import IntEnum
 from time import monotonic_ns
-from typing import TYPE_CHECKING, Self
+from typing import TYPE_CHECKING
 
-from ._capture import CaptureEvent, InvalidCapture, StampedRecord
-from .constants import TN4_PORTS
+from ._capture import (
+    CaptureBuffer,
+    CaptureEvent,
+    CaptureGap,
+    GatewayTraceGap,
+    InvalidCapture,
+    StampedRecord,
+)
 from .exceptions import ConnectionClosedError, ProtocolError
 from .native import NativeFrame, RxFlag
 from .packet import TYPE_NORMAL_TRACE, TYPE_TRPC
-from .raw import CaptureGap, FailureReason
+from .raw import FailureReason
 from .trpc import TrpcPacket
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator
-
     from .management import BridgeManagement
     from .packet import Packet
 
 _TX_DETAILS = 2
-_GAP_BYTES = 10
 
 
 class TraceOrigin(IntEnum):
@@ -56,30 +57,12 @@ class TraceTx:
     failure: FailureReason | int | None
 
 
-@dataclass(frozen=True, slots=True)
-class GatewayTraceGap(CaptureGap):
-    """Lost gateway trace records across these ports, not a per-port count."""
-
-    port_mask: int
-
-    def affects(self, port: int, /) -> bool:
-        return bool(self.port_mask & (1 << port))
-
-    @property
-    def ports(self) -> tuple[int, ...]:
-        return tuple(p for p in TN4_PORTS if self.affects(p))
-
-
 def _decode_trace(
     data: bytes,
     capture_index: int = 0,
 ) -> TraceRx | TraceTx | InvalidCapture | GatewayTraceGap | None:
     if data[:1] == bytes((CaptureEvent.GAP,)):
-        if len(data) != _GAP_BYTES or not 0 < data[1] < 1 << len(TN4_PORTS):
-            return None
-        port = data[1]
-        count = int.from_bytes(data[2:], "little")
-        return GatewayTraceGap(count, port) if count >= port.bit_count() else None
+        return GatewayTraceGap.decode(data)
     record = StampedRecord.read(data)
     if record is None:
         return None
@@ -129,93 +112,14 @@ class TracePacket:
         )
 
 
-class _CaptureBuffer[T]:
-    def __init__(self, backlog: int) -> None:
-        if backlog <= 0:
-            msg = "trace backlog must be positive"
-            raise ValueError(msg)
-        self._queue: deque[T] = deque(maxlen=backlog)
-        self._ready = asyncio.Event()
-        self._lost = 0
-        self._arrived = 0
-        self._consumed = 0
-        self._advanced = asyncio.Event()
-        self.host_drops = 0
-        self.gateway_drops: tuple[int, ...] | None = None
-        self.closed = False
-        self._error: BaseException | None = None
-
-    def _put(self, item: T) -> None:
-        if self.closed:
-            return
-        self._arrived += 1
-        if len(self._queue) == self._queue.maxlen:
-            self._lost += 1
-            self.host_drops += 1
-        self._queue.append(item)
-        self._ready.set()
-
-    def finish(self, error: BaseException | None = None) -> None:
-        if not self.closed:
-            self.closed = True
-            self._error = error
-            self._ready.set()
-            self._advanced.set()
-
-    def __aiter__(self) -> Self:
-        return self
-
-    def _pop(self) -> T | CaptureGap | None:
-        if self._lost:
-            lost, self._lost = self._lost, 0
-            self._consumed += lost
-            self._advanced.set()
-            return CaptureGap(lost)
-        if not self._queue:
-            return None
-        self._consumed += 1
-        self._advanced.set()
-        return self._queue.popleft()
-
-    async def wait_consumed(self) -> None:
-        """Wait until the consumer receives all earlier observations or their loss."""
-        target = self._arrived
-        while True:
-            if self._error is not None:
-                raise self._error
-            if self._consumed >= target:
-                return
-            if self.closed:
-                msg = "capture ended before its observations were consumed"
-                raise ConnectionClosedError(msg)
-            self._advanced.clear()
-            await self._advanced.wait()
-
-    def drain(self) -> Iterator[T | CaptureGap]:
-        """Return buffered observations, including those before the stop reply."""
-        while (item := self._pop()) is not None:
-            yield item
-
-    async def __anext__(self) -> T | CaptureGap:
-        while True:
-            if (item := self._pop()) is not None:
-                return item
-            if self.closed:
-                if self._error:
-                    raise self._error
-                raise StopAsyncIteration
-            self._ready.clear()
-            await self._ready.wait()
-
-
-class NormalTrace(_CaptureBuffer[TracePacket]):
+class NormalTrace(CaptureBuffer[TracePacket]):
     """Single-consumer diagnostic trace of both wire directions."""
 
     def record(self, packet: Packet, *, outbound: bool) -> None:
         self._put(TracePacket(monotonic_ns(), outbound, packet))
 
 
-class NormalPeerCapture(_CaptureBuffer[NativeFrame | InvalidCapture | GatewayTraceGap]):
+class NormalPeerCapture(CaptureBuffer[NativeFrame | InvalidCapture | GatewayTraceGap]):
     """Peer evidence only, between trace-mask acknowledgements in UART order."""
 
     def __init__(self, backlog: int, port_mask: int, start: Packet) -> None:
@@ -245,8 +149,9 @@ class NormalPeerCapture(_CaptureBuffer[NativeFrame | InvalidCapture | GatewayTra
             if self.port_mask & sample.port_mask:
                 self._put(sample)
         elif isinstance(sample, TraceRx):
-            if self.port_mask & (1 << sample.frame.port) and not (
-                int(sample.flags) & ~int(RxFlag.ACK)
+            if (
+                self.port_mask & (1 << sample.frame.port)
+                and sample.frame.usable_for_state
             ):
                 self._index = sample.frame.capture_index
                 self._put(sample.frame)

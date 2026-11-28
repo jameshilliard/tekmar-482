@@ -23,7 +23,7 @@ from .test_management import Script
 from .test_normal_block import Wire
 
 _CAP = "0101f04b54"
-_SUPPORT = "0401f04b54040005bf04"
+_SUPPORT = "0401f04b54050005bf04"
 _READ = "0110f04b54"
 _ADMIT = "0410f04b54"
 _REPORT = "0210f04b54"
@@ -253,7 +253,7 @@ class NormalStatusTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_unsupported_silent_host_and_invalid_peer(self) -> None:
         query = NativeStatusQuery(StatusRequest.MASTER)
-        for caps in ("0401f04b540400057f", "0401f04b54040105ff", "0400000000"):
+        for caps in ("0401f04b540500057f", "0401f04b54050105ff", "0400000000"):
             async with Tekmar482Client(Script((_CAP, caps))) as client:
                 with self.assertRaisesRegex(ProtocolError, "does not support"):
                     await BridgeManagement(client).read_status(0, query)

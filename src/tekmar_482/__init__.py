@@ -1,6 +1,7 @@
 """Async Python client for the tekmar 482 gateway."""
 
 from ._bridge_diagnostics import ErrorReason, ErrorSource
+from ._capture import GatewayTraceGap
 from ._native_payloads import SnowmeltBlock
 from ._native_payloads.climate import (
     AirGroupConfiguration,
@@ -315,7 +316,6 @@ from .native_watch import (
 from .native_water import WaterMonitor, WaterRead, WaterSource, read_water
 from .native_write import NativeWriteResult, NativeWriteStatus
 from .normal_trace import (
-    GatewayTraceGap,
     NormalNativeSession,
     NormalPeerCapture,
     NormalTrace,
@@ -336,6 +336,7 @@ from .packet import (
     Packet,
 )
 from .raw import (
+    BaseRawStream,
     BridgeStream,
     CaptureGap,
     CaptureRecord,
@@ -349,6 +350,7 @@ from .raw import (
     PortDiagnostic,
     PortError,
     PortErrorReason,
+    RawLink,
     RejectReason,
     TxResult,
     TxStatus,
@@ -464,6 +466,7 @@ __all__ = [
     "AirTarget",
     "AvailableInfo",
     "AvailableRuntime",
+    "BaseRawStream",
     "BoilerChillerOutput",
     "BoilerMaximum",
     "BridgeCapabilities",
@@ -624,6 +627,7 @@ __all__ = [
     "PortTransmitTiming",
     "ProtocolError",
     "PumpElectricOutput",
+    "RawLink",
     "RawTcpTpckTransport",
     "RejectReason",
     "RelayHeartbeat",

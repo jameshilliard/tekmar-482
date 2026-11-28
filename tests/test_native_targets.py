@@ -31,7 +31,7 @@ from tekmar_482.cli import build_parser
 from tekmar_482.cli_status import adjustment_fields, climate_fields
 from tekmar_482.raw import RawDispatcher
 
-from .native_fixtures import TEST_PATH, block, frame, identity
+from .native_fixtures import TEST_PATH, block, extended_rx, frame, identity
 
 _HOST = NativeAddress(0, 0)
 _MODERN = 105102  # 553
@@ -328,10 +328,7 @@ class TargetSessionTests(unittest.IsolatedAsyncioTestCase):
 
     def rx(self, f: NativeFrame) -> None:
         self.stream.feed(
-            Packet(
-                1,
-                bytes([0, f.port]) + f.timestamp_ms.to_bytes(4, "little") + f.body,
-            ),
+            extended_rx(f),
         )
 
     def ack(self) -> None:

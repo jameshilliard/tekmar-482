@@ -19,6 +19,7 @@ from tekmar_482 import (
     BridgeClient,
     BridgeFeature,
     BridgeManagement,
+    BridgeMode,
     GatewayEndpoint,
     IoDirectory,
     IoEndpoint,
@@ -123,7 +124,7 @@ async def _uart_step(
 async def _connected(
     program: asyncio.StreamReader,
     control: asyncio.StreamWriter,
-) -> AsyncIterator[Tekmar482Client]:
+) -> AsyncIterator[BridgeClient]:
     accepted: asyncio.Queue[tuple[asyncio.StreamReader, asyncio.StreamWriter]] = (
         asyncio.Queue()
     )
@@ -146,12 +147,11 @@ async def _connected(
         async with endpoint.connect() as wire:
             gateway = BridgeClient(wire)
             await gateway.identify()
-            async with gateway.normal(select_mode=False) as client:
-                yield client
+            yield gateway
 
 
 @asynccontextmanager
-async def _gateway_client(script: Sequence[Exchange]) -> AsyncIterator[Tekmar482Client]:
+async def _emulated_bridge(script: Sequence[Exchange]) -> AsyncIterator[BridgeClient]:
     uv = shutil.which("uv")
     assert uv is not None and _IMAGE is not None
     process = await asyncio.create_subprocess_exec(
@@ -188,6 +188,15 @@ async def _gateway_client(script: Sequence[Exchange]) -> AsyncIterator[Tekmar482
 
 
 @asynccontextmanager
+async def _gateway_client(script: Sequence[Exchange]) -> AsyncIterator[Tekmar482Client]:
+    async with (
+        _emulated_bridge(script) as bridge,
+        bridge.normal(select_mode=False) as client,
+    ):
+        yield client
+
+
+@asynccontextmanager
 async def _gateway(script: Sequence[Exchange]) -> AsyncIterator[BridgeManagement]:
     async with _gateway_client(script) as client:
         yield BridgeManagement(client)
@@ -211,6 +220,39 @@ _SETPOINT = NativeAddress(0x31, 7)
 
 @unittest.skipUnless(_IMAGE, "set TEKMAR_TEST_FLASH_IMAGE to run the ARM interop suite")
 class FirmwareInteropTests(unittest.IsolatedAsyncioTestCase):
+    async def test_extended_raw_read_and_return_to_normal(self) -> None:
+        script = (_block(3, "23 10000000", "0300", "6e723144 030001 01"),)
+        async with _emulated_bridge(script) as bridge:
+            async with bridge.stream() as stream:
+                batch = await stream.read_block_group(
+                    3,
+                    NativeBlockQuery(_THERMOSTAT, 3),
+                    source=NativeAddress(0, 0),
+                )
+                assert (
+                    batch.tx_result is not None
+                    and batch.tx_result.status is TxStatus.ACK
+                )
+                frame = batch.require_report()
+                assert frame.body.hex() == "6e72314403000101" and frame.rx_flags == 0
+            assert set(stream.diagnostics) == set(range(5))
+            async with bridge.normal(select_mode=False) as client:
+                caps = await BridgeManagement(client).capabilities()
+                assert caps is not None and caps.mode is BridgeMode.NORMAL
+
+    async def test_base_raw_native_fanout_has_no_extension_records(self) -> None:
+        body = "7fe00001ca"
+        script = [(p, body, ()) for p in range(5)]
+        async with _emulated_bridge(script) as bridge, bridge.base_stream() as base:
+            await base.submit_all(bytes.fromhex(body))
+            ports = set()
+            for _ in range(5):
+                record = await base.read()
+                assert isinstance(record, NativeFrame)
+                assert record.body.hex() == body and record.rx_flags is None
+                ports.add(record.port)
+            assert ports == set(range(5))
+
     async def test_normal_watch_discovers_io_after_identifying_a_quiet_553(
         self,
     ) -> None:

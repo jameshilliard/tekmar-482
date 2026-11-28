@@ -57,7 +57,7 @@ class NativeSceneTests(unittest.IsolatedAsyncioTestCase):
         peer: NativeAddress = _PEER,
     ) -> NativeFrame:
         body = NativeMessage(mid, peer, bytes.fromhex(data)).to_bytes()
-        self.stream.feed(Packet(1, bytes([0, 2, 3, 0, 0, 0]) + body))
+        self.stream.feed(Packet(1, bytes([0, 2, 3, 0, 0, 0]) + body + bytes(1)))
         return NativeFrame(2, 3, body)
 
     async def test_independent_port_results_and_capture_of_own_echo(self) -> None:

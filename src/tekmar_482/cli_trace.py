@@ -5,9 +5,10 @@ from __future__ import annotations
 from enum import IntEnum
 from typing import TYPE_CHECKING
 
+from ._capture import GatewayTraceGap
 from .constants import TN4_PORTS
 from .native import RxFlag
-from .normal_trace import GatewayTraceGap, TracePacket, TraceRx, TraceTx
+from .normal_trace import TracePacket, TraceRx, TraceTx
 from .raw import CaptureGap, InvalidCapture
 from .trpc import TrpcPacket
 

@@ -9,46 +9,41 @@ from dataclasses import dataclass
 from enum import IntEnum
 from typing import TYPE_CHECKING, Protocol
 
-from ._capture import CaptureEvent, InvalidCapture, InvalidReason, StampedRecord
+from ._capture import (
+    CaptureBuffer,
+    CaptureEvent,
+    CaptureGap,
+    GatewayTraceGap,
+    InvalidCapture,
+    InvalidReason,
+    StampedRecord,
+)
 from ._native_payloads.queries import StatusRequest
-from ._native_payloads.writes import BlockPatch
+from ._raw_devices import DeviceOperations, RawDeviceOperations
 from .constants import TN4_PORTS
 from .exceptions import ConnectionClosedError, ProtocolError, TekmarError
 from .native import NativeFrame, NativeMessage, native_body_size
-from .native_schedule import edit_schedule_time
-from .native_schedule_setup import edit_schedule_setup
-from .native_setpoint import edit_setpoint_target
-from .native_snow_control import apply_snowmelt_group, edit_snowmelt_setpoint
 from .native_status import StatusCollector
-from .native_target_edit import edit_thermostat_target
 from .native_write import BlockDelivery, NativeBlockEditor
 from .packet import TYPE_TN4
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Awaitable, Callable, Iterator, Mapping
 
-    from ._native_payloads.climate import ThermostatMode
-    from ._native_payloads.layouts import SnowmeltBlock
     from ._native_payloads.queries import NativeStatusQuery
-    from ._native_payloads.schedules import ScheduleBinding
-    from ._native_payloads.snowmelt import SnowmeltApplication
-    from ._native_payloads.writes import NativeField
-    from .management import ErrorReporting
+    from .management import BridgeManagement, ErrorReporting
     from .native import NativeAddress, NativeBlockQuery, NativeTargets
     from .native_identity import NativeIdentity
-    from .native_schedule import ScheduleChange, ScheduleConfiguration, ScheduleTarget
-    from .native_schedule_setup import ScheduleSetupChange, ScheduleSetupResult
-    from .native_setpoint import SetpointTargetChange
-    from .native_snow_control import SnowmeltGroupResult, SnowmeltOperation
     from .native_status import NativeStatusBatch
-    from .native_target_edit import ThermostatTargetChange
-    from .native_write import NativeWriteResult
     from .packet import Packet
     from .traffic import TrafficCounters
 
 _RAW_HEADER = 2
+_ALL_PORTS = 0x3F
+_BASE_CLOSED = "base Raw session closed"
 
 __all__ = [
+    "BaseRawStream",
     "BridgeStream",
     "CaptureGap",
     "CaptureRecord",
@@ -63,6 +58,7 @@ __all__ = [
     "PortError",
     "PortErrorReason",
     "RawDispatcher",
+    "RawLink",
     "RejectReason",
     "TxResult",
     "TxStatus",
@@ -137,6 +133,7 @@ class NativeBlockBatch:
     tx_result: TxResult | None
     reports: tuple[NativeFrame, ...]
     expired_unsent: bool = False
+    capture_lost: bool = False
 
     @property
     def transmit_pending(self) -> bool:
@@ -162,6 +159,9 @@ class NativeBlockBatch:
             raise ValueError(msg)
         if self.tx_result is not None and not self.tx_result.completed_frame:
             raise NativeTransmitError(self.tx_result)
+        if self.capture_lost:
+            msg = "native block read interrupted by gateway capture loss"
+            raise ProtocolError(msg)
         if self.tx_result is None or not self.reports:
             msg = (
                 "no transmit completion or matching native block report before deadline"
@@ -175,6 +175,12 @@ class _ReportWaiter:
     collect: Callable[[NativeFrame], bool]
     done: asyncio.Future[None]
     transmitted: bool = False
+    capture_lost: bool = False
+
+    def gap(self) -> None:
+        if self.transmitted and not self.done.done():
+            self.capture_lost = True
+            self.done.set_result(None)
 
     def observe(self, frame: NativeFrame) -> None:
         if self.transmitted and not self.done.done() and self.collect(frame):
@@ -208,18 +214,7 @@ class PortDiagnostic:
     invalid_dropped: int
 
 
-@dataclass(frozen=True, slots=True)
-class CaptureGap:
-    """Missing capture records before the next observation (host backlog by default)."""
-
-    dropped: int
-
-    def affects(self, _port: int, /) -> bool:
-        """Whether this physical port's capture continuity was lost."""
-        return True  # The host backlog does not preserve the lost ports.
-
-
-type _Record = NativeFrame | InvalidCapture | PortError
+type _Record = NativeFrame | InvalidCapture | PortError | GatewayTraceGap
 type CaptureRecord = _Record | CaptureGap
 
 
@@ -228,6 +223,11 @@ def decode_raw_packet(packet: Packet, capture_index: int = 0) -> _Record | TxRes
     data = packet.data
     if packet.type == TYPE_TN4 and len(data) >= _RAW_HEADER:
         kind, port = data[:2]
+        if (
+            kind == CaptureEvent.GAP
+            and (gap := GatewayTraceGap.decode(data)) is not None
+        ):
+            return gap
         if kind == _Reply.PORT_ERROR and len(data) == _RAW_HEADER + 1:
             # InvalidPort echoes even a port number outside the physical range.
             return PortError(port, _reason(PortErrorReason, data[2]))
@@ -271,8 +271,60 @@ class NativeReader(Protocol):
     ) -> NativeStatusBatch: ...
 
 
-class BridgeStream(NativeReader, Protocol):
-    """Capture and send interface borrowed from an active Raw session."""
+def _send_record(selector: int, body: bytes | NativeMessage) -> bytes:
+    if isinstance(body, NativeMessage):
+        body = body.to_bytes()
+    if len(body) != native_body_size(body):
+        msg = "expected a complete native frame"
+        raise ValueError(msg)
+    return bytes((CaptureEvent.NATIVE, selector)) + bytes(4) + body
+
+
+class BaseRawStream(Protocol):
+    """485 base profile. Submission is not acknowledgement or confirmation."""
+
+    async def submit(self, port: int, body: bytes | NativeMessage) -> None: ...
+    async def submit_all(self, body: bytes | NativeMessage) -> None: ...
+    async def read(self) -> NativeFrame | CaptureGap: ...
+
+
+class BaseRawDispatcher(CaptureBuffer[NativeFrame]):
+    def __init__(self, write: Callable[[bytes], Awaitable[None]], backlog: int) -> None:
+        super().__init__(backlog)
+        self._write = write
+        self._index = 0
+
+    def feed(self, packet: Packet) -> None:
+        record = decode_raw_packet(packet, self._index + 1)
+        if not isinstance(record, NativeFrame) or record.rx_flags is not None:
+            msg = "unexpected extension in base Raw mode"
+            raise ProtocolError(msg)
+        self._index = record.capture_index
+        self._put(record)
+
+    async def _submit(self, selector: int, body: bytes | NativeMessage) -> None:
+        if self.closed:
+            raise ConnectionClosedError(_BASE_CLOSED)
+        await self._write(_send_record(selector, body))
+
+    async def submit(self, port: int, body: bytes | NativeMessage) -> None:
+        if port not in TN4_PORTS:
+            msg = f"invalid tN4 port {port}"
+            raise ValueError(msg)
+        await self._submit(port, body)
+
+    async def submit_all(self, body: bytes | NativeMessage) -> None:
+        await self._submit(_ALL_PORTS, body)
+
+    async def read(self) -> NativeFrame | CaptureGap:
+        try:
+            return await anext(self)
+        except StopAsyncIteration as err:
+            raise ConnectionClosedError(_BASE_CLOSED) from err
+
+
+class RawLink(Protocol):
+    """Low-level extended capture and per-port transmit completion."""
 
     @property
     def diagnostics(self) -> Mapping[int, PortDiagnostic]: ...
@@ -282,6 +334,12 @@ class BridgeStream(NativeReader, Protocol):
     def traffic(self) -> TrafficCounters: ...
     async def wait_transmit_idle(self, port: int) -> None: ...
     async def send(self, port: int, body: bytes | NativeMessage) -> TxResult: ...
+    async def read(self) -> CaptureRecord: ...
+
+
+class BridgeStream(RawLink, NativeReader, DeviceOperations, Protocol):
+    """Extended Raw link with addressed device operations."""
+
     async def read_status(
         self,
         port: int,
@@ -308,114 +366,15 @@ class BridgeStream(NativeReader, Protocol):
         timeout: float = 20,
         wait_for_edits: bool = False,
     ) -> NativeBlockBatch: ...
-    async def write_block(
-        self,
-        port: int,
-        query: NativeBlockQuery,
-        changes: Mapping[NativeField, int],
-        *,
-        source: NativeAddress,
-        expected_identity: NativeIdentity | None = None,
-        timeout: float = 20,
-        preview: bool = False,
-    ) -> NativeWriteResult: ...
-    async def read(self) -> CaptureRecord: ...
-    async def write_thermostat_mode(
-        self,
-        port: int,
-        target: NativeAddress,
-        mode: ThermostatMode,
-        *,
-        source: NativeAddress,
-        expected_identity: NativeIdentity | None = None,
-        timeout: float = 20,
-        preview: bool = False,
-    ) -> NativeWriteResult: ...
-    async def write_thermostat_target(
-        self,
-        port: int,
-        target: NativeAddress,
-        change: ThermostatTargetChange,
-        *,
-        source: NativeAddress,
-        expected_identity: NativeIdentity | None = None,
-        timeout: float = 20,
-        preview: bool = True,
-    ) -> NativeWriteResult: ...
-    async def write_snowmelt_setpoint(
-        self,
-        port: int,
-        target: NativeAddress,
-        block: SnowmeltBlock,
-        celsius: float | None,
-        *,
-        source: NativeAddress,
-        expected_identity: NativeIdentity | None = None,
-        expected_application: SnowmeltApplication | None = None,
-        timeout: float = 20,
-        preview: bool = True,
-    ) -> NativeWriteResult: ...
-    async def write_setpoint_target(
-        self,
-        port: int,
-        target: NativeAddress,
-        change: SetpointTargetChange,
-        *,
-        source: NativeAddress,
-        expected_identity: NativeIdentity | None = None,
-        timeout: float = 20,
-        preview: bool = True,
-    ) -> NativeWriteResult: ...
-    async def set_snowmelt_group(
-        self,
-        port: int,
-        target: NativeAddress,
-        operation: SnowmeltOperation,
-        *,
-        enabled: bool,
-        source: NativeAddress,
-        expected_identity: NativeIdentity | None = None,
-        expected_group: int | None = None,
-        expected_zone: int | None = None,
-        timeout: float = 20,
-        preview: bool = True,
-    ) -> SnowmeltGroupResult: ...
-    async def write_schedule_time(
-        self,
-        port: int,
-        target: ScheduleTarget,
-        change: ScheduleChange,
-        *,
-        source: NativeAddress,
-        expected_identity: NativeIdentity | None = None,
-        timeout: float = 20,
-        preview: bool = False,
-    ) -> NativeWriteResult: ...
-    async def configure_schedule(
-        self,
-        port: int,
-        target: ScheduleTarget,
-        change: ScheduleSetupChange,
-        *,
-        source: NativeAddress,
-        expected_binding: ScheduleBinding | None = None,
-        expected_config: ScheduleConfiguration | None = None,
-        expected_identity: NativeIdentity | None = None,
-        timeout: float = 20,
-        preview: bool = True,
-    ) -> ScheduleSetupResult: ...
 
 
-class RawDispatcher:
+class RawDispatcher(RawDeviceOperations):
     """One reader owns the wire. Each send owns exactly one port until TxResult."""
 
     def __init__(
         self,
         write: Callable[[bytes], Awaitable[None]],
         backlog: int,
-        *,
-        error_reporting: ErrorReporting | None = None,
-        traffic: TrafficCounters | None = None,
     ) -> None:
         if backlog < 1:
             msg = "capture backlog must be positive"
@@ -431,25 +390,24 @@ class RawDispatcher:
         self._lost = 0
         self._ready = asyncio.Event()
         self._active = False
-        self._error_reporting = error_reporting
-        self._traffic = traffic
+        self._management: BridgeManagement | None = None
         self._error: Exception | None = None
 
     @property
     def error_reporting(self) -> ErrorReporting:
         self._check_active()
-        if self._error_reporting is None:
+        if self._management is None:
             msg = "no management session attached to the Raw dispatcher"
             raise ProtocolError(msg)
-        return self._error_reporting
+        return self._management.error_reporting
 
     @property
     def traffic(self) -> TrafficCounters:
         self._check_active()
-        if self._traffic is None:
+        if self._management is None:
             msg = "no management session attached to the Raw dispatcher"
             raise ProtocolError(msg)
-        return self._traffic
+        return self._management.traffic
 
     def _check_active(self) -> None:
         if self._error is not None:
@@ -488,18 +446,17 @@ class RawDispatcher:
 
     async def _send(self, port: int, body: bytes | NativeMessage) -> TxResult:
         self._check_active()
-        if isinstance(body, NativeMessage):
-            body = body.to_bytes()
-        if port not in TN4_PORTS or len(body) != native_body_size(body):
-            msg = "expected a physical port and complete native frame"
+        if port not in TN4_PORTS:
+            msg = f"invalid tN4 port {port}"
             raise ValueError(msg)
+        data = _send_record(port, body)
         if port in self._pending:
             msg = f"send already in progress on port {port}"
             raise NativePortBusyError(msg)
         future: asyncio.Future[TxResult] = asyncio.get_running_loop().create_future()
         self._pending[port] = future
         try:
-            await self._write(bytes((CaptureEvent.NATIVE, port)) + bytes(4) + body)
+            await self._write(data)
             return await future
         except Exception as err:
             self.fail(err)
@@ -546,210 +503,6 @@ class RawDispatcher:
                 return await self._collect_blocks(port, query, source, timeout)
         self._check_no_edit(port)
         return await self._collect_blocks(port, query, source, timeout)
-
-    async def write_block(
-        self,
-        port: int,
-        query: NativeBlockQuery,
-        changes: Mapping[NativeField, int],
-        *,
-        source: NativeAddress,
-        expected_identity: NativeIdentity | None = None,
-        timeout: float = 20,
-        preview: bool = False,
-    ) -> NativeWriteResult:
-        """Read, optionally update once, then verify. The timeout is per exchange."""
-        patch = BlockPatch.from_fields(query.block_id, changes)
-        async with self._editor(
-            port,
-            query.target,
-            source,
-            timeout,
-            expected_identity=expected_identity,
-        ) as editor:
-            return await editor.write(query, patch, preview=preview)
-
-    async def write_thermostat_mode(
-        self,
-        port: int,
-        target: NativeAddress,
-        mode: ThermostatMode,
-        *,
-        source: NativeAddress,
-        expected_identity: NativeIdentity | None = None,
-        timeout: float = 20,
-        preview: bool = False,
-    ) -> NativeWriteResult:
-        async with self._editor(
-            port,
-            target,
-            source,
-            timeout,
-            expected_identity=expected_identity,
-        ) as editor:
-            return await editor.write_mode(target, mode, preview=preview)
-
-    async def write_thermostat_target(
-        self,
-        port: int,
-        target: NativeAddress,
-        change: ThermostatTargetChange,
-        *,
-        source: NativeAddress,
-        expected_identity: NativeIdentity | None = None,
-        timeout: float = 20,
-        preview: bool = True,
-    ) -> NativeWriteResult:
-        async with self._editor(
-            port,
-            target,
-            source,
-            timeout,
-            expected_identity=expected_identity,
-        ) as editor:
-            return await edit_thermostat_target(editor, target, change, preview=preview)
-
-    async def write_snowmelt_setpoint(
-        self,
-        port: int,
-        target: NativeAddress,
-        block: SnowmeltBlock,
-        celsius: float | None,
-        *,
-        source: NativeAddress,
-        expected_identity: NativeIdentity | None = None,
-        expected_application: SnowmeltApplication | None = None,
-        timeout: float = 20,
-        preview: bool = True,
-    ) -> NativeWriteResult:
-        """Preview or verify a stored slab target without enabling a group."""
-        async with self._editor(
-            port,
-            target,
-            source,
-            timeout,
-            expected_identity=expected_identity,
-        ) as editor:
-            return await edit_snowmelt_setpoint(
-                editor,
-                target,
-                block,
-                celsius,
-                expected_application=expected_application,
-                preview=preview,
-            )
-
-    async def write_setpoint_target(
-        self,
-        port: int,
-        target: NativeAddress,
-        change: SetpointTargetChange,
-        *,
-        source: NativeAddress,
-        expected_identity: NativeIdentity | None = None,
-        timeout: float = 20,
-        preview: bool = True,
-    ) -> NativeWriteResult:
-        """Preview or verify one stored target on the specified 161/162 application."""
-        async with self._editor(
-            port,
-            target,
-            source,
-            timeout,
-            expected_identity=expected_identity,
-        ) as editor:
-            return await edit_setpoint_target(editor, target, change, preview=preview)
-
-    async def set_snowmelt_group(
-        self,
-        port: int,
-        target: NativeAddress,
-        operation: SnowmeltOperation,
-        *,
-        enabled: bool,
-        source: NativeAddress,
-        expected_identity: NativeIdentity | None = None,
-        expected_group: int | None = None,
-        expected_zone: int | None = None,
-        timeout: float = 20,
-        preview: bool = True,
-    ) -> SnowmeltGroupResult:
-        """Read the binding, optionally broadcast once, then query the selected zone."""
-        async with self._editor(
-            port,
-            target,
-            source,
-            timeout,
-            expected_identity=expected_identity,
-        ) as editor:
-            return await apply_snowmelt_group(
-                editor,
-                lambda msg: self._send(port, msg),
-                lambda query: self._collect_status(
-                    port,
-                    query,
-                    source,
-                    target,
-                    timeout,
-                ),
-                target,
-                operation,
-                enabled=enabled,
-                expected_group=expected_group,
-                expected_zone=expected_zone,
-                preview=preview,
-            )
-
-    async def write_schedule_time(
-        self,
-        port: int,
-        target: ScheduleTarget,
-        change: ScheduleChange,
-        *,
-        source: NativeAddress,
-        expected_identity: NativeIdentity | None = None,
-        timeout: float = 20,
-        preview: bool = False,
-    ) -> NativeWriteResult:
-        """Verify ownership and grouping before updating one display event."""
-        async with self._editor(
-            port,
-            target.address,
-            source,
-            timeout,
-            expected_identity=expected_identity,
-        ) as editor:
-            return await edit_schedule_time(editor, target, change, preview=preview)
-
-    async def configure_schedule(
-        self,
-        port: int,
-        target: ScheduleTarget,
-        change: ScheduleSetupChange,
-        *,
-        source: NativeAddress,
-        expected_binding: ScheduleBinding | None = None,
-        expected_config: ScheduleConfiguration | None = None,
-        expected_identity: NativeIdentity | None = None,
-        timeout: float = 20,
-        preview: bool = True,
-    ) -> ScheduleSetupResult:
-        """Prepare or apply a weekly schedule using addressed Raw transactions."""
-        async with self._editor(
-            port,
-            target.address,
-            source,
-            timeout,
-            expected_identity=expected_identity,
-        ) as editor:
-            return await edit_schedule_setup(
-                editor,
-                target,
-                change,
-                expected_binding=expected_binding,
-                expected_config=expected_config,
-                preview=preview,
-            )
 
     @asynccontextmanager
     async def _editor(
@@ -800,12 +553,18 @@ class RawDispatcher:
                 frames.setdefault(frame.node & 31, frame)
             return len(frames) == count
 
-        result = await self._exchange(port, query.request(source), collect, timeout)
+        result, lost = await self._exchange(
+            port,
+            query.request(source),
+            collect,
+            timeout,
+        )
         return NativeBlockBatch(
             port,
             query,
             result,
-            tuple(frames[n] for n in sorted(frames)),
+            () if lost else tuple(frames[n] for n in sorted(frames)),
+            capture_lost=lost,
         )
 
     async def read_status(
@@ -844,7 +603,9 @@ class RawDispatcher:
     ) -> NativeStatusBatch:
         collector = StatusCollector(query, peer)
         request = NativeMessage.request_status(query, source=source)
-        result = await self._exchange(port, request, collector.observe, timeout)
+        result, lost = await self._exchange(port, request, collector.observe, timeout)
+        if lost:
+            return StatusCollector(query, peer).batch(port, result, capture_lost=True)
         return collector.batch(port, result)
 
     async def _exchange(
@@ -853,7 +614,7 @@ class RawDispatcher:
         request: NativeMessage,
         collect: Callable[[NativeFrame], bool],
         timeout: float | None,
-    ) -> TxResult | None:
+    ) -> tuple[TxResult | None, bool]:
         self._check_active()
         self._check_no_read(port)
         waiter = _ReportWaiter(collect, asyncio.get_running_loop().create_future())
@@ -874,7 +635,7 @@ class RawDispatcher:
                 waiter.done.cancel()
             elif not waiter.done.cancelled():
                 waiter.done.exception()
-        return result
+        return result, waiter.capture_lost
 
     def feed(self, packet: Packet) -> None:
         record = decode_raw_packet(packet, self._capture_index + 1)
@@ -892,9 +653,18 @@ class RawDispatcher:
             self._tx_changed[record.port].set()
         else:
             if isinstance(record, NativeFrame):
+                if record.rx_flags is None:
+                    msg = "extended Raw capture is missing RX flags"
+                    raise ProtocolError(msg)
                 self._capture_index = record.capture_index
-                if waiter := self._waiters.get(record.port):
+                if record.usable_for_state and (
+                    waiter := self._waiters.get(record.port)
+                ):
                     waiter.observe(record)
+            elif isinstance(record, GatewayTraceGap):
+                for port, waiter in self._waiters.items():
+                    if record.affects(port):
+                        waiter.gap()
             if len(self._records) == self._records.maxlen:
                 self._lost += 1
             self._records.append(record)
@@ -933,7 +703,8 @@ class RawDispatcher:
         self._ready.set()
 
     @contextmanager
-    def active(self) -> Iterator[None]:
+    def active(self, management: BridgeManagement | None = None) -> Iterator[None]:
+        self._management = management
         self._active = True
         try:
             yield
@@ -941,6 +712,7 @@ class RawDispatcher:
                 raise self._error
         finally:
             self._active = False
+            self._management = None
             for event in self._tx_changed.values():
                 event.set()
             self._ready.set()

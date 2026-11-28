@@ -7,20 +7,21 @@ from dataclasses import dataclass, replace
 from math import isfinite
 from typing import TYPE_CHECKING
 
+from ._capture import GatewayTraceGap
 from ._native_payloads import BLOCK_SELECTORS
 from ._native_payloads.water import MASTER_PRESENT
 from .constants import TN4_PORTS
 from .exceptions import ConnectionClosedError
 from .native import NativeAddress, NativeFrame, NativeMessage, NativeTargets
 from .native_identity import NativeIdentity
-from .normal_trace import GatewayTraceGap, NormalNativeSession, NormalPeerCapture
+from .normal_trace import NormalNativeSession, NormalPeerCapture
 from .raw import CaptureGap
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterable
 
     from ._native_payloads.io import IoEndpoint
-    from .raw import BridgeStream, CaptureRecord, TxResult
+    from .raw import CaptureRecord, RawLink, TxResult
 
 _REPORT = 0x2E7
 _MOVE = 0x3E7
@@ -68,7 +69,7 @@ class NativeInventory:
                     if frame.affects(key[0]):
                         del routes[key]
             return None
-        if not isinstance(frame, NativeFrame):
+        if not isinstance(frame, NativeFrame) or not frame.usable_for_state:
             return None
         node = frame.node & _NODE_BITS
         key = (frame.port, frame.subnet, node)
@@ -171,7 +172,7 @@ class _SubnetProbes:
 
     async def probe(
         self,
-        link: BridgeStream | NormalNativeSession,
+        link: RawLink | NormalNativeSession,
         port: int,
         sender: NativeAddress,
     ) -> None:
@@ -198,7 +199,7 @@ class _SubnetProbes:
 
 
 async def discover_native(
-    stream: BridgeStream | NormalPeerCapture | NormalNativeSession,
+    stream: RawLink | NormalPeerCapture | NormalNativeSession,
     *,
     duration: float = 30,
     source: NativeAddress | None = _HOST,
@@ -251,6 +252,7 @@ async def discover_native(
                 probes.lost(record)
             elif (
                 isinstance(record, NativeFrame)
+                and record.usable_for_state
                 and source is not None
                 and (
                     record.message_id == MASTER_PRESENT

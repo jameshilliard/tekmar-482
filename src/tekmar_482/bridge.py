@@ -26,16 +26,23 @@ from .management import (
     unpack_diagnostic,
 )
 from .packet import TYPE_TN4, TYPE_TRPC, Packet
-from .raw import PortDiagnostic, RawDispatcher
+from .raw import BaseRawDispatcher, PortDiagnostic, RawDispatcher
 from .tpck import TpckParser, serialize
 from .trpc import TrpcMethod, TrpcService
 from .wire_trace import current_observer
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Awaitable, Callable, Iterable, Iterator
+    from collections.abc import (
+        AsyncIterator,
+        Awaitable,
+        Callable,
+        Coroutine,
+        Iterable,
+        Iterator,
+    )
 
     from ._wire import Wire
-    from .raw import BridgeStream
+    from .raw import BaseRawStream, BridgeStream
 
 _DEFAULT_BAUD = 9600
 _LITERAL_RAW_SINCE = 3
@@ -56,6 +63,24 @@ class PanelState:
 
 class _NullCapabilitiesError(ProtocolError):
     """The extension request received the stock unknown-method reply."""
+
+
+async def _finish_transition(exchange: Coroutine[object, object, None]) -> None:
+    """Settle one bounded exchange before releasing the reader to a new dialect."""
+    task = asyncio.create_task(exchange)
+    cancelled = None
+    while not task.done():
+        try:
+            await asyncio.shield(task)
+        except asyncio.CancelledError as err:
+            cancelled = err
+        except Exception:  # noqa: BLE001
+            break  # Retrieve the exchange error below, unless the caller cancelled.
+    if cancelled is not None:
+        if not task.cancelled():
+            task.exception()
+        raise cancelled
+    task.result()
 
 
 class BridgeClient:
@@ -253,9 +278,11 @@ class BridgeClient:
         self,
         mode: BridgeMode,
         consume: Callable[[Packet], object] | None = None,
+        *,
+        extended: bool = False,
     ) -> None:
         raw = mode is BridgeMode.RAW
-        value = bytes((mode, _RAW_EXTENSIONS if raw else 0))
+        value = bytes((mode, _RAW_EXTENSIONS if extended else 0))
         if (
             await self._call(BridgeMethod.MODE, value, update=True, consume=consume)
             != value
@@ -298,6 +325,76 @@ class BridgeClient:
                 yield client
 
     @asynccontextmanager
+    async def _raw_mode(
+        self,
+        consume: Callable[[Packet], None],
+        *,
+        extended: bool,
+    ) -> AsyncIterator[None]:
+        if not self._features & BridgeFeature.RAW:
+            msg = "gateway did not advertise binary Raw support"
+            raise ProtocolError(msg)
+        entered = False
+
+        async def enter() -> None:
+            nonlocal entered
+            await self._set_mode(BridgeMode.RAW, extended=extended)
+            entered = True
+
+        try:
+            await _finish_transition(enter())
+            yield
+        except BaseException:
+            if (
+                entered
+                and not self._wire.reader.at_eof()
+                and not self._wire.writer.is_closing()
+            ):
+                with suppress(OSError, TekmarError):
+                    await _finish_transition(self._set_mode(BridgeMode.NORMAL, consume))
+            raise
+        else:
+            await _finish_transition(self._set_mode(BridgeMode.NORMAL, consume))
+
+    def _raw_client(
+        self,
+        feed: Callable[[Packet], None],
+        fail: Callable[[Exception], None],
+    ) -> Tekmar482Client:
+        async def receive_control() -> Packet:
+            # The tRPC session owns the only physical reader in both modes.
+            try:
+                while (packet := await self._next_packet()).type == TYPE_TN4:
+                    feed(packet)
+            except Exception as err:
+                fail(err)
+                raise
+            return packet
+
+        return Tekmar482Client(
+            _SessionTransport(receive_control, self._write_packet, self._wire),
+        )
+
+    @asynccontextmanager
+    async def base_stream(
+        self,
+        *,
+        capture_backlog: int = 512,
+    ) -> AsyncIterator[BaseRawStream]:
+        """Borrow the 485 base dialect: native capture and unconfirmed submissions."""
+        stream = BaseRawDispatcher(self._write_raw, capture_backlog)
+        client = self._raw_client(stream.feed, stream.finish)
+        async with (
+            self._transaction(),
+            self._raw_mode(stream.feed, extended=False),
+            client,
+        ):
+            try:
+                yield stream
+            finally:
+                stream.finish()
+
+    @asynccontextmanager
     async def stream(
         self,
         *,
@@ -311,53 +408,16 @@ class BridgeClient:
                 msg = f"invalid ACK port {port}"
                 raise ValueError(msg)
             ack_mask |= 1 << port
-        if not self._features & BridgeFeature.RAW:
-            msg = "gateway did not advertise binary Raw support"
-            raise ProtocolError(msg)
-
-        async def receive_control() -> Packet:
-            # The tRPC session owns the only physical reader in both modes.
-            try:
-                while (packet := await self._next_packet()).type == TYPE_TN4:
-                    stream.feed(packet)
-            except Exception as err:
-                stream.fail(err)
-                raise
-            return packet
-
-        client = Tekmar482Client(
-            _SessionTransport(receive_control, self._write_packet, self._wire),
-        )
-        management = BridgeManagement(client)
-        stream = RawDispatcher(
-            self._write_raw,
-            capture_backlog,
-            error_reporting=management.error_reporting,
-            traffic=management.traffic,
-        )
+        # The dispatcher and management share this client's one wire reader.
+        stream = RawDispatcher(self._write_raw, capture_backlog)
+        client = self._raw_client(stream.feed, stream.fail)
         async with self._transaction():
-            await self._set_mode(BridgeMode.RAW)
             try:
-                await self._set_byte(
-                    BridgeMethod.ACK_MASK,
-                    ack_mask,
-                    stream.feed,
-                )
-                with stream.active():
-                    async with client:
-                        yield stream
-            except BaseException:
-                # Restore the hardware mode when possible, without masking the
-                # original caller cancellation, disconnect or protocol error.
-                if (
-                    not self._wire.reader.at_eof()
-                    and not self._wire.writer.is_closing()
-                ):
-                    with suppress(OSError, TekmarError):
-                        await self._set_mode(BridgeMode.NORMAL, stream.feed)
-                raise
-            else:
-                await self._set_mode(BridgeMode.NORMAL, stream.feed)
+                async with self._raw_mode(stream.feed, extended=True):
+                    await self._set_byte(BridgeMethod.ACK_MASK, ack_mask, stream.feed)
+                    with stream.active(BridgeManagement(client)):
+                        async with client:
+                            yield stream
                 stream.check_drained()
                 if diagnostics:
                     for p in TN4_PORTS:

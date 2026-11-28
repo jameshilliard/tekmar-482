@@ -169,6 +169,19 @@ its inventory is not the same as the list of all native frame sources. See
 [Normal method coverage](https://github.com/jameshilliard/tekmar-482-firmware/blob/master/docs/normal-mode.md)
 before using other vendor client methods on custom firmware.
 
+Use `bridge.stream()` for extended Raw: it provides the low-level `RawLink`
+interface and typed device operations. Use `bridge.base_stream()` only when
+you need the 485 base format. Its `read()` returns native captures without
+RX flags; `submit(port, body)` and the atomic five-port `submit_all(body)`
+return after writing to the UART. The base profile has no transmit result.
+It cannot confirm that the gateway admitted a submission, let alone that a
+peer acted on it. Neither Raw profile changes a device setting on entry.
+
+Cancelling a Raw session during a mode change waits for the bounded
+handshake and restores Normal while the link is healthy. If the connection
+is lost before acknowledgement, reconnect and explicitly select Normal;
+closing a serial port does not reset the gateway.
+
 Custom Normal mode implements all 26 input method IDs in stock J1196J
 and acknowledges valid incoming tN4 frames, including on a single-peer
 line. It sends a startup probe on quiet ports and queries for a master
@@ -282,7 +295,7 @@ async with errors.watch([ErrorSource.PORT_1, ErrorSource.GATEWAY]) as reports:
         print(counter.source.name, counter.reason.name, counter.count)
 ```
 
-Custom bridge wire version 4 uses saturating 64-bit counters for capture
+Custom bridge wire version 5 uses saturating 64-bit counters for capture
 and trace drops, edge counts and panel events. They reset at gateway boot,
 not on a mode change. Application sessions reject older custom wire
 versions; only stock commands retain backward compatibility. Per-frame
@@ -481,8 +494,13 @@ arrives, even if the caller cancelled or timed out. There is no implicit retry.
 `stream.read()` delivers native frames, invalid captures, and non-terminal
 port errors in receive order. A slow consumer gets a `CaptureGap` with the
 number of oldest records dropped by the host; set `capture_backlog` on
-`bridge.stream()` to change the default of 512 records. Gateway drop counts
-are separate and available in `stream.diagnostics` after a normal exit.
+`bridge.stream()` to change the default of 512 records. A `GatewayTraceGap`
+in the same stream identifies the affected ports and the total records lost
+on the gateway. Watchers invalidate only those ports. A typed block or status
+read interrupted by such a gap sets `capture_lost` and discards partial
+replies. Timing-faulted frames remain visible in the trace but cannot confirm
+a read or update device state. Per-port lifetime totals are also available
+in `stream.diagnostics` after a clean exit. Base Raw has no gateway gap notice.
 
 ### Thermostat mode and demand
 

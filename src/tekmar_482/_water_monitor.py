@@ -268,7 +268,11 @@ class WaterMonitor:
                 if not record.affects(path[0])
             }
             return changed
-        if not isinstance(record, NativeFrame) or record.message_id not in _TRACKED:
+        if (
+            not isinstance(record, NativeFrame)
+            or not record.usable_for_state
+            or record.message_id not in _TRACKED
+        ):
             return False
         path = (record.port, NativeAddress(record.subnet, record.node & _NODE))
         data = record.message.payload

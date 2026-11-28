@@ -41,7 +41,7 @@ from tekmar_482.cli_native_watch import snow_fields, watch_all_from_args
 from tekmar_482.native_status import NativeStatusBatch
 from tekmar_482.raw import RawDispatcher
 from tests.native_fixtures import TEST_PATH as SITE
-from tests.native_fixtures import block, frame, identity
+from tests.native_fixtures import block, extended_rx, frame, identity
 
 SENSOR = SnowmeltAddress(SnowmeltRole.SENSOR, 3)
 ZONE = SnowmeltAddress(SnowmeltRole.ZONE, 3)
@@ -315,10 +315,7 @@ class SnowmeltWatchTests(unittest.IsolatedAsyncioTestCase):
 
     def rx(self, f: NativeFrame) -> None:
         self.stream.feed(
-            Packet(
-                1,
-                bytes([0, f.port]) + f.timestamp_ms.to_bytes(4, "little") + f.body,
-            ),
+            extended_rx(f),
         )
 
     def ack(self, port: int = SITE.port) -> None:

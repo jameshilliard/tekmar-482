@@ -57,7 +57,9 @@ class NativeWriteTests(unittest.IsolatedAsyncioTestCase):
 
     def report(self, body: bytes, *, support: int = 31, port: int = 1) -> None:
         msg = NativeMessage(0x2E7, _PEER, bytes([5, 0, support]) + body)
-        self.stream.feed(Packet(1, bytes([0, port, 7, 0, 0, 0]) + msg.to_bytes()))
+        self.stream.feed(
+            Packet(1, bytes([0, port, 7, 0, 0, 0]) + msg.to_bytes() + bytes(1)),
+        )
 
     async def expect_read(self, port: int = 1) -> None:
         async with asyncio.timeout(2):

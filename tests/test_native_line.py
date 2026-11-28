@@ -114,7 +114,7 @@ class GroupReadTests(unittest.IsolatedAsyncioTestCase):
             if (body := self.blocks.get(block)) is not None:
                 reply = NativeMessage(0x2E7, _PEER, cmd.payload[:2] + body)
                 self.stream.feed(
-                    Packet(1, bytes([0, 3, 0, 0, 0, 0]) + reply.to_bytes()),
+                    Packet(1, bytes([0, 3, 0, 0, 0, 0]) + reply.to_bytes() + bytes(1)),
                 )
 
     async def test_network_init_completes_from_link_result_without_an_inventory(
@@ -269,12 +269,20 @@ class GroupReadTests(unittest.IsolatedAsyncioTestCase):
                     writer.write(
                         ack
                         + serialize(
-                            Packet(1, bytes([0, 3, 0, 0, 0, 0]) + report.to_bytes()),
+                            Packet(
+                                1,
+                                bytes([0, 3, 0, 0, 0, 0])
+                                + report.to_bytes()
+                                + bytes(1),
+                            ),
                         ),
                     )
                 if confirm and expected == 5:
                     cmd = serialize(
-                        Packet(1, bytes.fromhex("0003 00000000 21f00002 0501")),
+                        Packet(
+                            1,
+                            bytes.fromhex("0003 00000000 21f00002 0501"),
+                        ),
                     )
                     assert await reader.readexactly(len(cmd)) == cmd
                     writer.write(ack)

@@ -766,7 +766,7 @@ class NativeState:
             self._air_groups = AirGroupTargets()
             self._water.observe(record)
             return changed
-        if not isinstance(record, NativeFrame):
+        if not isinstance(record, NativeFrame) or not record.usable_for_state:
             return ()
         if record.message_id == BLOCK_UPDATE:
             return self._configuration_update(record)

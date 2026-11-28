@@ -13,6 +13,7 @@ from functools import partial
 from math import isfinite
 from typing import TYPE_CHECKING, Any, TextIO
 
+from ._capture import GatewayTraceGap
 from ._native_payloads.climate import REMOTE_MODES, ThermostatMode
 from ._native_payloads.io import IoEndpoint
 from ._native_payloads.line import GROUP_IDS, SetpointApplication
@@ -89,7 +90,7 @@ from .native_state import NativeState
 from .native_target_edit import ThermostatTargetChange
 from .native_water import read_water
 from .native_write import NativeWriteStatus
-from .normal_trace import GatewayTraceGap, NormalNativeSession, NormalPeerCapture
+from .normal_trace import NormalNativeSession, NormalPeerCapture
 from .raw import CaptureGap, InvalidCapture, PortError, TxStatus
 from .trpc import (
     ResponseMatch,

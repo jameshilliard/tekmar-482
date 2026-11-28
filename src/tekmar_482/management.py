@@ -85,7 +85,7 @@ if TYPE_CHECKING:
     from .raw import NativeBlockBatch, TxResult
 
 _CAPABILITY_BYTES = 4
-_ROM_HANDOFF_WIRE_VERSIONS = frozenset({2, 3})
+_ROM_HANDOFF_WIRE_VERSIONS = frozenset({2, 3, 4})
 _LINK_RESULT_BYTES = 2  # physical port and link outcome
 _BUSY = b"\x01"
 _GATEWAY_SOURCE = NativeAddress(0, 0)

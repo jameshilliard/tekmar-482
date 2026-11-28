@@ -259,7 +259,7 @@ class WaterReadTests(unittest.IsolatedAsyncioTestCase):
 
     def feed(self, mid: int, data: bytes, port: int = 3) -> None:
         self.stream.feed(
-            Packet(1, bytes([0, port, 1, 0, 0, 0]) + _frame(mid, data).body),
+            Packet(1, bytes([0, port, 1, 0, 0, 0]) + _frame(mid, data).body + bytes(1)),
         )
 
     async def test_query_completion_does_not_stop_capture(self) -> None:
@@ -322,7 +322,7 @@ class WaterReadTests(unittest.IsolatedAsyncioTestCase):
             await self.tx.get()
             self.stream.feed(Packet(1, bytes([2, 3, 0])))
             body = _frame(0x3FF, b"\x25", peer=NativeAddress(0x25, 0)).body
-            self.stream.feed(Packet(1, bytes([0, 3, 1, 0, 0, 0]) + body))
+            self.stream.feed(Packet(1, bytes([0, 3, 1, 0, 0, 0]) + body + bytes(1)))
             sample = await task
         assert sample.master_queries[0].answered and not sample.block_reads
         assert not sample.sources[0].has_measurements and self.tx.empty()

@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from math import isfinite
 from typing import TYPE_CHECKING
 
+from ._capture import GatewayTraceGap
 from ._configuration_watch import ConfigurationReader
 from ._native_payloads.queries import NativeStatusQuery, StatusRequest
 from ._native_payloads.water import MASTER_PRESENT, SETUP_SLOTS
@@ -17,7 +18,6 @@ from .native import NativeAddress, NativeFrame
 from .native_plant import WaterSample
 from .native_plant_registers import has_plant_registers
 from .native_state import BLOCK_REPORT, TAKING_ADDRESS, NativePath, NativeState
-from .normal_trace import GatewayTraceGap
 from .raw import CaptureGap
 from .water_topology import water_systems
 
@@ -76,7 +76,7 @@ class _PortScan:
         if isinstance(record, CaptureGap):
             self._lost = True
             self._received.set()
-        if not isinstance(record, NativeFrame):
+        if not isinstance(record, NativeFrame) or not record.usable_for_state:
             self.reader.observe(record)
             return
         self._index = record.capture_index

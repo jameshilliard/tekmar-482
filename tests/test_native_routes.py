@@ -141,7 +141,7 @@ class RouteWatchTests(unittest.IsolatedAsyncioTestCase):
             identity(_THERMOSTAT, path=_FORWARDED),
             frame(0x3FF, b"", _MASTER),
         ):
-            stream.feed(Packet(1, bytes([0, f.port]) + bytes(4) + f.body))
+            stream.feed(Packet(1, bytes([0, f.port]) + bytes(4) + f.body + bytes(1)))
         output: list[object] = []
         assert await watch_all_from_args(stream, args, output.append) == 0
         routes = [

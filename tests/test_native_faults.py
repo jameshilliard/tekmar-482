@@ -1,14 +1,17 @@
 import asyncio
 import unittest
+from typing import TYPE_CHECKING
 
 from tekmar_482 import NativePath, NativeState, NetworkFault, SensorCircuit
 from tekmar_482.cli import build_parser
 from tekmar_482.cli_native_watch import watch_all_from_args
 from tekmar_482.decoding import decode_network_error, decoded_to_dict
-from tekmar_482.packet import Packet
 from tekmar_482.raw import CaptureGap, InvalidCapture, RawDispatcher
 
-from .native_fixtures import TEST_PATH, frame, identity
+from .native_fixtures import TEST_PATH, extended_rx, frame, identity
+
+if TYPE_CHECKING:
+    from tekmar_482.packet import Packet
 
 _MASTER = NativePath(0, TEST_PATH.subnet, 0)
 
@@ -71,10 +74,7 @@ class FaultWatchTests(unittest.IsolatedAsyncioTestCase):
             frame(0x3E7, bytes([TEST_PATH.subnet, TEST_PATH.node]), new),
         ):
             stream.feed(
-                Packet(
-                    1,
-                    bytes([0, f.port]) + f.timestamp_ms.to_bytes(4, "little") + f.body,
-                ),
+                extended_rx(f),
             )
         args = build_parser().parse_args(
             [

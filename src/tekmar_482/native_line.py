@@ -22,7 +22,7 @@ if TYPE_CHECKING:
     from ._native_payloads.line import ZoneSyncAdjustment
     from ._native_payloads.scenes import NativeScene
     from .native_identity import NativeIdentity
-    from .raw import BridgeStream
+    from .raw import BridgeStream, RawLink
 
 _HOST = NativeAddress(0, 0)
 _SETPOINT_SETUP = 0x26
@@ -134,7 +134,7 @@ class LineBroadcast:
 
     async def send(
         self,
-        stream: BridgeManagement | BridgeStream,
+        stream: BridgeManagement | RawLink,
         *,
         timeout: float = 20,
     ) -> tuple[BroadcastResult, ...]:

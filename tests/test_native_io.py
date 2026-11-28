@@ -33,7 +33,7 @@ from tekmar_482.cli_native_watch import io_fields, watch_all_from_args
 from tekmar_482.native_status import StatusCollector
 from tekmar_482.raw import CaptureRecord, RawDispatcher
 from tests.native_fixtures import TEST_PATH as PATH
-from tests.native_fixtures import block, frame, identity
+from tests.native_fixtures import block, extended_rx, frame, identity
 
 END = IoEndpoint(0x43, 0xA5)
 OTHER = IoEndpoint(0x43, 0x85)
@@ -296,10 +296,7 @@ class IoExchangeTests(unittest.IsolatedAsyncioTestCase):
 
     def rx(self, f: NativeFrame) -> None:
         self.stream.feed(
-            Packet(
-                1,
-                bytes([0, f.port]) + f.timestamp_ms.to_bytes(4, "little") + f.body,
-            ),
+            extended_rx(f),
         )
 
     def ack(self, port: int = PATH.port) -> None:
