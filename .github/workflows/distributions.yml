@@ -1,5 +1,9 @@
 name: Distributions
-on: [push, pull_request]
+on:
+  push:
+  pull_request:
+  release:
+    types: [published]
 
 permissions:
   contents: read
@@ -7,11 +11,22 @@ permissions:
 jobs:
   package:
     runs-on: ubuntu-latest
+    outputs:
+      sdist-id: ${{ steps.sdist.outputs.artifact-id }}
     steps:
       - uses: actions/checkout@v6
         with:
           submodules: true
+          persist-credentials: false
       - uses: astral-sh/setup-uv@v8.2.0
+      - name: Check the release tag against the package version
+        if: github.event_name == 'release'
+        run: |
+          expected="v$(uv version --short)"
+          if [[ "$GITHUB_REF_NAME" != "$expected" ]]; then
+            printf 'Expected release tag %s, got %s\n' "$expected" "$GITHUB_REF_NAME" >&2
+            exit 1
+          fi
       - name: Install Arm binutils
         run: sudo apt-get update && sudo apt-get install -y binutils-arm-none-eabi
       - name: Verify host decoders against the submodule
@@ -26,7 +41,25 @@ jobs:
           uv run --isolated --no-project --with "$GITHUB_WORKSPACE"/dist/*.tar.gz python -c \
             'import sys; from tekmar_482 import FirmwareBundle; assert FirmwareBundle.load().revision == sys.argv[1]' \
             "$(git -C "$GITHUB_WORKSPACE/firmware" rev-parse HEAD)"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
+        id: sdist
         with:
           name: python-sdist
           path: dist/*.tar.gz
+          if-no-files-found: error
+
+  publish:
+    if: github.event_name == 'release'
+    needs: package
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+      url: https://pypi.org/project/tekmar-482/
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          artifact-ids: ${{ needs.package.outputs.sdist-id }}
+          path: dist
+      - uses: pypa/gh-action-pypi-publish@release/v1

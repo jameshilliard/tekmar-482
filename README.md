@@ -1717,7 +1717,14 @@ fixtures.
 
 ## Home Assistant integration shape
 
-The library is designed for a Home Assistant integration to create a
+With custom firmware, run one `NativeMonitor` per config entry in Normal
+mode. `await monitor.wait_for_change(revision)` provides push notifications
+for new observations and connection loss. Read `monitor.state` for the
+current native snapshot and use `monitor.management` for explicit, guarded
+device actions on the same connection. Cancel the monitor task when unloading
+the entry. The monitor does not flash the gateway or change its bridge mode.
+
+For explicitly selected stock firmware, create a
 `Tekmar482Controller` during config-entry setup and use its callbacks to feed a
 push-only `DataUpdateCoordinator`:
 
@@ -1792,3 +1799,16 @@ make -C firmware image
 TEKMAR_TEST_FLASH_IMAGE=firmware/target/thumbv4t-none-eabi/release/tekmar-482-firmware.bin \
     uv run python -m unittest -v tests.test_firmware_interop
 ```
+
+## Releases
+
+Before the first upload, register a [PyPI Trusted Publisher](https://docs.pypi.org/trusted-publishers/creating-a-project-through-oidc/)
+for this repository, workflow `distributions.yml`, and GitHub environment
+`pypi`. Restrict that environment to release tags and review publishing access
+before creating a release.
+
+Publish a GitHub Release from a tested commit with tag `v<project.version>`
+(for example, `v0.1.0`). CI checks the tag, builds and installs the source
+archive with the pinned firmware, and publishes that same archive to PyPI.
+Pushes and pull requests only build and verify the artifact. They cannot
+publish a package.
