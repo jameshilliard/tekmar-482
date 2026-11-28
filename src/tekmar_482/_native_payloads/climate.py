@@ -344,5 +344,4 @@ class AirGroupTargets:
             return None
         if gate == denied or chosen.flags & 0xc0 or chosen.target_raw == 0:
             return None
-        # The master always supplies the selector in the heat-side flags.
-        return AirTarget(kind, heat.setback if heat else chosen.setback, chosen.target_raw)
+        return AirTarget(kind, chosen.setback, chosen.target_raw)

@@ -101,6 +101,29 @@ class StateTests(unittest.TestCase):
         assert reading["mode_raw"] == 250 and reading["mode"] is None
         assert reading["air_timestamp_ms"] == 1
 
+    def test_master_cooling_target_tracks_the_cooling_period(self) -> None:
+        state = NativeState()
+        state.observe(identity(105102))
+        stored = block(6, bytes.fromhex("1f 30 30 32 34 36"))
+        state.observe(stored)
+        for payload, setback, raw in (
+            ("01 00 05 28 0006 0b 32 0006 00 0000", 2, 50),
+            ("01 00 05 28 0006 0f 34 0006 00 0000", 3, 52),
+        ):
+            state.observe(frame(0x377, bytes.fromhex(payload)))
+            (device,) = state.thermostats
+            assert device.active_air_target == AirTarget(
+                ThermostatTarget.COOL,
+                setback,
+                raw,
+            )
+            assert state.block(_PATH, 6) is stored  # A period change is not an edit.
+
+        state.observe(
+            frame(0x377, bytes.fromhex("01 00 05 28 0006 0f 36 0006 00 0000")),
+        )
+        assert state.block(_PATH, 6) is None
+
     def test_air_group_configuration_is_separate_from_confirmed_setup(self) -> None:
         state = NativeState()
         state.observe(identity())
