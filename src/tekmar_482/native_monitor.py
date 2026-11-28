@@ -23,6 +23,8 @@ if TYPE_CHECKING:
     from .normal_trace import NormalNativeSession
     from .raw import CaptureRecord
 
+_LINK_LOSS = (ConnectionClosedError, OSError)
+
 
 class NativeMonitor:
     """Maintain native state and a shared Normal command channel across reconnects."""
@@ -93,7 +95,7 @@ class NativeMonitor:
             while True:
                 try:
                     await self._watch_connection()
-                except (ConnectionClosedError, OSError) as err:
+                except _LINK_LOSS as err:
                     self._last_error = err
                 except Exception as err:
                     self._last_error = err
@@ -134,7 +136,12 @@ class NativeMonitor:
             self._management = manager
             self._last_error = None
             self._publish()
-            await self._watch_peers(link)
+            try:
+                await self._watch_peers(link)
+            except _LINK_LOSS:
+                # A lost session cannot restore its saved trace mask.
+                await client.close()
+                raise
 
     async def _watch_peers(self, link: NormalNativeSession) -> None:
         loop = asyncio.get_running_loop()

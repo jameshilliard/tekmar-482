@@ -385,7 +385,8 @@ class NativeMonitorTests(unittest.IsolatedAsyncioTestCase):
             revision = monitor.revision
             await first.exchange(_CAP, _SUPPORT)
             await first.exchange(_TRACE, "040bf04b5400" + _COUNTS)
-            await first.restore()
+            # The restarted gateway does not own the previous trace mask.
+            assert await first.reader.read(1) == b""
             await monitor.wait_for_change(revision)
             assert monitor.management is None and not monitor.state.paths
             assert not previous.paths
@@ -396,7 +397,6 @@ class NativeMonitorTests(unittest.IsolatedAsyncioTestCase):
             second.report(identity(200004))
             await wait_for_product(monitor, 200004)
             assert monitor.management is not manager and monitor.last_error is None
-            assert await first.reader.read() == b""
             with self.assertRaises(ConnectionClosedError):
                 await manager.capabilities()
             running.cancel()
@@ -421,7 +421,8 @@ class NativeMonitorTests(unittest.IsolatedAsyncioTestCase):
             revision = monitor.revision
             await first.expect(_CAP)
             # No reply and no EOF, as with a powered-off gateway behind serial.
-            await first.restore()
+            # No restore request or extra request timeout on the dead link.
+            assert await first.reader.read(1) == b""
             await monitor.wait_for_change(revision)
             assert monitor.management is None and not monitor.state.paths
             self.assertIsInstance(monitor.last_error, TimeoutError)

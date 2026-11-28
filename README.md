@@ -1121,9 +1121,10 @@ firmware that explicitly rejects the required protocol is not retried.
 If no peer trace arrives for `idle_check_interval` (15 seconds by default),
 the monitor checks the gateway's trace subscription on the host link. This
 detects a gateway reboot even when the USB adapter or TCP bridge stays
-connected. A missing subscription or response makes the monitor reopen
-the link and rebuild state. This check never sends on a tN4 line, including
-when the monitor is passive.
+connected. A missing subscription or response makes the monitor discard
+the old state and reopen the link without trying to restore the old trace
+mask on the lost session. This check never sends on a tN4 line, including
+when the monitor is passive. A normal stop still restores its saved mask.
 An active monitor also checks a port when its first addressable peer is
 observed without a MasterPresent header. The one MasterQuery uses the
 same per-port queue as other reads; a quiet line does not cause polling.
