@@ -1484,6 +1484,12 @@ async with Tekmar482Client.serial_url("socket://192.0.2.10:3001") as client:
 
 ## Session dispatcher
 
+Normal report subscriptions retain up to 512 reports by default.
+`client.reports(max_queue_size=n)` sets a different bound; zero explicitly
+opts into unbounded buffering. On overflow, that subscriber receives its
+retained reports in order, then raises `ReportOverflowError`. Refresh state
+and resubscribe; other subscribers and outstanding commands are unaffected.
+
 Queued commands belong to the connection on which they were submitted. Closing
 and reopening the client does not replay writes from the previous connection.
 Closing cannot undo a write the gateway has already received.

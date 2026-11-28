@@ -21,6 +21,10 @@ class TransportError(TekmarError):
     """Raised when a transport cannot read or write data."""
 
 
+class ReportOverflowError(TekmarError):
+    """A report subscriber fell behind. Refresh state before resubscribing."""
+
+
 class ConnectionClosedError(TransportError):
     """Raised when the remote endpoint closes the connection."""
 

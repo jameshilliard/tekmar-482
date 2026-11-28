@@ -5,6 +5,7 @@ from tekmar_482 import (
     ConnectionClosedError,
     NullTransport,
     Packet,
+    ReportOverflowError,
     ResponseMatch,
     Tekmar482Client,
     Tekmar482Session,
@@ -921,6 +922,33 @@ class SessionTest(unittest.IsolatedAsyncioTestCase):
             with self.assertRaisesRegex(ConnectionClosedError, "reader failed"):
                 await asyncio.wait_for(anext(reports), timeout=1)
             assert await asyncio.wait_for(reports.next_event(), timeout=1) is None
+
+    async def test_report_overflow_is_explicit_and_isolated_including_replay(
+        self,
+    ) -> None:
+        transport = NullTransport()
+        async with Tekmar482Session(transport) as session, asyncio.timeout(2):
+            async with (
+                session.reports(max_queue_size=1) as slow,
+                session.reports() as fast,
+            ):
+                for value in (1500, 1501, 1502):
+                    transport.queue_packet(
+                        report(
+                            TrpcMethod.CURRENT_TEMPERATURE,
+                            address=1,
+                            temp=value,
+                        ).to_packet(),
+                    )
+                    assert (await anext(fast)).body["temp"] == value
+                assert (await anext(slow)).body["temp"] == 1500
+                with self.assertRaises(ReportOverflowError):
+                    await anext(slow)
+                assert await slow.next_event() is None
+            async with session.reports(max_queue_size=1, replay_backlog=True) as replay:
+                with self.assertRaises(ReportOverflowError):
+                    list(replay.drain())
+                assert await replay.next_event() is None
 
     async def test_subscription_eof_wakes_all_readers_and_persists(self) -> None:
         async with Tekmar482Session(NullTransport()) as session, asyncio.timeout(1):

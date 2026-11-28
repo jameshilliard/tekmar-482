@@ -13,7 +13,12 @@ from typing import TYPE_CHECKING, Self
 
 from ._bridge_diagnostics import ERROR_REPORTING_METHOD
 from .constants import TN4_PORTS, ThaSetback, ThaValue
-from .exceptions import ConnectionClosedError, InventoryDrainTimeoutError, ProtocolError
+from .exceptions import (
+    ConnectionClosedError,
+    InventoryDrainTimeoutError,
+    ProtocolError,
+    ReportOverflowError,
+)
 from .packet import TYPE_TRPC
 from .trpc import (
     AddressFields,
@@ -42,6 +47,7 @@ type _ReportItem = ReportEvent | BaseException | None
 _SESSION_NOT_OPEN = "tekmar 482 session is not open"
 _SESSION_CLOSED = "tekmar 482 session closed"
 _INVENTORY_DRAIN_TIMEOUT = 5
+DEFAULT_REPORT_BACKLOG = 512
 
 LOGGER = logging.getLogger(__name__)
 
@@ -137,6 +143,9 @@ class ReportSubscription:
         """Drain queued messages with their original command context."""
         while not self._queue.empty():
             item = self._queue.get_nowait()
+            if isinstance(item, BaseException):
+                self._queue.put_nowait(None)
+                raise item
             if not isinstance(item, tuple):
                 self._queue.put_nowait(item)
                 break
@@ -710,24 +719,30 @@ class Tekmar482Session:
     def reports(
         self,
         *,
-        max_queue_size: int = 0,
+        max_queue_size: int = DEFAULT_REPORT_BACKLOG,
         replay_backlog: bool = False,
         include_matched: frozenset[int] = frozenset(),
         predicate: MessagePredicate | None = None,
     ) -> ReportSubscription:
-        """Subscribe in wire order. The optional message predicate must not block."""
+        """Subscribe in wire order; overflow ends this subscriber. Zero is unbounded."""
+        if max_queue_size < 0:
+            msg = "report backlog cannot be negative"
+            raise ValueError(msg)
+        # Reserve one slot for EOF or an error after the last retained report.
         queue: asyncio.Queue[_ReportItem] = asyncio.Queue(
-            maxsize=max_queue_size,
+            maxsize=max_queue_size + 1 if max_queue_size else 0,
         )
         if self._reader_error is not None:
             self._put_report_item(queue, self._reader_error)
             return ReportSubscription(queue, lambda: None)
 
+        self._report_queues[queue] = (include_matched, predicate)
         if replay_backlog:
             for message in self._message_backlog:
-                if predicate is None or predicate(message):
-                    self._put_report_item(queue, (message, None))
-        self._report_queues[queue] = (include_matched, predicate)
+                if (
+                    predicate is None or predicate(message)
+                ) and not self._put_report_item(queue, (message, None)):
+                    break
         return ReportSubscription(queue, lambda: self._unsubscribe_reports(queue))
 
     @contextmanager
@@ -1275,18 +1290,25 @@ class Tekmar482Session:
         self,
         queue: asyncio.Queue[_ReportItem],
         item: _ReportItem,
-    ) -> None:
-        try:
-            queue.put_nowait(item)
-        except asyncio.QueueFull:
-            with suppress(asyncio.QueueEmpty):
-                queue.get_nowait()
-            with suppress(asyncio.QueueFull):
-                queue.put_nowait(item)
+    ) -> bool:
+        if (
+            isinstance(item, tuple)
+            and queue.maxsize
+            and queue.qsize() >= queue.maxsize - 1
+        ):
+            self._report_queues.pop(queue, None)
+            queue.put_nowait(
+                ReportOverflowError(
+                    "report backlog exceeded; refresh state and resubscribe",
+                ),
+            )
+            return False
+        queue.put_nowait(item)
+        return True
 
     def _unsubscribe_reports(
         self,
         queue: asyncio.Queue[_ReportItem],
     ) -> None:
-        self._report_queues.pop(queue, None)
-        self._put_report_item(queue, None)
+        if self._report_queues.pop(queue, None) is not None:
+            self._put_report_item(queue, None)

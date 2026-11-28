@@ -32,7 +32,7 @@ from .models import (
     GatewayInfo,
     GatewaySnapshot,
 )
-from .session import Tekmar482Session
+from .session import DEFAULT_REPORT_BACKLOG, Tekmar482Session
 from .transport import (
     RawTcpTpckTransport,
     SerialxTpckTransport,
@@ -401,7 +401,7 @@ class Tekmar482Client:
     def reports(
         self,
         *,
-        max_queue_size: int = 0,
+        max_queue_size: int = DEFAULT_REPORT_BACKLOG,
         replay_backlog: bool = False,
         include_matched: frozenset[int] = frozenset(),
     ) -> ReportSubscription:
