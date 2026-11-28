@@ -8,8 +8,10 @@ from tekmar_482 import (
     NativeIdentity,
     NativeInventory,
     NativeMessage,
+    NativePath,
     NativeSnapshot,
     Packet,
+    TargetSlot,
     TxStatus,
     read_native_devices,
     read_native_snapshot,
@@ -156,6 +158,35 @@ class NativeSnapshotTests(unittest.IsolatedAsyncioTestCase):
             for r in climate.equipment.runtimes
             if r.hours is not None
         ] == [(0x99, 0x5678)]
+
+    async def test_553_snapshot_queries_verified_operating_policy(self) -> None:
+        self.identities = {2: (105102, 1222)}
+        self.block_fields = {
+            0x0B: bytes.fromhex("13 02 4a 39"),
+            0x0C: bytes.fromhex("01 20"),
+            0xA7: bytes.fromhex("01 09"),
+            0xA9: bytes.fromhex("09 00ff"),
+            0xAF: bytes.fromhex("01 00"),
+        }
+        path = NativePath(3, 0x27, 2)
+        async with self.stream.receiving(self.rx.get), asyncio.timeout(2):
+            batches = await read_native_devices(
+                self.stream,
+                [NativeDevice(path.port, path.address)],
+            )
+        requested = {b for _, _, b, _, _ in self.requests}
+        assert {0x0B, 0x0C, 0xA7, *range(0xA9, 0xB0)} <= requested
+        assert not {0xA6, 0xB0}.intersection(requested)
+        ((reported_path, policy),) = NativeSnapshot(batches, ()).operating_policies
+        assert reported_path == path
+        assert policy.warm_shutdown and policy.warm_shutdown.raw(TargetSlot.SLEEP) == 57
+        assert policy.cold_shutdown and policy.cold_shutdown.raw(TargetSlot.WAKE) == 32
+        assert (
+            policy.balance_point and policy.balance_point.raw(TargetSlot.SLEEP) == 255
+        )
+        assert policy.cool_purge_minutes == 9
+        assert policy.unoccupied_humidity_raw == 0
+        assert policy.humidity_differential_raw is None
 
     async def test_unknown_model_and_reused_address_do_not_inherit_candidates(
         self,

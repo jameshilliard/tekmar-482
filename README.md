@@ -553,6 +553,15 @@ retains equipment reports it observes but does not poll these registers.
 `adjustments.onboard_humidity_enabled` is a separate read of sensor selection,
 not proof of a live sample or of enabled humidification or dehumidification.
 
+On the 553, the device scan also reads the verified weather-shutdown,
+heat-pump balance point, cooling purge and unoccupied humidity blocks.
+Inspect `snapshot.operating_policies` or `state.operating_policy(path)`.
+Thresholds use `TargetSlot`, with missing slots left unknown. Apart from
+cooling purge minutes, these settings retain raw octets rather than
+guessing units or Off values. They do not say whether shutdown is active;
+use the separate `state.line_report(path, LineReportKind.WWSD)` for that.
+`watch-native` also displays policy reports it sees without polling for them.
+
 ### Thermostat sensors
 
 ```bash

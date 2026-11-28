@@ -548,6 +548,44 @@ class FirmwareInteropTests(unittest.IsolatedAsyncioTestCase):
                 (0x9A, 0),
             ]
 
+    async def test_operating_policy_blocks_through_normal_firmware(self) -> None:
+        script = tuple(
+            _block(3, "23 10000000", block, report)
+            for block, report in (
+                ("0000", "6e723149 00003f 8e9a01 c60403"),
+                ("0b00", "6e723149 0b0013 02 4a aabb 39 cc"),
+                ("0c00", "6e723144 0c0001 20"),
+                ("a900", "6e723145 a90009 00ff"),
+                ("aa00", "6e723144 aa0001 fe"),
+                ("ad00", "6e723144 ad0001 05"),
+            )
+        )
+        async with _gateway(script) as manager:
+            batches = [
+                await manager.read_block_group(3, NativeBlockQuery(_THERMOSTAT, b))
+                for b in (0, 0x0B, 0x0C, 0xA9, 0xAA, 0xAD)
+            ]
+            assert all(not batch.missing_nodes for batch in batches)
+            ((path, policy),) = NativeSnapshot(tuple(batches), ()).operating_policies
+            assert path == NativePath(3, _THERMOSTAT.subnet, _THERMOSTAT.node)
+            assert policy.shutdown_source_raw == 2
+            assert policy.warm_shutdown and policy.warm_shutdown.slots == (
+                74,
+                None,
+                None,
+                57,
+                None,
+            )
+            assert (
+                policy.cold_shutdown and policy.cold_shutdown.raw(TargetSlot.WAKE) == 32
+            )
+            assert (
+                policy.balance_point and policy.balance_point.raw(TargetSlot.WAKE) == 0
+            )
+            assert policy.balance_point.raw(TargetSlot.SLEEP) == 255
+            assert policy.balance_point_schedule_raw == 254
+            assert policy.compressor_during_backup_raw == 5
+
     async def test_watch_resumes_busy_wire_after_an_abandoned_firmware_read(
         self,
     ) -> None:

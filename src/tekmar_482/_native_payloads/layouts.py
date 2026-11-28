@@ -18,6 +18,23 @@ class LinkCounterBlock(IntEnum):
     RECEIVED_MESSAGES = 0x62
 
 
+class OperatingPolicyBlock(IntEnum):
+    """Addressed weather, heat-pump and humidity settings."""
+
+    WARM_SHUTDOWN = 0x0b
+    COLD_SHUTDOWN = 0x0c
+    HEAT_PUMP_CYCLES = 0xa6
+    COOL_PURGE = 0xa7
+    BALANCE_POINT = 0xa9
+    BALANCE_POINT_SCHEDULE = 0xaa
+    W1_WARM_SHUTDOWN = 0xab
+    W2_LOCKOUT = 0xac
+    COMPRESSOR_DURING_BACKUP = 0xad
+    BASELOAD = 0xae
+    UNOCCUPIED_HUMIDITY = 0xaf
+    HUMIDITY_DIFFERENTIAL = 0xb0
+
+
 class SnowmeltBlock(IntEnum):
     """Addressed native blocks, not zone-status keys or tRPC methods."""
 
@@ -98,8 +115,8 @@ FIXED_BLOCKS: dict[int, FixedLayout] = {
     0x08: _octets("fan_stage_flags", "fan_ventilation_flags", "minimum_heating_coil_temp_raw",
                   "maximum_cooling_coil_temp_raw", "fan_delay", "fan_purge", "heating_purge", "cooling_purge"),
     FILTER_DATA: (("filter_replacement_interval", 2), ("time_since_filter_replacement", 2)),
-    0x0b: _octets("shutdown_source") + _setbacks("warm_weather_shutdown"),
-    0x0c: _setbacks("cold_weather_shutdown"),
+    OperatingPolicyBlock.WARM_SHUTDOWN: _octets("shutdown_source") + _setbacks("warm_weather_shutdown"),
+    OperatingPolicyBlock.COLD_SHUTDOWN: _setbacks("cold_weather_shutdown"),
     0x0e: _octets("away_period", "hold_period", "permanent_scene_1", "permanent_scene_4",
                   "permanent_scene_5", "temporary_scene_7", "temporary_scene_8", "scenes_enabled"),
     0x14: _octets("access_level", "units", "backlight", "time_format", "dst_mode", "exercise_enable"),
@@ -192,17 +209,17 @@ FIXED_BLOCKS: dict[int, FixedLayout] = {
     0x98: (("heat_pump_number", 1), ("heat_pump_hours", 2)),
     **{block: ((f"{output}_hours", 2),)
        for block, output in zip(TERMINAL_RUNTIME_BLOCKS, _TERMINAL_RUNTIMES, strict=True)},
-    0xa6: _octets("heat_pump_cycles"),
-    0xa7: _octets("cool_purge_minutes"),
+    OperatingPolicyBlock.HEAT_PUMP_CYCLES: _octets("heat_pump_cycles"),
+    OperatingPolicyBlock.COOL_PURGE: _octets("cool_purge_minutes"),
     ONBOARD_HUMIDITY_SETUP: _octets("onboard_humidity_sensor_enabled"),
-    0xa9: _setbacks("balance_point"),
-    0xaa: _octets("balance_point_schedule_id"),
-    0xab: _octets("w1_warm_weather_shutdown_raw"),
-    0xac: _octets("w2_lockout_target_raw"),
-    0xad: _octets("y_during_w2_mode"),
-    0xae: _octets("baseload_mode"),
-    0xaf: _octets("unoccupied_humidity_enabled"),
-    0xb0: _octets("humidity_differential_raw"),
+    OperatingPolicyBlock.BALANCE_POINT: _setbacks("balance_point"),
+    OperatingPolicyBlock.BALANCE_POINT_SCHEDULE: _octets("balance_point_schedule_id"),
+    OperatingPolicyBlock.W1_WARM_SHUTDOWN: _octets("w1_warm_weather_shutdown_raw"),
+    OperatingPolicyBlock.W2_LOCKOUT: _octets("w2_lockout_target_raw"),
+    OperatingPolicyBlock.COMPRESSOR_DURING_BACKUP: _octets("y_during_w2_mode"),
+    OperatingPolicyBlock.BASELOAD: _octets("baseload_mode"),
+    OperatingPolicyBlock.UNOCCUPIED_HUMIDITY: _octets("unoccupied_humidity_enabled"),
+    OperatingPolicyBlock.HUMIDITY_DIFFERENTIAL: _octets("humidity_differential_raw"),
     SnowmeltBlock.ZONE_ID: (("zone_id", 1),),
     SnowmeltBlock.SENSOR_ID: (("sensor_id", 1),),
     SnowmeltBlock.MELT_GROUP: (("melt_group_id", 1),),

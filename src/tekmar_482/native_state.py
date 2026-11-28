@@ -20,7 +20,7 @@ from ._native_payloads.climate import (
 )
 from ._native_payloads.codec import Reader, ShortPayload
 from ._native_payloads.io import IoEndpoint
-from ._native_payloads.layouts import MULTI_WEEK
+from ._native_payloads.layouts import MULTI_WEEK, OperatingPolicyBlock
 from ._native_payloads.line import GroupReport, LineReportKind
 from ._native_payloads.queries import StatusRequest
 from ._native_payloads.schedules import SCHEDULE_STATUS
@@ -40,6 +40,7 @@ from .native_calendar import (
 )
 from .native_identity import NativeIdentity
 from .native_io import IoBook, IoDirectory, IoDirectoryRead
+from .native_operating_policy import NativeOperatingPolicy
 from .native_peer_link import PeerLinkCounters
 from .native_plant_registers import (
     PLANT_REGISTERS,
@@ -338,6 +339,22 @@ class NativeState:
             if (counters := self.peer_link_counters(p)) is not None
         )
 
+    def operating_policy(self, path: NativePath) -> NativeOperatingPolicy | None:
+        """Return configured settings for this path, not the line's active state."""
+        if peer := self._peers.get(path):
+            return NativeOperatingPolicy.from_reports(peer.blocks)
+        return None
+
+    @property
+    def operating_policies(
+        self,
+    ) -> tuple[tuple[NativePath, NativeOperatingPolicy], ...]:
+        return tuple(
+            (path, policy)
+            for path in sorted(self._peers)
+            if (policy := self.operating_policy(path)) is not None
+        )
+
     @property
     def paths(self) -> tuple[NativePath, ...]:
         water = (
@@ -619,6 +636,7 @@ class NativeState:
             and block not in PLANT_REGISTERS
             and block not in SETPOINT_BLOCKS
             and block not in OUTPUT_RUNTIME_BLOCKS
+            and block not in OperatingPolicyBlock
         ) or "truncated" in frame.decoded:
             return ()
         target = NativePath(frame.port, data[0], data[1] & _NODE)
@@ -629,7 +647,7 @@ class NativeState:
         if block in SETPOINT_BLOCKS:
             peer.setpoint.invalidate(block)
             return (target,)
-        if block in OUTPUT_RUNTIME_BLOCKS:
+        if block in OUTPUT_RUNTIME_BLOCKS or block in OperatingPolicyBlock:
             return (target,) if peer.blocks.pop((block, None), None) is not None else ()
         if block in PLANT_REGISTERS:
             spec = BLOCK_SELECTORS.get(block)

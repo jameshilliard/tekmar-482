@@ -23,6 +23,7 @@ if TYPE_CHECKING:
     from ._observation import ObservationStream
     from .native_calendar import NativeCalendar
     from .native_io import IoDirectory
+    from .native_operating_policy import NativeOperatingPolicy
     from .native_peer_link import PeerLinkCounters
     from .native_plant_registers import PlantRegisters
     from .native_routes import NativeDeviceRoutes
@@ -229,10 +230,11 @@ async def snow_group_from_args(
     )
 
 
-class _PeerDiagnosticsChanges:
+class _PeerDetailsChanges:
     def __init__(self) -> None:
         self.faults: dict[NativePath, NativeFaultReport] = {}
         self.links: dict[NativePath, PeerLinkCounters] = {}
+        self.policies: dict[NativePath, NativeOperatingPolicy] = {}
 
     def emit(
         self,
@@ -252,6 +254,12 @@ class _PeerDiagnosticsChanges:
             emit({"peer_link_counters": {**asdict(path), **asdict(link)}})
         elif link is None and self.links.pop(path, None) is not None:
             emit({"peer_link_counters_removed": asdict(path)})
+        policy = state.operating_policy(path)
+        if policy is not None and self.policies.get(path) != policy:
+            self.policies[path] = policy
+            emit({"operating_policy": {**asdict(path), **asdict(policy)}})
+        elif policy is None and self.policies.pop(path, None) is not None:
+            emit({"operating_policy_removed": asdict(path)})
 
 
 def _watch_selection(
@@ -274,12 +282,12 @@ async def watch_all_from_args(
     previous_plants: dict[NativePath, PlantRegisters] = {}
     previous_setpoints: dict[NativePath, NativeSetpointControl] = {}
     previous_io: dict[NativePath, tuple[str | None, tuple[IoDirectory, ...]]] = {}
-    diagnostics = _PeerDiagnosticsChanges()
+    details = _PeerDetailsChanges()
     network = _NetworkChanges((args.ports or ()) if args.shared_network else ())
 
     def changed(path: NativePath, state: NativeState) -> None:
         network.emit(path, state, emit)
-        diagnostics.emit(path, state, emit)
+        details.emit(path, state, emit)
         identity = state.identity(path)
         model = identity.product.model if identity and identity.product else None
         if dirs := state.io_for(path):
