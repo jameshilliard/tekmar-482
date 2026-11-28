@@ -58,7 +58,7 @@ from .raw import CaptureGap
 from .water_topology import water_systems
 
 if TYPE_CHECKING:
-    from collections.abc import Iterable
+    from collections.abc import Callable, Iterable
 
     from ._native_payloads.climate import AirGroupConfiguration, AirReading
     from ._native_payloads.faults import NetworkFault
@@ -234,9 +234,19 @@ class _Peer:
 
 
 class NativeState:
-    """Retain reported values, not outbound commands, indexed by full receive path."""
+    """Retain reported values by path.
 
-    def __init__(self, paths: Iterable[NativePath] | None = None) -> None:
+    on_invalidate discards derived data for an assignment on replacement, move,
+    explicit forget or capture loss. Repeated compatible reports do not call it.
+    """
+
+    def __init__(
+        self,
+        paths: Iterable[NativePath] | None = None,
+        *,
+        on_invalidate: Callable[[NativePath], None] | None = None,
+    ) -> None:
+        self._on_invalidate = on_invalidate
         self._selected = None if paths is None else frozenset(paths)
         self._peers: defaultdict[NativePath, _Peer] = defaultdict(_Peer)
         self._moves: dict[NativePath, NativePath] = {}
@@ -403,11 +413,17 @@ class NativeState:
         )
         return tuple(sorted(self._peers.keys() | set(water)))
 
+    def _discard_peer(self, path: NativePath) -> _Peer | None:
+        peer = self._peers.pop(path, None)
+        if self._on_invalidate is not None:
+            self._on_invalidate(path)
+        return peer
+
     def forget(self, path: NativePath) -> bool:
         """Invalidate one path without recording a capture loss."""
         self._reidentify.add(path)
         self._moves.pop(path, None)
-        peer = self._peers.pop(path, None)
+        peer = self._discard_peer(path)
         if peer is not None and peer.air is not None and peer.air.cycle is not None:
             self._air_groups = AirGroupTargets()
         water = self._water.forget(path.port, path.address)
@@ -613,7 +629,7 @@ class NativeState:
         if changed:
             self._reidentify.update(changed)
             for p in changed:
-                self._peers.pop(p, None)
+                self._discard_peer(p)
                 self._moves.pop(p, None)
             self._moves[path] = previous
         return changed
@@ -638,7 +654,8 @@ class NativeState:
             if (old and (identity is None or identity.merge(old) is None)) or (
                 identity is not None and path in self._reidentify
             ):
-                peer = self._peers[path] = _Peer()
+                self._discard_peer(path)
+                peer = self._peers[path]
             if identity is not None:
                 self._reidentify.discard(path)
             elif old is not None:
@@ -756,7 +773,7 @@ class NativeState:
                 p for p in self._selected or changed if record.affects(p.port)
             )
             for path in changed:
-                self._peers.pop(path, None)
+                self._discard_peer(path)
             self._moves = {
                 path: old
                 for path, old in self._moves.items()

@@ -171,20 +171,24 @@ class PlantStateTests(unittest.TestCase):
         assert not monitor.observe(frame(0x34F, bytes(6)))
 
     def test_move_gap_and_replacement_discard_previous_equipment(self) -> None:
-        state = NativeState()
+        invalidated: list[NativePath] = []
+        state = NativeState(on_invalidate=invalidated.append)
         state.observe(identity(_402))
         state.observe(frame(0x24F, _STAGED))
         moved = NativePath(TEST_PATH.port, 0x62, 4)
         taking = frame(0x3E7, bytes([TEST_PATH.subnet, TEST_PATH.node]), moved)
         state.observe(taking)
+        assert invalidated == [TEST_PATH, moved]
         assert not state.water_sources and not state.plant_configurations
         state.observe(frame(0x24F, _MODULATING, moved))
         state.observe(identity(_402, path=moved))
+        assert invalidated == [TEST_PATH, moved, moved]
         assert (
             state.water_source(moved) is None
         )  # Stale pre-identification observations cannot follow a move.
         state.observe(frame(0x24F, _STAGED, moved))
         assert not state.observe(taking) and state.water_source(moved)
+        invalidated.clear()
         state.observe(CaptureGap(3))
         state.observe(frame(0x24F, _MODULATING, moved))
         state.observe(identity(_274, path=moved))
@@ -192,6 +196,9 @@ class PlantStateTests(unittest.TestCase):
         state.observe(frame(0x24F, _STAGED, moved))
         state.observe(identity(_402, path=moved))
         assert not state.water_sources
+        assert invalidated == [moved, moved, moved]
+        state.forget(moved)
+        assert invalidated == [moved] * 4
 
     def test_trace_gap_discards_only_the_affected_wires_native_samples(self) -> None:
         state = NativeState()
