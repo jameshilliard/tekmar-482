@@ -1058,6 +1058,26 @@ class FirmwareInteropTests(unittest.IsolatedAsyncioTestCase):
                 is SceneResponse.SCHEDULE
             )
 
+    async def test_thermostat_mode_rejects_a_replaced_peer(self) -> None:
+        port = 3
+        expected = NativeIdentity(105102, 1222, 2, None)  # Selected 553.
+        response = "6e723149 00003f c1a201 d20402"  # A 532 now claims the same node.
+        query = _block(port, "23 10000000", "0000", response)
+        # The next admissible transmission is a new read, never a setup or update.
+        async with _gateway((query, query)) as manager:
+            with self.assertRaises(NativeIdentityMismatchError) as raised:
+                await manager.write_thermostat_mode(
+                    port,
+                    _THERMOSTAT,
+                    ThermostatMode.HEAT,
+                    expected_identity=expected,
+                    preview=False,
+                )
+            assert raised.exception.expected == expected
+            assert raised.exception.observed == NativeIdentity(107201, 1234, 2, None)
+            reply = await manager.read_block(port, NativeBlockQuery(_THERMOSTAT, 0))
+            assert reply.body == bytes.fromhex(response)
+
     async def test_peer_address_move_aborts_an_admitted_edit(self) -> None:
         port = 3
         initial = _block(port, "23 10000000", "0500", "6e723148 05001f 2a212a211e")
