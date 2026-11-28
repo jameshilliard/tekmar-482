@@ -573,6 +573,11 @@ statistics and individual sensor inputs. Output separates the setup byte,
 reported byte, revision-corrected status role and display role. Unknown or
 conflicting roles and unusable words are not reported as temperatures.
 `unanswered_blocks` lists missing replies, not absent hardware.
+`ThermostatSensorMonitor` applies the same source-scoped freshness rules as
+`NativeState`: an unsupported report clears that sample, sensor setup
+changes retire affected inputs, and a gateway trace gap invalidates only
+the ports it covers. No later sample is accepted on an invalidated path
+until its identity is observed again.
 `read-device` and active `dump` include the same interpretation without
 extra reads.
 

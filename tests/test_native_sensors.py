@@ -3,6 +3,7 @@ import unittest
 
 from tekmar_482 import (
     CaptureGap,
+    GatewayTraceGap,
     NativeAddress,
     NativeFrame,
     NativeMessage,
@@ -44,6 +45,13 @@ def _product(number: int, j: int, z: int) -> bytes:
 
 
 class SensorMonitorTests(unittest.TestCase):
+    def test_unusable_identity_does_not_create_a_tracked_path(self) -> None:
+        cache = ThermostatSensorMonitor()
+        assert not cache.observe(_block(0, b"\x00"))
+        assert not cache.observe(_block(0, _product(105102, 0, 3)))
+        assert not cache.devices
+        assert not cache.observe(CaptureGap(1))
+
     def test_shared_product_number_requires_a_distinguishing_j_number(self) -> None:
         cache = ThermostatSensorMonitor()
         assert cache.observe(_block(0, b"\x07" + (10599181).to_bytes(3, "little")))
@@ -91,7 +99,8 @@ class SensorMonitorTests(unittest.TestCase):
         assert not cache.observe(
             _block(0x16, bytes.fromhex("11 00 01 02")),
         )  # Ambiguous.
-        assert not cache.observe(_block(0x16, bytes.fromhex("00")))
+        assert cache.observe(_block(0x16, bytes.fromhex("00")))
+        assert cache.devices[0].sensors.inputs[0].current_raw is None
         for data in ("03 00 f2", "04 05"):
             assert cache.observe(_block(0x16, bytes.fromhex(data)))
             assert cache.devices[0].sensors.inputs[0].current_raw is None
@@ -121,6 +130,68 @@ class SensorMonitorTests(unittest.TestCase):
         assert cache.observe(_block(0, _product(100103, 1162, 3), peer=other))
         assert cache.observe(CaptureGap(2))
         assert not cache.observe(CaptureGap(1))
+        assert not cache.devices
+
+    def test_setup_changes_and_updates_reconcile_like_native_state(self) -> None:
+        cache = ThermostatSensorMonitor()
+        state = NativeState()
+        paths = tuple(NativePath(p, _PEER.subnet, _PEER.node) for p in (1, 2))
+        for path in paths:
+            for report in (
+                _block(0, _product(105102, 1222, 3), port=path.port),
+                _block(0x0D, bytes.fromhex("07 01 02 04"), port=path.port),
+                _block(0x15, bytes.fromhex("03 0006"), port=path.port),
+                _block(0x17, bytes.fromhex("07 02 f305"), port=path.port),
+                _block(0x18, bytes.fromhex("07 04 c905"), port=path.port),
+            ):
+                assert cache.observe(report)
+                state.observe(report)
+
+        def matches() -> None:
+            assert [(item.port, item.sensors) for item in cache.devices] == [
+                (item.path.port, item.sensors) for item in state.thermostats
+            ]
+
+        matches()
+        # A changed setup retires the affected input and aggregate, not the
+        # other input or a thermostat on a different physical port.
+        changed = _block(0x0D, bytes.fromhex("07 01 05 04"))
+        assert cache.observe(changed)
+        state.observe(changed)
+        matches()
+        first, second = cache.devices
+        assert first.sensors.room is None
+        first_inputs = {item.slot: item for item in first.sensors.inputs}
+        assert first_inputs[SensorSlot.EXTERNAL_1].current_raw is None
+        assert first_inputs[SensorSlot.EXTERNAL_2].current_raw == 0x05C9
+        assert second.sensors.room and second.sensors.room.average_raw == 0x0600
+
+        # An addressed update invalidates only that physical destination.
+        # A short update has no effect and cannot erase supported readings.
+        sender = NativeAddress(0, 0)
+        payload = bytes([_PEER.subnet, _PEER.node, 0x0D, 0, 1, 2, 4, 0, 0])
+        short = NativeFrame(2, 0, NativeMessage(0x2DF, sender, payload[:5]).to_bytes())
+        assert not cache.observe(short) and not state.observe(short)
+        update = NativeFrame(2, 0, NativeMessage(0x2DF, sender, payload).to_bytes())
+        assert cache.observe(update)
+        assert state.observe(update) == (paths[1],)
+        matches()
+        assert cache.devices[1].sensors.room is None
+        assert cache.devices[0].sensors.inputs == first.sensors.inputs
+
+    def test_gateway_gap_only_invalidates_affected_port(self) -> None:
+        cache = ThermostatSensorMonitor()
+        for port in (1, 2):
+            assert cache.observe(_block(0, _product(105102, 1222, 3), port=port))
+            assert cache.observe(_block(0x17, bytes.fromhex("07 02 f305"), port=port))
+        unaffected = cache.devices[1]
+        assert cache.observe(GatewayTraceGap(2, 1 << 1))
+        assert cache.devices == (unaffected,)
+        assert not cache.observe(GatewayTraceGap(1, 1 << 1))
+        assert not cache.observe(_block(0x17, bytes.fromhex("07 02 f305")))
+        assert cache.observe(_block(0, _product(105102, 1222, 3)))
+        assert not cache.devices[0].sensors.inputs
+        assert cache.observe(CaptureGap(1))
         assert not cache.devices
 
 
@@ -215,6 +286,14 @@ class SensorReadTests(unittest.IsolatedAsyncioTestCase):
         sample = await read_thermostat_sensors(self.stream, 1, _PEER, timeout=0.02)
         assert sample.unanswered_blocks == (0x15, 0x17)
         assert self.sent == [0, 0x15] and sample.device.sensors.room is None
+
+    async def test_zero_support_retires_samples_in_read_and_snapshot(self) -> None:
+        self.blocks[0x17] = bytes.fromhex("00")
+        sample = await read_thermostat_sensors(self.stream, 1, _PEER, timeout=0.02)
+        assert sample.unanswered_blocks == ()
+        assert NativeSnapshot(sample.batches, ()).thermostat_sensors == (sample.device,)
+        (sensor,) = sample.device.sensors.inputs
+        assert sensor.current_raw is None and sensor.current_f is None
 
     async def test_non_thermostat_is_not_probed_for_thermostat_sensors(self) -> None:
         self.blocks[0] = _product(105801, 1226, 0)

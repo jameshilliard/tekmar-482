@@ -46,6 +46,7 @@ from tekmar_482 import (
     ScheduleEvent,
     ScheduleSetupChange,
     ScheduleTarget,
+    SensorSlot,
     SetpointApplication,
     SetpointSlot,
     SetpointTargetChange,
@@ -60,6 +61,7 @@ from tekmar_482 import (
     StatusRequest,
     TargetSlot,
     ThermostatMode,
+    ThermostatSensorMonitor,
     ThermostatTarget,
     ThermostatTargetChange,
     TraceOrigin,
@@ -69,6 +71,7 @@ from tekmar_482 import (
     WaterDetection,
     WritableBlock,
     read_io_directory,
+    read_thermostat_sensors,
     read_weekly_schedule,
     watch_native,
 )
@@ -486,6 +489,41 @@ class FirmwareInteropTests(unittest.IsolatedAsyncioTestCase):
             )
             await complete.wait()
             watch.cancel()
+
+    async def test_sensor_readback_and_zero_mask_through_normal_firmware(self) -> None:
+        script = tuple(
+            _block(3, "23 10000000", block, report)
+            for block, report in (
+                ("0000", "6e723149 00003f c1a201 d20405"),
+                ("0d00", "6e723145 0d0003 0102"),
+                ("1500", "6e723145 150003 0006"),
+                ("1700", "6e723146 170007 02f505"),
+                ("1800", "6e723143 180000"),
+                ("1700", "6e723143 170000"),
+            )
+        )
+        async with _gateway(script) as manager:
+            result = await read_thermostat_sensors(manager, 3, _THERMOSTAT)
+            assert not result.unanswered_blocks
+            monitor = ThermostatSensorMonitor.from_batches(result.batches)
+            assert monitor.devices == (result.device,)
+            inputs = {item.slot: item for item in monitor.devices[0].sensors.inputs}
+            assert inputs[SensorSlot.EXTERNAL_1].current_raw == 0x05F5
+            replacement = await manager.read_block_group(
+                3,
+                NativeBlockQuery(_THERMOSTAT, 0x17),
+            )
+            assert monitor.observe(replacement.require_report())
+            inputs = {item.slot: item for item in monitor.devices[0].sensors.inputs}
+            assert inputs[SensorSlot.EXTERNAL_1].current_raw is None
+            snapshot = NativeSnapshot((*result.batches, replacement), ())
+            (read_sensors,) = snapshot.thermostat_sensors
+            (read_climate,) = snapshot.thermostats
+            assert (
+                read_sensors.sensors
+                == read_climate.sensors
+                == monitor.devices[0].sensors
+            )
 
     async def test_thermostat_equipment_blocks_through_normal_firmware(self) -> None:
         script = tuple(
