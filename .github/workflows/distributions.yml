@@ -33,14 +33,19 @@ jobs:
         run: python3 tools/bundle_firmware.py --check
       - name: Build source distribution including the pinned flash image
         run: uv build --sdist
+        env:
+          # Older uv readers cannot extract the new writer's extended headers.
+          UV_LEGACY_TAR_BACKEND: "1"
       - name: Verify distribution contents
         run: python3 -m tools.check_distributions dist
       - name: Install from the sdist without the firmware toolchain or checkout
         working-directory: ${{ runner.temp }}
         run: |
-          uv run --isolated --no-project --with "$GITHUB_WORKSPACE"/dist/*.tar.gz python -c \
-            'import sys; from tekmar_482 import FirmwareBundle; assert FirmwareBundle.load().revision == sys.argv[1]' \
-            "$(git -C "$GITHUB_WORKSPACE/firmware" rev-parse HEAD)"
+          set -- "$GITHUB_WORKSPACE"/dist/*.tar.gz
+          revision="$(git -C "$GITHUB_WORKSPACE/firmware" rev-parse HEAD)"
+          check='import sys; from tekmar_482 import FirmwareBundle; assert FirmwareBundle.load().revision == sys.argv[1]'
+          uv run --isolated --no-project --python 3.14 --with "$1" python -c "$check" "$revision"
+          uvx --from 'uv==0.9.11' uv run --isolated --no-project --python 3.14 --with "$1" python -c "$check" "$revision"
       - uses: actions/upload-artifact@v7
         id: sdist
         with:

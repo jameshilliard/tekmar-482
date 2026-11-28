@@ -1380,10 +1380,11 @@ Stop any other serial client before programming.
 An editable Git checkout has no flash image. To build the release locally,
 initialize the submodule with `git submodule update --init firmware`, install
 GNU Arm binutils and the firmware's pinned Rust toolchain, and run
-`uv build --sdist`. The build stages the image only while creating the archive.
+`UV_LEGACY_TAR_BACKEND=1 uv build --sdist`. The release workflow uses the
+same archive writer for compatibility with older uv installers. The build
+stages the image only while creating the archive.
 Use the flash installer for development hardware and persistent deployment.
-To test a local revision, run the bundled CLI directly from the sdist
-(tested with uv 0.11.20):
+To test a local revision, run the bundled CLI directly from the sdist:
 `uvx --from 'dist/tekmar_482-0.1.0.tar.gz[serial]' tekmar-482 update --serial "$PORT"`.
 An already-current custom build is not rewritten.
 An application advertising an unsupported custom wire version is not
@@ -1808,7 +1809,8 @@ for this repository, workflow `distributions.yml`, and GitHub environment
 before creating a release.
 
 Publish a GitHub Release from a tested commit with tag `v<project.version>`
-(for example, `v0.1.0`). CI checks the tag, builds and installs the source
-archive with the pinned firmware, and publishes that same archive to PyPI.
+(for example, `v0.1.0`). CI checks the tag, builds the source archive with
+the pinned firmware, verifies installation with current uv and uv 0.9.11,
+and publishes that same archive to PyPI.
 Pushes and pull requests only build and verify the artifact. They cannot
 publish a package.
